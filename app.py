@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -77,6 +79,44 @@ _TIMING_RE = re.compile(
     r"^\s*timing\(([+-]?\d+),([+-]?\d+(?:\.\d+)?),([+-]?\d+(?:\.\d+)?)\);\s*$",
     re.IGNORECASE,
 )
+_AUDIO_OFFSET_RE = re.compile(r"^\s*AudioOffset\s*:\s*([+-]?\d+)\s*$", re.IGNORECASE)
+CAMERA_SCENE_WARNING = (
+    "当前切片已缩放事件起始时间，但部分 Camera/Scenecontrol 持续时间参数尚未随倍速缩放，"
+    "演出效果可能不完全一致。"
+)
+AUDIO_OFFSET_WARNING = (
+    "检测到非零 AudioOffset；当前版本未对音频裁切时间与 AFF Offset 做专门换算，"
+    "切片边界可能需要后续人工核验。"
+)
+NONLINEAR_ARC_EASINGS = {"b", "si", "so", "sisi", "siso", "sosi", "soso"}
+ARC_CUT_WARNING_LABEL = "⚠ 非线性 Arc 截断：近似"
+_ARC_LINE_RE = re.compile(
+    r"\s*arc\(([+-]?\d+),([+-]?\d+),(.*)\)\s*(\[(.*)\])?;\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_speed_text(text: str) -> float:
+    raw = text.strip()
+    if not raw:
+        raise ValueError("速度不能为空")
+    try:
+        speed = float(raw)
+    except ValueError as ex:
+        raise ValueError("速度必须是数字") from ex
+    return validate_speed_value(speed)
+
+
+def validate_speed_value(speed: float) -> float:
+    if not math.isfinite(speed):
+        raise ValueError("速度必须是有限数字")
+    if speed <= 0:
+        raise ValueError("速度必须大于 0")
+    return speed
+
+
+def is_sliceable_song_dir(path: Path) -> bool:
+    return path.is_dir() and (path / "base.ogg").is_file() and (path / "2.aff").is_file()
 
 
 def _extract_header_and_body(text: str) -> tuple[list[str], list[str]]:
@@ -96,11 +136,158 @@ def _extract_header_and_body(text: str) -> tuple[list[str], list[str]]:
 def _parse_timings(lines: list[str]) -> list[tuple[int, float, float]]:
     out = []
     for ln in lines:
-        m = _TIMING_RE.match(ln.replace(" ", ""))
-        if m:
-            out.append((int(m.group(1)), float(m.group(2)), float(m.group(3))))
+        parsed = _parse_timing_line(ln)
+        if parsed:
+            out.append(parsed)
     out.sort(key=lambda x: x[0])
     return out
+
+
+def _parse_timing_line(line: str) -> tuple[int, float, float] | None:
+    m = _TIMING_RE.match(line.replace(" ", ""))
+    if not m:
+        return None
+    return int(m.group(1)), float(m.group(2)), float(m.group(3))
+
+
+def _parse_outer_timings(lines: list[str]) -> list[tuple[int, float, float]]:
+    out, i = [], 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if stripped.lower().startswith("timinggroup"):
+            hdr = stripped
+            if "{" not in hdr and i + 1 < len(lines) and "{" in lines[i + 1]:
+                i += 1
+                hdr = hdr + " " + lines[i].strip()
+            if "{" in hdr:
+                brace = hdr.count("{") - hdr.count("}")
+                i += 1
+                while i < len(lines) and brace > 0:
+                    brace += lines[i].count("{") - lines[i].count("}")
+                    i += 1
+                continue
+        parsed = _parse_timing_line(stripped)
+        if parsed:
+            out.append(parsed)
+        i += 1
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def _choose_effective_timing(timings: list[tuple[int, float, float]], start_ms: int) -> tuple[int, float, float] | None:
+    if not timings:
+        return None
+    chosen = None
+    for timing in timings:
+        if timing[0] <= start_ms:
+            chosen = timing
+        else:
+            break
+    return chosen or timings[0]
+
+
+def _timing_line(t: int, bpm: float, beats: float, speed: float) -> str:
+    # Gate 0 rule: event time scales by 1/speed, Timing BPM scales by speed.
+    return f"timing({t},{bpm * speed:.2f},{beats:.2f});"
+
+
+def _has_timing_zero(lines: list[str]) -> bool:
+    return any(re.match(r"\s*timing\(0,", ln.replace(" ", ""), re.IGNORECASE) for ln in lines)
+
+
+def _has_outer_timing_zero(lines: list[str]) -> bool:
+    return any(timing[0] == 0 for timing in _parse_outer_timings(lines))
+
+
+def _has_nonempty_statement(lines: list[str]) -> bool:
+    return any(ln.strip() for ln in lines)
+
+
+def _audio_offset_value(header: list[str]) -> int | None:
+    for line in header:
+        m = _AUDIO_OFFSET_RE.match(line)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _linear(p: float) -> float:
+    return p
+
+
+def _sine_out(p: float) -> float:
+    return math.sin(math.pi * p / 2.0)
+
+
+def _sine_in(p: float) -> float:
+    return 1.0 - math.cos(math.pi * p / 2.0)
+
+
+def _bezier(p: float) -> float:
+    return 3.0 * p * p - 2.0 * p * p * p
+
+
+def _axis_easing(easing: str):
+    # AFF shorthand is axis-specific: si=(Sine Out, Linear), so=(Sine In, Linear).
+    table = {
+        "b": (_bezier, _bezier),
+        "s": (_linear, _linear),
+        "si": (_sine_out, _linear),
+        "so": (_sine_in, _linear),
+        "sisi": (_sine_out, _sine_out),
+        "siso": (_sine_out, _sine_in),
+        "sosi": (_sine_in, _sine_out),
+        "soso": (_sine_in, _sine_in),
+    }
+    return table.get(easing.lower(), (_linear, _linear))
+
+
+def _clamp01(v: float) -> float:
+    return max(0.0, min(1.0, v))
+
+
+def arc_position_at(
+    t: float,
+    t1: float,
+    t2: float,
+    x1: float,
+    x2: float,
+    y1: float,
+    y2: float,
+    easing: str,
+) -> tuple[float, float]:
+    if t1 == t2:
+        raise ValueError("zero-duration Arc has no continuous progress")
+    # Preserve declared direction. For t1 > t2 this denominator is negative by design.
+    p = _clamp01((t - t1) / (t2 - t1))
+    fx, fy = _axis_easing(easing)
+    return x1 + (x2 - x1) * fx(p), y1 + (y2 - y1) * fy(p)
+
+
+def _fmt_float(v: float) -> str:
+    if abs(v) < 0.0000005:
+        v = 0.0
+    s = f"{v:.6f}".rstrip("0").rstrip(".")
+    return s or "0"
+
+
+def _fmt_arc_coord(v: float) -> str:
+    if abs(v) < 0.0000005:
+        v = 0.0
+    return f"{v:.6f}"
+
+
+def _split_arc_fields(body_inside: str) -> list[str]:
+    return [part.strip() for part in body_inside.split(",")]
+
+
+def _scale_bpm_string(value: str, speed: float) -> str:
+    # Only scale a single numeric display BPM. Ranges like "120-180" stay untouched.
+    raw = value.strip()
+    if not re.fullmatch(r"[+-]?\d+(?:\.\d+)?", raw):
+        return value
+    scaled = round(float(raw) * speed, 2)
+    return str(int(scaled) if scaled == int(scaled) else scaled)
 
 
 def _tt(t: int, start: int, speed: float) -> int:
@@ -116,7 +303,129 @@ def _overlap(t1: int, t2: int, s: int, e: int) -> bool:
     return not (b < s or a > e)
 
 
-def _slice_line(line: str, s: int, e: int, start: int, speed: float) -> str | None:
+def _parse_arc_cut_candidate(line: str) -> dict | None:
+    m = _ARC_LINE_RE.match(line.strip())
+    if not m:
+        return None
+
+    t1, t2 = int(m.group(1)), int(m.group(2))
+    if t1 == t2:
+        return None
+
+    fields = _split_arc_fields(m.group(3))
+    if len(fields) < 5:
+        return None
+
+    easing = fields[2].strip().lower()
+    if easing not in NONLINEAR_ARC_EASINGS:
+        return None
+
+    low, high = min(t1, t2), max(t1, t2)
+    return {"t1": t1, "t2": t2, "low": low, "high": high, "easing": easing}
+
+
+def find_nonlinear_arc_cut_warnings(aff_text: str, segments: list[dict]) -> dict[int, dict[str, list[dict]]]:
+    _, body = _extract_header_and_body(aff_text)
+    arcs = []
+    for line in body:
+        arc = _parse_arc_cut_candidate(line)
+        if arc:
+            arcs.append(arc)
+
+    warnings: dict[int, dict[str, list[dict]]] = {}
+    for index, seg in enumerate(segments):
+        warnings[index] = {"start": [], "end": []}
+        try:
+            start_ms = int(seg["s"])
+            end_ms = int(seg["e"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        for arc in arcs:
+            # Boundary equality is intentionally not a warning; only mid-arc cuts are approximate.
+            if arc["low"] < start_ms < arc["high"]:
+                warnings[index]["start"].append(dict(arc))
+            if arc["low"] < end_ms < arc["high"]:
+                warnings[index]["end"].append(dict(arc))
+    return warnings
+
+
+def _arc_cut_warning_tooltip(hits: list[dict]) -> str:
+    counts: dict[str, int] = {}
+    for hit in hits:
+        easing = str(hit.get("easing", "?"))
+        counts[easing] = counts.get(easing, 0) + 1
+    summary = "，".join(f"{easing} × {count}" for easing, count in counts.items())
+    return (
+        f"此切点截断 {len(hits)} 条非线性 Arc：{summary}。\n"
+        "当前版本会正确计算边界坐标，但 Arc 内部轨迹仅为近似。"
+    )
+
+
+def _slice_arc_line(stripped: str, s: int, e: int, start: int, speed: float) -> str | None:
+    m = _ARC_LINE_RE.match(stripped)
+    if not m:
+        return None
+
+    t1, t2 = int(m.group(1)), int(m.group(2))
+    low, high = min(t1, t2), max(t1, t2)
+    if not _overlap(t1, t2, s, e):
+        return ""
+
+    fields = _split_arc_fields(m.group(3))
+    if len(fields) < 8:
+        return stripped
+
+    if t1 == t2:
+        if not (s <= t1 <= e):
+            return ""
+        ot = _tt(t1, start, speed)
+        try:
+            new_fields = [
+                _fmt_arc_coord(float(fields[0])),
+                _fmt_arc_coord(float(fields[1])),
+                fields[2],
+                _fmt_arc_coord(float(fields[3])),
+                _fmt_arc_coord(float(fields[4])),
+                *fields[5:],
+            ]
+        except (ValueError, IndexError):
+            return stripped
+        result = f"arc({ot},{ot},{','.join(new_fields)})"
+    else:
+        try:
+            x1, x2 = float(fields[0]), float(fields[1])
+            easing = fields[2]
+            y1, y2 = float(fields[3]), float(fields[4])
+        except (ValueError, IndexError):
+            return stripped
+
+        # Clamp each declared endpoint independently to keep t1 > t2 direction intact.
+        nt1, nt2 = _clamp(t1, s, e), _clamp(t2, s, e)
+        nx1, ny1 = arc_position_at(nt1, t1, t2, x1, x2, y1, y2, easing)
+        nx2, ny2 = arc_position_at(nt2, t1, t2, x1, x2, y1, y2, easing)
+        new_fields = [
+            _fmt_arc_coord(nx1),
+            _fmt_arc_coord(nx2),
+            fields[2],
+            _fmt_arc_coord(ny1),
+            _fmt_arc_coord(ny2),
+            *fields[5:],
+        ]
+        result = f"arc({_tt(nt1,start,speed)},{_tt(nt2,start,speed)},{','.join(new_fields)})"
+
+    taps_blob = m.group(5)
+    if taps_blob:
+        kept = [
+            f"arctap({_tt(int(tm.group(1)),start,speed)})"
+            for tm in re.finditer(r"arctap\(([+-]?\d+)\)", taps_blob, re.IGNORECASE)
+            if max(low, s) <= int(tm.group(1)) <= min(high, e)
+        ]
+        result += ("[" + ",".join(kept) + "]") if kept else "[]"
+    return result + ";"
+
+
+def _slice_line(line: str, s: int, e: int, start: int, speed: float, warnings: set[str] | None = None) -> str | None:
     stripped = line.strip()
     if not stripped:
         return ""
@@ -130,7 +439,7 @@ def _slice_line(line: str, s: int, e: int, start: int, speed: float) -> str | No
         t = int(m.group(1))
         if not (s <= t <= e):
             return None
-        return f"timing({_tt(t,start,speed)},{float(m.group(2)):.2f},{float(m.group(3)):.2f});"
+        return _timing_line(_tt(t, start, speed), float(m.group(2)), float(m.group(3)), speed)
 
     for pat, prefix in [
         (r"\s*camera\((\d+),(.*)\);\s*", "camera"),
@@ -138,6 +447,8 @@ def _slice_line(line: str, s: int, e: int, start: int, speed: float) -> str | No
     ]:
         m = re.match(pat, stripped, re.IGNORECASE)
         if m:
+            if warnings is not None:
+                warnings.add(CAMERA_SCENE_WARNING)
             t = int(m.group(1))
             if not (s <= t <= e):
                 return None
@@ -158,29 +469,16 @@ def _slice_line(line: str, s: int, e: int, start: int, speed: float) -> str | No
         nt1, nt2 = _clamp(t1, s, e), _clamp(t2, s, e)
         return re.sub(r"hold\(\d+,\d+,", f"hold({_tt(nt1,start,speed)},{_tt(nt2,start,speed)},", stripped, flags=re.IGNORECASE)
 
-    m = re.match(r"\s*arc\((\d+),(\d+),(.*)\)\s*(\[(.*)\])?;\s*", stripped, re.IGNORECASE)
-    if m:
-        t1, t2 = int(m.group(1)), int(m.group(2))
-        if not _overlap(t1, t2, s, e):
-            return None
-        nt1, nt2 = _clamp(t1, s, e), _clamp(t2, s, e)
-        ot1, ot2 = _tt(nt1, start, speed), _tt(nt2, start, speed)
-        body_inside = m.group(3)
-        taps_blob   = m.group(5)
-        result = f"arc({ot1},{ot2},{body_inside})"
-        if taps_blob:
-            kept = [
-                f"arctap({_tt(int(tm.group(1)),start,speed)})"
-                for tm in re.finditer(r"arctap\((\d+)\)", taps_blob, re.IGNORECASE)
-                if nt1 <= int(tm.group(1)) <= nt2
-            ]
-            result += ("[" + ",".join(kept) + "]") if kept else "[]"
-        return result + ";"
+    sliced_arc = _slice_arc_line(stripped, s, e, start, speed)
+    if sliced_arc == "":
+        return None
+    if sliced_arc is not None:
+        return sliced_arc
 
     return stripped
 
 
-def _slice_block(lines: list[str], s: int, e: int, start: int, speed: float) -> list[str]:
+def _slice_block(lines: list[str], s: int, e: int, start: int, speed: float, warnings: set[str] | None = None) -> list[str]:
     out, i = [], 0
     while i < len(lines):
         line    = lines[i]
@@ -199,11 +497,18 @@ def _slice_block(lines: list[str], s: int, e: int, start: int, speed: float) -> 
                     if brace > 0:
                         inner.append(l2)
                     i += 1
-                out.append(hdr.split("{", 1)[0].rstrip() + "{")
-                out.extend(_slice_block(inner, s, e, start, speed))
-                out.append("};")
+                inner_timings = _parse_timings(inner)
+                sliced_inner = _slice_block(inner, s, e, start, speed, warnings)
+                if _has_nonempty_statement(sliced_inner):
+                    if not _has_timing_zero(sliced_inner):
+                        chosen = _choose_effective_timing(inner_timings, s)
+                        if chosen:
+                            sliced_inner.insert(0, _timing_line(0, chosen[1], chosen[2], speed))
+                    out.append(hdr.split("{", 1)[0].rstrip() + "{")
+                    out.extend(sliced_inner)
+                    out.append("};")
                 continue
-        sliced = _slice_line(line, s, e, start, speed)
+        sliced = _slice_line(line, s, e, start, speed, warnings)
         if sliced is not None:
             out.append(sliced)
         i += 1
@@ -212,25 +517,27 @@ def _slice_block(lines: list[str], s: int, e: int, start: int, speed: float) -> 
     return out
 
 
-def slice_aff(aff_text: str, start_ms: int, end_ms: int, speed: float) -> str:
+def slice_aff(aff_text: str, start_ms: int, end_ms: int, speed: float, warnings: list[str] | None = None) -> str:
+    validate_speed_value(speed)
     header, body = _extract_header_and_body(aff_text)
-    timings = _parse_timings(body)
-    base_line: str | None = None
-    if timings:
-        chosen = None
-        for t in timings:
-            if t[0] <= start_ms:
-                chosen = t
-            else:
-                break
-        chosen = chosen or timings[0]
-        base_line = f"timing(0,{chosen[1]:.2f},{chosen[2]:.2f});"
+    warning_set: set[str] = set()
+    audio_offset = _audio_offset_value(header)
+    if audio_offset not in (None, 0):
+        # AudioOffset is intentionally preserved for Gate 0; no timing conversion is applied yet.
+        warning_set.add(AUDIO_OFFSET_WARNING)
 
-    out_body = _slice_block(body, start_ms, end_ms, start_ms, speed)
+    timings = _parse_outer_timings(body)
+    base_line: str | None = None
+    chosen = _choose_effective_timing(timings, start_ms)
+    if chosen:
+        base_line = _timing_line(0, chosen[1], chosen[2], speed)
+
+    out_body = _slice_block(body, start_ms, end_ms, start_ms, speed, warning_set)
     if base_line:
-        has_t0 = any(re.match(r"\s*timing\(0,", ln.replace(" ", ""), re.IGNORECASE) for ln in out_body)
-        if not has_t0:
+        if not _has_outer_timing_zero(out_body):
             out_body.insert(0, base_line)
+    if warnings is not None:
+        warnings.extend(sorted(warning_set))
     return "\n".join(header + out_body).rstrip() + "\n"
 
 
@@ -248,6 +555,7 @@ def _get_ffmpeg() -> str:
 
 
 def _atempo(speed: float) -> str:
+    validate_speed_value(speed)
     parts, rem = [], speed
     while rem > 2.0:
         parts.append(2.0)
@@ -260,6 +568,7 @@ def _atempo(speed: float) -> str:
 
 
 def slice_ogg(in_path: Path, out_path: Path, start_ms: int, end_ms: int, speed: float) -> None:
+    validate_speed_value(speed)
     ffmpeg = _get_ffmpeg()
     cmd = [
         ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
@@ -305,11 +614,7 @@ def make_songlist_fragment(new_id: str, start_ms: int, end_ms: int, speed: float
             if k in out and isinstance(out[k], (int, float)):
                 out[k] = round(out[k] * speed, 2)
         if "bpm" in out and isinstance(out["bpm"], str):
-            try:
-                v = round(float(out["bpm"].strip()) * speed, 2)
-                out["bpm"] = str(int(v) if v == int(v) else v)
-            except (ValueError, TypeError):
-                pass
+            out["bpm"] = _scale_bpm_string(out["bpm"], speed)
     return {"songs": [out]}
 
 
@@ -326,13 +631,14 @@ def make_songlist_entry(
     """根据用户填写的 meta 生成单段 songlist JSON（{"songs": [...]}）。"""
     clip_ms = int(round((end_ms - start_ms) / speed))
     bpm_base = round(meta["bpm_base"] * speed, 2) if abs(speed - 1.0) > 1e-9 else meta["bpm_base"]
+    bpm = _scale_bpm_string(meta["bpm"], speed) if abs(speed - 1.0) > 1e-9 else meta["bpm"]
     title = f"{meta['title_base']} {seg_index + 1:02d}".strip()
     return {
         "songs": [{
             "id": folder_name,
             "title_localized": {"en": title},
             "artist": meta["artist"],
-            "bpm": meta["bpm"],
+            "bpm": bpm,
             "bpm_base": bpm_base,
             "set": meta["set"] or "single",
             "purchase": meta["purchase"],
@@ -361,6 +667,12 @@ def do_slice(
     log_fn,
     songlist_meta: dict | None = None,
 ) -> int:
+    try:
+        validate_speed_value(speed)
+    except ValueError as ex:
+        log_fn(f"✗ 速度无效: {ex}", "err")
+        return 1
+
     try:
         ffp = _get_ffmpeg()
         log_fn(f"  ffmpeg: {ffp}", "muted")
@@ -401,7 +713,10 @@ def do_slice(
             return 1
 
         log_fn(f"  ✎ 谱面 {s}ms – {e}ms…", "normal")
-        new_aff = slice_aff(in_aff.read_text(encoding="utf-8", errors="replace"), s, e, speed)
+        aff_warnings: list[str] = []
+        new_aff = slice_aff(in_aff.read_text(encoding="utf-8", errors="replace"), s, e, speed, aff_warnings)
+        for warning in aff_warnings:
+            log_fn(f"  ⚠ {warning}", "muted")
         (out_dir / "2.aff").write_text(new_aff, encoding="utf-8")
 
         frag = make_songlist_fragment(new_id, s, e, speed)
@@ -476,6 +791,202 @@ class SlicerWorker(QThread):
         if code == 0:
             log("✓ 全部完成！输出目录: out/songs/", "ok")
         self.done_signal.emit(code)
+
+
+# ─── WebView API ─────────────────────────────────────────────────────────────
+
+class ArcWebApi:
+    """pywebview bridge used by ui.html."""
+
+    def __init__(self):
+        self._window = None
+        self._running = False
+
+    def bind_window(self, window) -> None:
+        self._window = window
+
+    def _safe_segments(self, segments) -> list[dict]:
+        if not isinstance(segments, list):
+            return []
+        out = []
+        for seg in segments:
+            if not isinstance(seg, dict):
+                out.append({"s": 0, "e": 0})
+                continue
+            try:
+                out.append({"s": int(seg.get("s", 0)), "e": int(seg.get("e", 0))})
+            except (TypeError, ValueError):
+                out.append({"s": 0, "e": 0})
+        return out
+
+    def _empty_arc_warnings(self, segments) -> dict[int, dict[str, list[dict]]]:
+        return {i: {"start": [], "end": []} for i in range(len(self._safe_segments(segments)))}
+
+    def _arc_warning_error(self, segments, message: str, detail: str) -> dict:
+        out = self._empty_arc_warnings(segments)
+        out["__error"] = {"message": message, "detail": detail}
+        return out
+
+    def _songs_dir(self) -> Path:
+        return Path(load_config().get("songs_dir", str(BASE_DIR / "songs")))
+
+    def _emit_log(self, text: str, kind: str = "normal") -> None:
+        if not self._window:
+            return
+        self._window.evaluate_js(f"window.__arcLog({json.dumps(text)}, {json.dumps(kind)});")
+
+    def _emit_done(self, code: int) -> None:
+        if not self._window:
+            return
+        self._window.evaluate_js(f"window.__arcDone({int(code)});")
+
+    def get_config(self) -> dict:
+        return load_config()
+
+    def get_songs(self) -> list[str]:
+        songs_dir = self._songs_dir()
+        if not songs_dir.is_dir():
+            return []
+        return sorted(item.name for item in songs_dir.iterdir() if is_sliceable_song_dir(item))
+
+    def get_slides(self) -> dict:
+        if not SLIDES_PATH.exists():
+            return {}
+        try:
+            return json.loads(SLIDES_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def save_slides(self, data: dict) -> dict:
+        SLIDES_PATH.write_text(json.dumps(data or {}, indent=2, ensure_ascii=False), encoding="utf-8")
+        return {"ok": True, "path": str(SLIDES_PATH)}
+
+    def get_arc_cut_warnings(self, song_id, segments) -> dict:
+        safe_segments = self._safe_segments(segments)
+        empty = {i: {"start": [], "end": []} for i in range(len(safe_segments))}
+        if not song_id or not isinstance(song_id, str):
+            return self._arc_warning_error(safe_segments, "song_id 为空", repr(song_id))
+
+        try:
+            song_path = Path(song_id)
+            if song_path.is_absolute() or song_path.name != song_id:
+                return self._arc_warning_error(
+                    safe_segments,
+                    "非法 song_id",
+                    repr(song_id),
+                )
+            songs_dir = self._songs_dir()
+            aff_path = songs_dir / song_id / "2.aff"
+            if not aff_path.is_file():
+                return self._arc_warning_error(safe_segments, "未找到 2.aff", str(aff_path.resolve(strict=False)))
+            aff_text = aff_path.read_text(encoding="utf-8", errors="replace")
+            return find_nonlinear_arc_cut_warnings(aff_text, safe_segments)
+        except Exception as ex:
+            return self._arc_warning_error(safe_segments, "读取谱面失败", repr(ex))
+
+    def run_slicer(self, data: dict) -> dict:
+        if self._running:
+            return {"ok": False, "msg": "任务正在运行"}
+        self._running = True
+
+        def work():
+            code = 1
+            try:
+                song_id = str((data or {}).get("song_id", ""))
+                speed = validate_speed_value(float((data or {}).get("speed", 1.0)))
+                segments = self._safe_segments((data or {}).get("segments", []))
+                self._emit_log("  songs 目录: " + str(self._songs_dir()), "muted")
+                self._emit_log(f"  曲目: {song_id}  速度: {speed}  段数: {len(segments)}", "muted")
+                code = do_slice(self._songs_dir(), song_id, segments, speed, self._emit_log, None)
+                if code == 0:
+                    self._emit_log("✓ 全部完成！输出目录: out/songs/", "ok")
+            except Exception as ex:
+                self._emit_log(f"✗ {ex}", "err")
+            finally:
+                self._running = False
+                self._emit_done(code)
+
+        threading.Thread(target=work, daemon=True).start()
+        return {"ok": True}
+
+    def browse_songs_dir(self) -> dict:
+        if not self._window:
+            return {"ok": False, "msg": "窗口未就绪"}
+        try:
+            import webview
+
+            result = self._window.create_file_dialog(webview.FOLDER_DIALOG, directory=str(self._songs_dir()))
+            if not result:
+                return {"ok": False, "msg": "已取消"}
+            path = result[0] if isinstance(result, (list, tuple)) else result
+            cfg = load_config()
+            cfg["songs_dir"] = str(path)
+            save_config(cfg)
+            return {"ok": True, "songs_dir": str(path)}
+        except Exception as ex:
+            return {"ok": False, "msg": str(ex)}
+
+    def _import_song_folder(self, src: Path) -> dict:
+        songs_dir = self._songs_dir()
+        songs_dir.mkdir(parents=True, exist_ok=True)
+        dest = songs_dir / src.name
+        if dest.resolve() == src.resolve():
+            return {"ok": True, "msg": f"{src.name} 已在 songs 目录中", "song_id": src.name}
+        if dest.exists():
+            return {"ok": True, "msg": f"{src.name} 已存在", "song_id": src.name}
+        try:
+            if sys.platform == "win32":
+                subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", str(dest), str(src)],
+                    check=True, capture_output=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+            else:
+                os.symlink(src, dest)
+            return {"ok": True, "msg": f"已添加 {src.name}", "song_id": src.name}
+        except Exception:
+            shutil.copytree(src, dest)
+            return {"ok": True, "msg": f"已复制 {src.name}", "song_id": src.name}
+
+    def add_song_folder_path(self, src_path: str) -> dict:
+        try:
+            if not src_path or not isinstance(src_path, str):
+                return {"ok": False, "msg": "路径为空"}
+            src = Path(src_path)
+            if not src.exists():
+                return {"ok": False, "msg": "目录不存在"}
+            if not src.is_dir():
+                return {"ok": False, "msg": "请拖入歌曲文件夹，而不是单个文件。"}
+            return self._import_song_folder(src)
+        except Exception as ex:
+            return {"ok": False, "msg": str(ex)}
+
+    def add_song_folder(self) -> dict:
+        if not self._window:
+            return {"ok": False, "msg": "窗口未就绪"}
+        try:
+            import webview
+
+            result = self._window.create_file_dialog(webview.FOLDER_DIALOG, directory=str(BASE_DIR))
+            if not result:
+                return {"ok": False, "msg": "已取消"}
+            src = Path(result[0] if isinstance(result, (list, tuple)) else result)
+            return self.add_song_folder_path(str(src))
+        except Exception as ex:
+            return {"ok": False, "msg": str(ex)}
+
+    def open_out(self) -> dict:
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            if sys.platform == "win32":
+                os.startfile(OUT_DIR)
+            elif sys.platform == "darwin":
+                subprocess.run(["open", str(OUT_DIR)])
+            else:
+                subprocess.run(["xdg-open", str(OUT_DIR)])
+            return {"ok": True}
+        except Exception as ex:
+            return {"ok": False, "msg": str(ex)}
 
 
 # ─── 样式表 ───────────────────────────────────────────────────────────────────
@@ -785,6 +1296,8 @@ class SegmentRow(QFrame):
         self._start = QLineEdit(str(s))
         self._start.setFixedWidth(110)
         start_col.addWidget(self._start)
+        self._start_warning = self._make_arc_warning_label()
+        start_col.addWidget(self._start_warning)
         lay.addLayout(start_col)
 
         arrow = QLabel("→")
@@ -800,6 +1313,8 @@ class SegmentRow(QFrame):
         self._end = QLineEdit(str(e))
         self._end.setFixedWidth(110)
         end_col.addWidget(self._end)
+        self._end_warning = self._make_arc_warning_label()
+        end_col.addWidget(self._end_warning)
         lay.addLayout(end_col)
 
         # duration label
@@ -824,6 +1339,15 @@ class SegmentRow(QFrame):
         self._start.textChanged.connect(self._on_change)
         self._end.textChanged.connect(self._on_change)
         btn_del.clicked.connect(lambda: self.deleted.emit(self))
+
+    def _make_arc_warning_label(self) -> QLabel:
+        label = QLabel(ARC_CUT_WARNING_LABEL)
+        label.setStyleSheet(
+            "font-size: 10px; font-weight: 600; color: #B06A3C; "
+            "background: transparent; border: none;"
+        )
+        label.hide()
+        return label
 
     def _on_change(self):
         try:
@@ -863,6 +1387,19 @@ class SegmentRow(QFrame):
 
     def update_index(self, index: int):
         self._badge.setText(str(index))
+
+    def set_arc_cut_warnings(self, start_hits: list[dict], end_hits: list[dict]) -> None:
+        for label, hits in (
+            (self._start_warning, start_hits),
+            (self._end_warning, end_hits),
+        ):
+            if hits:
+                label.setText(ARC_CUT_WARNING_LABEL)
+                label.setToolTip(_arc_cut_warning_tooltip(hits))
+                label.show()
+            else:
+                label.setToolTip("")
+                label.hide()
 
     def to_dict(self) -> dict | None:
         if self.s_val is None or self.e_val is None:
@@ -1031,6 +1568,9 @@ class MainWindow(QMainWindow):
         self._rows: list[SegmentRow] = []
         self._worker: SlicerWorker | None = None
         self._uid    = 0
+        self._arc_warning_timer = QTimer(self)
+        self._arc_warning_timer.setSingleShot(True)
+        self._arc_warning_timer.timeout.connect(self._refresh_arc_cut_warnings)
 
         self.setWindowTitle("Arc Slicer")
         self.setMinimumSize(620, 580)
@@ -1126,6 +1666,7 @@ class MainWindow(QMainWindow):
         song_col.addWidget(field_label("曲目 SONG ID"))
         self._song_box = QComboBox()
         self._song_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._song_box.currentTextChanged.connect(lambda _text: self._schedule_arc_cut_warning_refresh())
         song_col.addWidget(self._song_box)
         tb_lay.addLayout(song_col, 1)
 
@@ -1228,18 +1769,20 @@ class MainWindow(QMainWindow):
         d = Path(self._cfg.get("songs_dir", ""))
         if not d.is_dir():
             return []
-        return sorted(item for item in os.listdir(d) if (d / item).is_dir())
+        return sorted(item for item in os.listdir(d) if is_sliceable_song_dir(d / item))
 
     def _populate_songs(self, songs: list[str]):
         current = self._song_box.currentText()
         self._song_box.clear()
         if not songs:
             self._song_box.addItem("（songs 目录为空）")
+            self._schedule_arc_cut_warning_refresh()
             return
         for s in songs:
             self._song_box.addItem(s)
         if current in songs:
             self._song_box.setCurrentText(current)
+        self._schedule_arc_cut_warning_refresh()
 
     def _apply_slides(self, data: dict):
         if data.get("speed") is not None:
@@ -1253,6 +1796,7 @@ class MainWindow(QMainWindow):
             self._add_segment(seg.get("s", 0), seg.get("e", 60000))
         if data.get("songlist"):
             self._songlist_panel.set_meta(data["songlist"])
+        self._schedule_arc_cut_warning_refresh()
 
     # ── 目录操作 ──────────────────────────────────────────────────────────────
 
@@ -1269,6 +1813,7 @@ class MainWindow(QMainWindow):
             save_config(self._cfg)
             self._refresh_dir_label()
             self._populate_songs(self._get_songs())
+            self._schedule_arc_cut_warning_refresh()
             self._push_log(f"✓ songs 目录 → {path}", "ok")
 
     def _add_song_folder(self, src_path: str):
@@ -1304,6 +1849,7 @@ class MainWindow(QMainWindow):
         idx = self._song_box.findText(src.name)
         if idx >= 0:
             self._song_box.setCurrentIndex(idx)
+        self._schedule_arc_cut_warning_refresh()
 
     # ── 段落管理 ──────────────────────────────────────────────────────────────
 
@@ -1320,9 +1866,11 @@ class MainWindow(QMainWindow):
         row = SegmentRow(len(self._rows) + 1, s, e)
         row.deleted.connect(self._remove_segment)
         row.changed.connect(self._refresh_seg_header)
+        row.changed.connect(self._schedule_arc_cut_warning_refresh)
         self._rows.append(row)
         self._segs_layout.addWidget(row)
         self._refresh_seg_header()
+        self._schedule_arc_cut_warning_refresh()
 
     def _remove_segment(self, row: SegmentRow):
         self._rows.remove(row)
@@ -1331,6 +1879,7 @@ class MainWindow(QMainWindow):
         for i, r in enumerate(self._rows):
             r.update_index(i + 1)
         self._refresh_seg_header()
+        self._schedule_arc_cut_warning_refresh()
 
     def _refresh_seg_header(self):
         total = 0
@@ -1343,10 +1892,47 @@ class MainWindow(QMainWindow):
             f"时间段 · {len(self._rows)} 段 · 共 {total/1000:.1f}s"
         )
 
-    def _collect(self) -> dict:
+    def _schedule_arc_cut_warning_refresh(self):
+        self._arc_warning_timer.start(200)
+
+    def _clear_arc_cut_warnings(self):
+        for row in self._rows:
+            row.set_arc_cut_warnings([], [])
+
+    def _refresh_arc_cut_warnings(self):
+        try:
+            song_id = self._song_box.currentText()
+            songs_dir = Path(self._cfg.get("songs_dir", str(BASE_DIR / "songs")))
+            aff_path = songs_dir / song_id / "2.aff"
+            if not song_id or not aff_path.is_file():
+                self._clear_arc_cut_warnings()
+                return
+
+            segment_rows: list[SegmentRow] = []
+            segments: list[dict] = []
+            for row in self._rows:
+                if row.s_val is None or row.e_val is None or row.e_val <= row.s_val:
+                    row.set_arc_cut_warnings([], [])
+                    continue
+                segment_rows.append(row)
+                segments.append({"s": row.s_val, "e": row.e_val})
+
+            if not segments:
+                self._clear_arc_cut_warnings()
+                return
+
+            aff_text = aff_path.read_text(encoding="utf-8", errors="replace")
+            warnings = find_nonlinear_arc_cut_warnings(aff_text, segments)
+            for index, row in enumerate(segment_rows):
+                hits = warnings.get(index, {"start": [], "end": []})
+                row.set_arc_cut_warnings(hits["start"], hits["end"])
+        except Exception:
+            self._clear_arc_cut_warnings()
+
+    def _collect(self, speed: float | None = None) -> dict:
         data: dict = {
             "song_id":  self._song_box.currentText(),
-            "speed":    float(self._speed_input.text() or "1.0"),
+            "speed":    parse_speed_text(self._speed_input.text()) if speed is None else speed,
             "segments": [r.to_dict() for r in self._rows if r.to_dict()],
         }
         meta = self._songlist_panel.get_meta()
@@ -1357,19 +1943,26 @@ class MainWindow(QMainWindow):
     # ── 保存 / 运行 / 打开 ────────────────────────────────────────────────────
 
     def _save_slides(self):
-        data = self._collect()
         try:
+            data = self._collect()
             SLIDES_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
             self._push_log(f"💾 已保存 → {SLIDES_PATH}", "ok")
             self._saved_lbl.show()
             QTimer.singleShot(1900, self._saved_lbl.hide)
+        except ValueError as ex:
+            self._push_log(f"✗ 保存失败：速度无效: {ex}", "err")
         except Exception as ex:
             self._push_log(f"✗ 保存失败: {ex}", "err")
 
     def _run_slicer(self):
         if self._worker and self._worker.isRunning():
             return
-        data = self._collect()
+        try:
+            speed = parse_speed_text(self._speed_input.text())
+        except ValueError as ex:
+            self._push_log(f"✗ 速度无效: {ex}", "err")
+            return
+        data = self._collect(speed)
         if not data["song_id"] or "目录为空" in data["song_id"]:
             self._push_log("✗ 请先选择曲目 Song ID", "err")
             return
@@ -1445,7 +2038,7 @@ class MainWindow(QMainWindow):
 
 # ─── 入口 ─────────────────────────────────────────────────────────────────────
 
-def main():
+def _main_pyqt():
     app = QApplication(sys.argv)
     app.setApplicationName("Arc Slicer")
     app.setStyleSheet(QSS)
@@ -1459,6 +2052,33 @@ def main():
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
+
+
+def _main_webview():
+    import webview
+
+    ui_path = RES_DIR / "ui.html"
+    api = ArcWebApi()
+    window = webview.create_window(
+        "Arc Slicer",
+        ui_path.as_uri(),
+        js_api=api,
+        width=760,
+        height=900,
+        min_size=(620, 580),
+    )
+    api.bind_window(window)
+    webview.start(debug=False)
+
+
+def main():
+    if (RES_DIR / "ui.html").exists():
+        try:
+            _main_webview()
+            return
+        except ImportError:
+            pass
+    _main_pyqt()
 
 
 if __name__ == "__main__":

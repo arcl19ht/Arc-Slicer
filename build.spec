@@ -7,6 +7,7 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_all
 
 qt_datas, qt_binaries, qt_hiddenimports = collect_all("PyQt6")
+webview_datas, webview_binaries, webview_hiddenimports = collect_all("webview")
 
 HERE   = Path(SPECPATH)
 FFMPEG = HERE / "ffmpeg.exe"
@@ -18,12 +19,13 @@ if not FFMPEG.exists():
         file=sys.stderr,
     )
 
-datas = list(qt_datas)
-binaries = list(qt_binaries)
-hiddenimports = list(qt_hiddenimports) + ["PyQt6.sip"]
+datas = list(qt_datas) + list(webview_datas)
+binaries = list(qt_binaries) + list(webview_binaries)
+hiddenimports = list(qt_hiddenimports) + list(webview_hiddenimports) + ["PyQt6.sip"]
 
 if FFMPEG.exists():
     datas.append((str(FFMPEG), "."))
+datas.append((str(HERE / "ui.html"), "."))
 
 a = Analysis(
     [str(HERE / "app.py")],
@@ -34,7 +36,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["webview", "tkinter"],
+    excludes=["tkinter"],
     noarchive=False,
 )
 

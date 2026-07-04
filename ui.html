@@ -21,10 +21,6 @@
   .win{width:100%;max-width:700px;background:#FAF9F5;border:1px solid #E9E5DA;border-radius:16px;overflow:hidden;
        box-shadow:0 24px 60px rgba(40,33,28,.16),0 2px 6px rgba(40,33,28,.07)}
 
-  .titlebar{display:flex;align-items:center;gap:8px;padding:13px 17px;background:#F1EEE6;border-bottom:1px solid #E7E3D8;-webkit-user-select:none;user-select:none}
-  .dot{width:12px;height:12px;border-radius:50%}
-  .title{flex:1;text-align:center;margin-right:54px;font-size:12.5px;font-weight:500;color:#8A857A}
-
   .body{padding:30px 36px 28px}
   h1{font-weight:600;font-size:28px;letter-spacing:-.01em;margin:0 0 6px}
   .sub{margin:0 0 22px;color:#6E6B63;font-size:14.5px;line-height:1.55}
@@ -68,6 +64,7 @@
   .arrow{color:#C9C4B8;font-size:15px;margin-bottom:9px}
   .dur{font-family:'Consolas','JetBrains Mono',monospace;font-size:13px;font-weight:500;color:#9A968C;white-space:nowrap;margin-bottom:9px}
   .dur.bad{color:#C1573F}
+  .arc-cut-warning{display:none;margin-top:4px;font-size:10px;font-weight:600;color:#B06A3C;line-height:1.25;white-space:nowrap}
   .del{margin-left:auto;flex-shrink:0;width:30px;height:30px;border-radius:8px;background:#F7F5EE;border:1px solid #EAE6DC;color:#B0584A;font-size:12px;cursor:pointer;margin-bottom:2px;transition:all .15s;font-family:inherit}
   .del:hover{background:#FBECE8;border-color:#E6907A}
 
@@ -97,12 +94,6 @@
 <body>
 <div class="wrap">
   <div class="win">
-    <div class="titlebar">
-      <div class="dot" style="background:#E0816B"></div>
-      <div class="dot" style="background:#E6C36B"></div>
-      <div class="dot" style="background:#9FBE8C"></div>
-      <div class="title">Arc Slicer</div>
-    </div>
     <div class="body">
       <h1>准备切片</h1>
       <p class="sub">选择曲目，标记想保留的时间段，然后运行切片器。</p>
@@ -176,10 +167,14 @@
     segments: [],
     running: false,
     songsDir: "",
+    backendReady: false,
   };
   var api = null;
   var saveTimer = null;
   var toastTimer = null;
+  var arcCutTimer = null;
+  var arcCutRequestSeq = 0;
+  var arcCutLoggedErrors = {};
   var uid = function () { return "s" + Math.random().toString(36).slice(2, 9); };
 
   var $song    = document.getElementById("song");
@@ -246,10 +241,12 @@
       row.innerHTML =
         '<div class="badge">' + (i + 1) + '</div>' +
         '<div class="field"><span class="lbl">开始 START</span>' +
-          '<input class="start" inputmode="numeric" value="' + esc(sg.s) + '"></div>' +
+          '<input class="start" inputmode="numeric" value="' + esc(sg.s) + '">' +
+          '<span class="arc-cut-warning start-warning"></span></div>' +
         '<span class="arrow">→</span>' +
         '<div class="field"><span class="lbl">结束 END</span>' +
-          '<input class="end" inputmode="numeric" value="' + esc(sg.e) + '"></div>' +
+          '<input class="end" inputmode="numeric" value="' + esc(sg.e) + '">' +
+          '<span class="arc-cut-warning end-warning"></span></div>' +
         '<span class="dur' + (info.bad ? " bad" : "") + '">' + info.text + '</span>' +
         '<button class="del" title="删除">✕</button>';
 
@@ -265,6 +262,7 @@
         $dur.className = "dur" + (di.bad ? " bad" : "");
         row.className  = "seg" + (di.bad ? " bad" : "");
         refreshHeader();
+        scheduleArcCutWarningRefresh();
       }
       $start.addEventListener("input", onEdit);
       $end.addEventListener("input", onEdit);
@@ -272,8 +270,124 @@
         state.segments = state.segments.filter(function (x) { return x.id !== sg.id; });
         renderSegments();
         refreshHeader();
+        scheduleArcCutWarningRefresh();
       });
       $segs.appendChild(row);
+    });
+  }
+
+  function warningSegments() {
+    return state.segments.map(function (sg) {
+      var s = parseInt(sg.s, 10);
+      var e = parseInt(sg.e, 10);
+      return { s: isNaN(s) ? 0 : s, e: isNaN(e) ? 0 : e };
+    });
+  }
+
+  function rowForSegment(id) {
+    for (var i = 0; i < $segs.children.length; i++) {
+      if ($segs.children[i].dataset.id === id) return $segs.children[i];
+    }
+    return null;
+  }
+
+  function warningTitle(hits) {
+    var counts = {};
+    hits.forEach(function (hit) {
+      var easing = String((hit && hit.easing) || "?");
+      counts[easing] = (counts[easing] || 0) + 1;
+    });
+    var parts = Object.keys(counts).map(function (easing) {
+      return easing + " × " + counts[easing];
+    });
+    return "此切点截断 " + hits.length + " 条非线性 Arc：" + parts.join("，") + "。\n" +
+      "当前版本会正确计算边界坐标，但 Arc 内部轨迹仅为近似。";
+  }
+
+  function setArcWarning(el, hits) {
+    hits = hits || [];
+    if (!el) return;
+    if (hits.length) {
+      el.textContent = "⚠ 非线性 Arc 截断：近似";
+      el.title = warningTitle(hits);
+      el.style.display = "block";
+    } else {
+      el.textContent = "";
+      el.title = "";
+      el.style.display = "none";
+    }
+  }
+
+  function clearArcCutWarnings() {
+    Array.prototype.forEach.call($segs.querySelectorAll(".arc-cut-warning"), function (el) {
+      setArcWarning(el, []);
+    });
+  }
+
+  function applyArcCutWarnings(data) {
+    data = data || {};
+    state.segments.forEach(function (sg, index) {
+      var row = rowForSegment(sg.id);
+      if (!row) return;
+      var hits = data[index] || data[String(index)] || { start: [], end: [] };
+      setArcWarning(row.querySelector(".start-warning"), hits.start || []);
+      setArcWarning(row.querySelector(".end-warning"), hits.end || []);
+    });
+  }
+
+  function normalizeApiResult(data) {
+    if (typeof data === "string") {
+      try { return JSON.parse(data); }
+      catch (e) { return { __error: { message: "返回结果不是有效 JSON", detail: String(e) } }; }
+    }
+    return data || {};
+  }
+
+  function logArcCutFailure(error) {
+    if (!state.backendReady) return;
+    error = error || {};
+    var message = error.message || "未知错误";
+    var key = state.songId + "|" + message;
+    if (arcCutLoggedErrors[key]) return;
+    arcCutLoggedErrors[key] = true;
+    pushLog("⚠ Arc 风险检查未完成：" + message, "muted");
+    if (window.console && error.detail) {
+      console.warn("Arc 风险检查未完成：" + message, error.detail);
+    }
+  }
+
+  function clearArcCutFailuresForSong(songId) {
+    Object.keys(arcCutLoggedErrors).forEach(function (key) {
+      if (key.indexOf(songId + "|") === 0) delete arcCutLoggedErrors[key];
+    });
+  }
+
+  function scheduleArcCutWarningRefresh() {
+    if (!state.backendReady) return;
+    clearTimeout(arcCutTimer);
+    arcCutTimer = setTimeout(refreshArcCutWarnings, 200);
+  }
+
+  function refreshArcCutWarnings() {
+    var requestSeq = ++arcCutRequestSeq;
+    if (!state.backendReady || !api || !state.songId) {
+      clearArcCutWarnings();
+      return;
+    }
+    api.get_arc_cut_warnings(state.songId, warningSegments()).then(function (data) {
+      if (requestSeq !== arcCutRequestSeq) return;
+      data = normalizeApiResult(data);
+      if (data.__error) {
+        clearArcCutWarnings();
+        logArcCutFailure(data.__error);
+        return;
+      }
+      clearArcCutFailuresForSong(state.songId);
+      applyArcCutWarnings(data);
+    }).catch(function (e) {
+      if (requestSeq !== arcCutRequestSeq) return;
+      clearArcCutWarnings();
+      logArcCutFailure({ message: "API 调用失败", detail: String(e) });
     });
   }
 
@@ -363,7 +477,19 @@
     if (!api) return;
     api.get_songs().then(function (songs) {
       fillSongs(songs);
+      scheduleArcCutWarningRefresh();
     });
+  }
+
+  function handleSongFolderResult(r) {
+    if (r && r.ok) {
+      if (r.song_id) state.songId = r.song_id;
+      toast("✓ " + (r.msg || "已添加"));
+      refreshSongs();
+      scheduleArcCutWarningRefresh();
+    } else if (r && r.msg) {
+      toast("✗ " + r.msg);
+    }
   }
 
   document.getElementById("btnDir").addEventListener("click", function () {
@@ -372,36 +498,56 @@
       if (r && r.ok) {
         updateDirDisplay(r.songs_dir);
         refreshSongs();
+        scheduleArcCutWarningRefresh();
         toast("✓ songs 目录已更新");
       }
     });
   });
 
   // ── drop zone ─────────────────────────────────────────────────────────────
+  function droppedFolderPath(e) {
+    var dt = e.dataTransfer;
+    if (!dt) return { ok: false, msg: "当前运行环境无法读取拖入文件夹路径，请点击选择。" };
+
+    if (dt.items && dt.items.length) {
+      var item = dt.items[0];
+      var entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
+      if (entry && entry.isFile) {
+        return { ok: false, msg: "请拖入歌曲文件夹，而不是单个文件。" };
+      }
+      var fileFromItem = item.getAsFile ? item.getAsFile() : null;
+      if (fileFromItem && fileFromItem.path) {
+        return { ok: true, path: fileFromItem.path };
+      }
+      if (entry && entry.isDirectory) {
+        return { ok: false, msg: "当前运行环境无法读取拖入文件夹路径，请点击选择。" };
+      }
+    }
+
+    if (dt.files && dt.files.length) {
+      var file = dt.files[0];
+      if (file.path) return { ok: true, path: file.path };
+      return { ok: false, msg: "请拖入歌曲文件夹，而不是单个文件。" };
+    }
+
+    return { ok: false, msg: "当前运行环境无法读取拖入文件夹路径，请点击选择。" };
+  }
+
   window.handleDrop = function (e) {
     e.preventDefault();
     document.getElementById("dropzone").classList.remove("drag-over");
-    if (!api) return;
-    api.add_song_folder().then(function (r) {
-      if (r && r.ok) {
-        toast("✓ " + (r.msg || "已添加"));
-        refreshSongs();
-      } else if (r && r.msg) {
-        toast("✗ " + r.msg);
-      }
+    if (!api) { toast("请在应用内使用"); return; }
+    var dropped = droppedFolderPath(e);
+    if (!dropped.ok) { toast(dropped.msg); return; }
+    api.add_song_folder_path(dropped.path).then(function (r) {
+      if (r && r.ok) handleSongFolderResult(r);
+      else if (r && r.msg) toast(r.msg);
     });
   };
 
   document.getElementById("dropzone").addEventListener("click", function () {
     if (!api) { toast("请在应用内使用"); return; }
-    api.add_song_folder().then(function (r) {
-      if (r && r.ok) {
-        toast("✓ " + (r.msg || "已添加"));
-        refreshSongs();
-      } else if (r && r.msg) {
-        toast("✗ " + r.msg);
-      }
-    });
+    api.add_song_folder().then(handleSongFolderResult);
   });
 
   // ── populate song dropdown ─────────────────────────────────────────────────
@@ -422,6 +568,7 @@
     if (!state.songId || state.songs.indexOf(state.songId) < 0)
       state.songId = state.songs[0];
     $song.value = state.songId;
+    scheduleArcCutWarningRefresh();
   }
 
   function applySlides(data) {
@@ -438,10 +585,14 @@
     });
     renderSegments();
     refreshHeader();
+    scheduleArcCutWarningRefresh();
   }
 
   // ── static controls ───────────────────────────────────────────────────────
-  $song.addEventListener("change", function () { state.songId = $song.value; });
+  $song.addEventListener("change", function () {
+    state.songId = $song.value;
+    scheduleArcCutWarningRefresh();
+  });
   $speed.addEventListener("change", function () { state.speed = $speed.value; });
   document.getElementById("add").addEventListener("click", function () {
     var last  = state.segments[state.segments.length - 1];
@@ -449,6 +600,7 @@
     state.segments.push({ id: uid(), s: String(start), e: String(start + 30000) });
     renderSegments();
     refreshHeader();
+    scheduleArcCutWarningRefresh();
   });
   $run.addEventListener("click", doRun);
   document.getElementById("save").addEventListener("click", doSave);
@@ -464,6 +616,10 @@
 
   // ── connect backend ───────────────────────────────────────────────────────
   function connectBackend() {
+    state.backendReady = false;
+    arcCutRequestSeq++;
+    clearTimeout(arcCutTimer);
+    clearArcCutWarnings();
     api = window.pywebview.api;
     Promise.all([
       api.get_config(),
@@ -476,6 +632,8 @@
       updateDirDisplay(cfg.songs_dir || "");
       fillSongs(songs);
       applySlides(slides);
+      state.backendReady = true;
+      scheduleArcCutWarningRefresh();
     }).catch(function (e) { pushLog("✗ 加载配置失败: " + e, "err"); });
   }
 

@@ -26,6 +26,11 @@ if errorlevel 1 (
     echo Installing PyQt6...
     python -m pip install PyQt6
 )
+python -m pip show pywebview > nul 2>&1
+if errorlevel 1 (
+    echo Installing pywebview...
+    python -m pip install pywebview
+)
 python -m pip show pyinstaller > nul 2>&1
 if errorlevel 1 (
     echo Installing PyInstaller...
@@ -36,6 +41,8 @@ echo.
 echo [1/2] Cleaning old build artifacts...
 if exist "%~dp0dist"  rmdir /s /q "%~dp0dist"
 if exist "%~dp0build" rmdir /s /q "%~dp0build"
+if exist "%~dp0__pycache__" rmdir /s /q "%~dp0__pycache__"
+if exist "%~dp0tests\__pycache__" rmdir /s /q "%~dp0tests\__pycache__"
 
 echo [2/2] Running PyInstaller...
 python -m PyInstaller "%~dp0build.spec" --clean
