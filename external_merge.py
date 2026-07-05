@@ -3,8 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import stat
+import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +47,7 @@ class ExternalMergePlan:
     warnings: list[MergeIssue] = field(default_factory=list)
     merged_songlist_data: dict[str, Any] | None = None
     merged_packlist_data: dict[str, Any] | None = None
+    snapshot_fingerprint: str = ""
 
     @property
     def is_ready(self) -> bool:
@@ -66,6 +70,18 @@ class ExternalMergePlan:
         }
 
 
+@dataclass
+class ExternalMergeResult:
+    success: bool
+    status: str
+    plan: ExternalMergePlan
+    backup_dir: Path | None = None
+    message: str = ""
+    changed_paths: list[str] = field(default_factory=list)
+    rollback_errors: list[str] = field(default_factory=list)
+    execution_issues: list[MergeIssue] = field(default_factory=list)
+
+
 def _count(actions: list[MergeAction], operation: str) -> int:
     return sum(1 for action in actions if action.operation == operation)
 
@@ -86,31 +102,31 @@ def build_external_merge_plan(current_songs_dir: Path, target_songs_dir: Path) -
     target_packlist = _read_packlist(plan, target_songs_dir / "packlist", "target", required=True)
 
     if input_songlist is None or target_songlist is None:
-        return plan
+        return _finalize_plan(plan)
 
     input_songs = input_songlist["songs"]
     target_songs = target_songlist["songs"]
     input_song_ids = _index_entries(plan, input_songs, "song", "input")
     target_song_ids = _index_entries(plan, target_songs, "song", "target")
     if input_song_ids is None or target_song_ids is None:
-        return plan
+        return _finalize_plan(plan)
 
     _validate_current_song_dirs(plan, current_songs_dir, input_song_ids)
     _plan_song_actions(plan, current_songs_dir, target_songs_dir, input_songs, target_songs, input_song_ids, target_song_ids)
 
     if target_packlist is None:
-        return plan
+        return _finalize_plan(plan)
 
     target_packs = target_packlist["packs"]
     target_pack_ids = _index_entries(plan, target_packs, "pack", "target")
     if target_pack_ids is None:
-        return plan
+        return _finalize_plan(plan)
 
     input_pack_ids: dict[str, dict[str, Any]] = {}
     if input_packlist is not None:
         input_pack_ids_maybe = _index_entries(plan, input_packlist["packs"], "pack", "input")
         if input_pack_ids_maybe is None:
-            return plan
+            return _finalize_plan(plan)
         input_pack_ids = input_pack_ids_maybe
         _validate_input_pack_images(plan, current_songs_dir, input_packlist["packs"])
         _plan_pack_actions(plan, input_packlist["packs"], target_packs, input_pack_ids, target_pack_ids)
@@ -121,7 +137,530 @@ def build_external_merge_plan(current_songs_dir: Path, target_songs_dir: Path) -
 
     _validate_input_song_sets(plan, input_songs, input_pack_ids, target_pack_ids)
     plan.merged_songlist_data = {"songs": _merge_entries(target_songs, input_songs)}
+    return _finalize_plan(plan)
+
+
+def execute_external_merge(plan: ExternalMergePlan, *, backup_root: Path) -> ExternalMergeResult:
+    if not isinstance(plan, ExternalMergePlan):
+        raise TypeError("plan must be an ExternalMergePlan")
+    backup_root = Path(backup_root)
+    if plan.blockers:
+        return ExternalMergeResult(
+            success=False,
+            status="rejected",
+            plan=plan,
+            message="合并计划存在阻止项，未执行写入。",
+            execution_issues=list(plan.blockers),
+        )
+
+    fresh = build_external_merge_plan(plan.current_songs_dir, plan.target_songs_dir)
+    if fresh.blockers:
+        return ExternalMergeResult(
+            success=False,
+            status="rejected",
+            plan=fresh,
+            message="重新检查合并计划失败，未执行写入。",
+            execution_issues=list(fresh.blockers),
+        )
+    if fresh.snapshot_fingerprint != plan.snapshot_fingerprint:
+        return ExternalMergeResult(
+            success=False,
+            status="stale_plan",
+            plan=fresh,
+            message="外部目标壳或当前导出内容在检查后发生变化，请重新检查合并计划。",
+        )
+
+    safety_issues = _execution_safety_issues(fresh, backup_root)
+    if safety_issues:
+        return ExternalMergeResult(
+            success=False,
+            status="rejected",
+            plan=fresh,
+            message="执行路径安全校验失败，未写入目标壳。",
+            execution_issues=safety_issues,
+        )
+
+    backup_dir: Path | None = None
+    stage_dir: Path | None = None
+    ctx: dict[str, Any] = {
+        "backed_up_items": [],
+        "created_target_items": [],
+        "changed_paths": [],
+        "rollback_errors": [],
+        "swaps": [],
+    }
+    try:
+        backup_dir = _create_backup_dir(backup_root)
+        manifest = _base_manifest(fresh, backup_dir, "in_progress")
+        _write_manifest(backup_dir, manifest)
+        _backup_affected_items(fresh, backup_dir, ctx)
+
+        refreshed = build_external_merge_plan(plan.current_songs_dir, plan.target_songs_dir)
+        if refreshed.snapshot_fingerprint != fresh.snapshot_fingerprint or refreshed.blockers:
+            manifest.update(_manifest_runtime_fields(ctx, "rolled_back"))
+            _write_manifest(backup_dir, manifest)
+            return ExternalMergeResult(
+                success=False,
+                status="stale_plan",
+                plan=refreshed,
+                backup_dir=backup_dir,
+                message="备份后检测到内容变化，未写入目标壳；请重新检查合并计划。",
+            )
+
+        stage_dir = _create_staging_dir(fresh.target_songs_dir)
+        _stage_inputs(fresh, stage_dir)
+        _install_song_directories(fresh, stage_dir, ctx)
+        _install_pack_images(fresh, stage_dir, ctx)
+        _write_json_atomic(fresh.target_songs_dir / "songlist", fresh.merged_songlist_data)
+        ctx["changed_paths"].append("songlist")
+        if fresh.pack_actions:
+            _write_json_atomic(fresh.target_songs_dir / "packlist", fresh.merged_packlist_data)
+            ctx["changed_paths"].append("packlist")
+
+        _cleanup_swaps(ctx)
+        _cleanup_temp_path(stage_dir)
+        manifest.update(_manifest_runtime_fields(ctx, "completed"))
+        _write_manifest(backup_dir, manifest)
+        return ExternalMergeResult(
+            success=True,
+            status="completed",
+            plan=fresh,
+            backup_dir=backup_dir,
+            message="外部目标壳合并完成。",
+            changed_paths=list(ctx["changed_paths"]),
+        )
+    except Exception as ex:
+        rollback_errors = _rollback(fresh, backup_dir, ctx) if backup_dir is not None else [str(ex)]
+        if stage_dir is not None:
+            try:
+                _cleanup_temp_path(stage_dir)
+            except Exception as cleanup_ex:
+                rollback_errors.append(f"清理 staging 失败: {cleanup_ex}")
+        status = "failed_rollback_incomplete" if rollback_errors else "failed_rolled_back"
+        if backup_dir is not None:
+            manifest = _base_manifest(fresh, backup_dir, "rollback_incomplete" if rollback_errors else "rolled_back")
+            ctx["rollback_errors"] = rollback_errors
+            manifest.update(_manifest_runtime_fields(ctx, manifest["status"]))
+            _write_manifest(backup_dir, manifest)
+        return ExternalMergeResult(
+            success=False,
+            status=status,
+            plan=fresh,
+            backup_dir=backup_dir,
+            message=f"合并失败，{'恢复不完整' if rollback_errors else '已自动恢复'}：{ex}",
+            changed_paths=list(ctx["changed_paths"]),
+            rollback_errors=rollback_errors,
+            execution_issues=[MergeIssue(BLOCKER, "execution_failed", str(ex))],
+        )
+
+
+def _finalize_plan(plan: ExternalMergePlan) -> ExternalMergePlan:
+    plan.snapshot_fingerprint = _compute_snapshot_fingerprint(plan)
     return plan
+
+
+def _compute_snapshot_fingerprint(plan: ExternalMergePlan) -> str:
+    h = hashlib.sha256()
+    _fingerprint_path(h, "current/songlist", plan.current_songs_dir / "songlist")
+    _fingerprint_path(h, "current/packlist", plan.current_songs_dir / "packlist")
+    _fingerprint_path(h, "target/songlist", plan.target_songs_dir / "songlist")
+    _fingerprint_path(h, "target/packlist", plan.target_songs_dir / "packlist")
+    for action in sorted(plan.song_actions, key=lambda a: (a.kind, a.operation, a.identifier)):
+        if action.source_path:
+            _fingerprint_path(h, f"song/source/{action.identifier}", Path(action.source_path))
+        if action.target_path:
+            _fingerprint_path(h, f"song/target/{action.identifier}", Path(action.target_path))
+    for action in sorted(plan.pack_image_actions, key=lambda a: (a.kind, a.operation, a.identifier, a.details.get("pack_id", ""))):
+        if action.source_path:
+            _fingerprint_path(h, f"pack_image/source/{action.identifier}/{action.details.get('pack_id','')}", Path(action.source_path))
+        if action.target_path:
+            _fingerprint_path(h, f"pack_image/target/{action.identifier}/{action.details.get('pack_id','')}", Path(action.target_path))
+    return h.hexdigest()
+
+
+def _fingerprint_path(h: "hashlib._Hash", label: str, path: Path) -> None:
+    h.update(f"LABEL\0{label}\0".encode())
+    if not path.exists():
+        h.update(b"MISSING\0")
+        return
+    if is_link_or_junction(path):
+        h.update(b"LINK\0")
+        return
+    if path.is_file():
+        h.update(b"FILE\0")
+        h.update(_sha256(path).encode())
+        return
+    if path.is_dir():
+        h.update(b"DIR\0")
+        for item in sorted(path.rglob("*"), key=lambda p: p.relative_to(path).as_posix()):
+            rel = item.relative_to(path).as_posix()
+            h.update(f"ITEM\0{rel}\0".encode())
+            if is_link_or_junction(item):
+                h.update(b"LINK\0")
+            elif item.is_file():
+                h.update(b"FILE\0")
+                h.update(_sha256(item).encode())
+            elif item.is_dir():
+                h.update(b"DIR\0")
+            else:
+                h.update(b"OTHER\0")
+        return
+    h.update(b"OTHER\0")
+
+
+def _execution_safety_issues(plan: ExternalMergePlan, backup_root: Path) -> list[MergeIssue]:
+    issues: list[MergeIssue] = []
+    target = plan.target_songs_dir
+    current = plan.current_songs_dir
+    backup_root = Path(backup_root)
+
+    if _path_contains_or_equals(target, backup_root):
+        issues.append(MergeIssue(BLOCKER, "backup_root_inside_target", "备份目录不能位于目标 songs 内。", (str(backup_root), str(target))))
+    if _path_contains_or_equals(current, backup_root) or _same_path(current, backup_root):
+        issues.append(MergeIssue(BLOCKER, "backup_root_inside_current", "备份目录不能位于 current_export 内。", (str(backup_root), str(current))))
+    for parent in _existing_parents(backup_root):
+        if is_link_or_junction(parent):
+            issues.append(MergeIssue(BLOCKER, "backup_parent_is_link", "备份目录父路径不能是链接或 Junction。", (str(parent),)))
+            break
+    for path in _write_candidate_paths(plan):
+        if not _path_contains_or_equals(target, path):
+            issues.append(MergeIssue(BLOCKER, "write_path_escape", "候选写入路径逃出目标 songs 根。", (str(path), str(target))))
+    for action in plan.pack_image_actions:
+        if not _is_safe_file_name(action.identifier):
+            issues.append(MergeIssue(BLOCKER, "pack_image_name_unsafe_at_execute", "pack 图片文件名不安全。", (action.identifier,)))
+    if is_link_or_junction(target):
+        issues.append(MergeIssue(BLOCKER, "target_songs_dir_is_link_at_execute", "目标 songs 目录不能是链接或 Junction。", (str(target),)))
+    pack_dir = target / "pack"
+    if any(action.operation != "reuse" for action in plan.pack_image_actions) and is_link_or_junction(pack_dir):
+        issues.append(MergeIssue(BLOCKER, "target_pack_dir_is_link_at_execute", "目标 pack 目录不能是链接或 Junction。", (str(pack_dir),)))
+    for action in plan.song_actions:
+        if action.operation == "update" and action.target_path and is_link_or_junction(Path(action.target_path)):
+            issues.append(MergeIssue(BLOCKER, "target_song_dir_is_link_at_execute", "受影响歌曲目录不能是链接或 Junction。", (action.target_path,)))
+    return issues
+
+
+def _write_candidate_paths(plan: ExternalMergePlan) -> list[Path]:
+    paths = [plan.target_songs_dir / "songlist"]
+    if plan.pack_actions:
+        paths.append(plan.target_songs_dir / "packlist")
+    for action in plan.song_actions:
+        if action.target_path:
+            paths.append(Path(action.target_path))
+    for action in plan.pack_image_actions:
+        if action.operation in {"add", "replace"} and action.target_path:
+            paths.append(Path(action.target_path))
+    return paths
+
+
+def _create_backup_dir(backup_root: Path) -> Path:
+    backup_root.mkdir(parents=True, exist_ok=True)
+    for _ in range(100):
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        candidate = backup_root / f"{stamp}_{uuid.uuid4().hex[:8]}"
+        try:
+            candidate.mkdir()
+            (candidate / "before").mkdir()
+            return candidate
+        except FileExistsError:
+            continue
+    raise RuntimeError("无法创建唯一备份目录")
+
+
+def _base_manifest(plan: ExternalMergePlan, backup_dir: Path, status: str) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "status": status,
+        "current_songs_dir": str(plan.current_songs_dir),
+        "target_songs_dir": str(plan.target_songs_dir),
+        "snapshot_fingerprint": plan.snapshot_fingerprint,
+        "plan_summary": plan.summary,
+        "actions": [_action_to_json(action) for action in plan.song_actions + plan.pack_actions + plan.pack_image_actions],
+        "backup_dir": str(backup_dir),
+        "backed_up_items": [],
+        "created_target_items": [],
+        "changed_paths": [],
+        "rollback_errors": [],
+    }
+
+
+def _manifest_runtime_fields(ctx: dict[str, Any], status: str) -> dict[str, Any]:
+    return {
+        "status": status,
+        "backed_up_items": list(ctx.get("backed_up_items", [])),
+        "created_target_items": list(ctx.get("created_target_items", [])),
+        "changed_paths": list(ctx.get("changed_paths", [])),
+        "rollback_errors": list(ctx.get("rollback_errors", [])),
+    }
+
+
+def _action_to_json(action: MergeAction) -> dict[str, Any]:
+    return {
+        "kind": action.kind,
+        "operation": action.operation,
+        "identifier": action.identifier,
+        "source_path": action.source_path,
+        "target_path": action.target_path,
+        "details": action.details,
+    }
+
+
+def _write_manifest(backup_dir: Path, manifest: dict[str, Any]) -> None:
+    _write_json_atomic(backup_dir / "manifest.json", manifest)
+
+
+def _backup_affected_items(plan: ExternalMergePlan, backup_dir: Path, ctx: dict[str, Any]) -> None:
+    before = backup_dir / "before"
+    _backup_file(plan.target_songs_dir / "songlist", before / "songlist", "songlist", ctx)
+    if plan.pack_actions:
+        _backup_file(plan.target_songs_dir / "packlist", before / "packlist", "packlist", ctx)
+    for action in plan.song_actions:
+        if action.operation == "update" and action.target_path:
+            rel = f"songs/{action.identifier}"
+            _backup_dir(Path(action.target_path), before / rel, rel, ctx)
+        elif action.operation == "add" and action.target_path:
+            ctx["created_target_items"].append(_rel_to_target(Path(action.target_path), plan.target_songs_dir))
+    for action in plan.pack_image_actions:
+        target = Path(action.target_path) if action.target_path else None
+        if action.operation == "replace" and target is not None:
+            rel = f"pack/{action.identifier}"
+            _backup_file(target, before / rel, rel, ctx)
+        elif action.operation == "add" and target is not None:
+            ctx["created_target_items"].append(_rel_to_target(target, plan.target_songs_dir))
+
+
+def _backup_file(source: Path, dest: Path, rel: str, ctx: dict[str, Any]) -> None:
+    if not source.exists():
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, dest)
+    ctx["backed_up_items"].append(rel)
+
+
+def _backup_dir(source: Path, dest: Path, rel: str, ctx: dict[str, Any]) -> None:
+    if not source.exists():
+        return
+    if dest.exists():
+        raise RuntimeError(f"备份路径已存在：{dest}")
+    shutil.copytree(source, dest, symlinks=False)
+    ctx["backed_up_items"].append(rel)
+
+
+def _create_staging_dir(target_songs_dir: Path) -> Path:
+    parent = target_songs_dir.parent
+    if is_link_or_junction(parent):
+        raise RuntimeError("目标 songs 父目录不能是链接或 Junction")
+    for _ in range(100):
+        candidate = parent / f".arc_slicer_merge_stage_{uuid.uuid4().hex[:8]}"
+        try:
+            candidate.mkdir()
+            return candidate
+        except FileExistsError:
+            continue
+    raise RuntimeError("无法创建 staging 目录")
+
+
+def _stage_inputs(plan: ExternalMergePlan, stage_dir: Path) -> None:
+    for action in plan.song_actions:
+        source = Path(action.source_path) if action.source_path else None
+        if source is None:
+            continue
+        dest = stage_dir / "songs" / action.identifier
+        _copy_dir_and_verify(source, dest)
+    for action in plan.pack_image_actions:
+        if action.operation == "reuse" or not action.source_path:
+            continue
+        source = Path(action.source_path)
+        dest = stage_dir / "pack" / action.identifier
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, dest)
+        if _sha256(source) != _sha256(dest):
+            raise RuntimeError(f"staging pack 图片校验失败：{action.identifier}")
+
+
+def _copy_dir_and_verify(source: Path, dest: Path) -> None:
+    if dest.exists():
+        raise RuntimeError(f"staging 目录已存在：{dest}")
+    shutil.copytree(source, dest, symlinks=False)
+    if _directory_digest(source) != _directory_digest(dest):
+        raise RuntimeError(f"staging 目录校验失败：{source}")
+
+
+def _install_song_directories(plan: ExternalMergePlan, stage_dir: Path, ctx: dict[str, Any]) -> None:
+    for action in plan.song_actions:
+        source = stage_dir / "songs" / action.identifier
+        target = Path(action.target_path) if action.target_path else plan.target_songs_dir / action.identifier
+        rel = _rel_to_target(target, plan.target_songs_dir)
+        if action.operation == "add":
+            _install_song_directory(source, target, None)
+            ctx["changed_paths"].append(rel)
+        elif action.operation == "update":
+            swap = target.parent / f".arc_slicer_swap_{target.name}_{uuid.uuid4().hex[:8]}"
+            _install_song_directory(source, target, swap)
+            ctx["swaps"].append(str(swap))
+            ctx["changed_paths"].append(rel)
+
+
+def _install_song_directory(staged_source: Path, target: Path, swap: Path | None) -> None:
+    if swap is not None:
+        if swap.exists():
+            raise RuntimeError(f"交换目录已存在：{swap}")
+        target.rename(swap)
+    try:
+        staged_source.rename(target)
+    except Exception:
+        if swap is not None and swap.exists() and not target.exists():
+            swap.rename(target)
+        raise
+
+
+def _install_pack_images(plan: ExternalMergePlan, stage_dir: Path, ctx: dict[str, Any]) -> None:
+    for action in plan.pack_image_actions:
+        if action.operation == "reuse":
+            continue
+        source = stage_dir / "pack" / action.identifier
+        target = Path(action.target_path) if action.target_path else plan.target_songs_dir / "pack" / action.identifier
+        _install_pack_image(source, target)
+        ctx["changed_paths"].append(_rel_to_target(target, plan.target_songs_dir))
+
+
+def _install_pack_image(staged_source: Path, target: Path) -> None:
+    tmp = target.with_name(f".arc_slicer_tmp_{target.name}_{uuid.uuid4().hex[:8]}")
+    shutil.copy2(staged_source, tmp)
+    os.replace(tmp, target)
+
+
+def _write_json_atomic(path: Path, data: dict[str, Any] | None) -> None:
+    if data is None:
+        raise RuntimeError(f"没有可写入的 JSON 数据：{path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".arc_slicer_tmp_{path.name}_{uuid.uuid4().hex[:8]}")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def _rollback(plan: ExternalMergePlan, backup_dir: Path | None, ctx: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    if backup_dir is None:
+        return ["备份目录不存在，无法恢复"]
+    before = backup_dir / "before"
+
+    for rel in ("songlist", "packlist"):
+        backup = before / rel
+        if backup.exists():
+            _restore_file(backup, plan.target_songs_dir / rel, rel, errors)
+    for action in plan.pack_image_actions:
+        if action.operation == "replace":
+            rel = f"pack/{action.identifier}"
+            _restore_file(before / rel, plan.target_songs_dir / rel, rel, errors)
+    for action in plan.song_actions:
+        if action.operation == "update":
+            rel = f"songs/{action.identifier}"
+            _restore_dir(before / rel, plan.target_songs_dir / action.identifier, rel, errors)
+    for rel in reversed(ctx.get("created_target_items", [])):
+        _delete_target_item(plan.target_songs_dir / rel, rel, errors)
+    for swap in ctx.get("swaps", []):
+        _cleanup_temp_path(Path(swap), errors)
+    ctx["rollback_errors"] = errors
+    return errors
+
+
+def _restore_file(backup: Path, target: Path, rel: str, errors: list[str]) -> None:
+    try:
+        if backup.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(backup, target)
+    except Exception as ex:
+        errors.append(f"{rel}: {ex}")
+
+
+def _restore_dir(backup: Path, target: Path, rel: str, errors: list[str]) -> None:
+    try:
+        if target.exists():
+            _remove_tree_or_file(target)
+        if backup.exists():
+            shutil.copytree(backup, target, symlinks=False)
+    except Exception as ex:
+        errors.append(f"{rel}: {ex}")
+
+
+def _delete_target_item(path: Path, rel: str, errors: list[str]) -> None:
+    try:
+        if path.exists():
+            _remove_tree_or_file(path)
+    except Exception as ex:
+        errors.append(f"{rel}: {ex}")
+
+
+def _cleanup_swaps(ctx: dict[str, Any]) -> None:
+    for swap in ctx.get("swaps", []):
+        _cleanup_temp_path(Path(swap))
+    ctx["swaps"] = []
+
+
+def _cleanup_temp_path(path: Path, errors: list[str] | None = None) -> None:
+    try:
+        if path.exists():
+            _remove_tree_or_file(path)
+    except Exception as ex:
+        if errors is not None:
+            errors.append(f"{path}: {ex}")
+        else:
+            raise
+
+
+def _remove_tree_or_file(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def _directory_digest(path: Path) -> str:
+    h = hashlib.sha256()
+    _fingerprint_path(h, "dir", path)
+    return h.hexdigest()
+
+
+def _rel_to_target(path: Path, target_songs_dir: Path) -> str:
+    try:
+        return path.relative_to(target_songs_dir).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _path_contains_or_equals(parent: Path, child: Path) -> bool:
+    parent_s = _norm_abs(parent)
+    child_s = _norm_abs(child)
+    try:
+        common = os.path.commonpath([parent_s, child_s])
+    except ValueError:
+        return False
+    return common == parent_s
+
+
+def _same_path(a: Path, b: Path) -> bool:
+    return _norm_abs(a) == _norm_abs(b)
+
+
+def _norm_abs(path: Path) -> str:
+    return os.path.normcase(os.path.abspath(os.fspath(path)))
+
+
+def _existing_parents(path: Path) -> list[Path]:
+    out = []
+    cur = Path(path)
+    while not cur.exists() and cur.parent != cur:
+        cur = cur.parent
+    while cur.parent != cur:
+        out.append(cur)
+        cur = cur.parent
+    out.append(cur)
+    return out
 
 
 def is_link_or_junction(path: Path) -> bool:
