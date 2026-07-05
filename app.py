@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from PyQt6.QtCore import (
@@ -33,7 +34,9 @@ from PyQt6.QtWidgets import (
 
 # ─── 路径 ─────────────────────────────────────────────────────────────────────
 
-def _base_dir() -> Path:
+APP_DATA_DIRNAME = "ArcSlicerData"
+
+def _app_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
     return Path(__file__).parent
@@ -45,12 +48,45 @@ def _res_dir() -> Path:
     return Path(__file__).parent
 
 
-BASE_DIR    = _base_dir()
+def _data_root_for_app_dir(app_dir: Path, frozen: bool | None = None) -> Path:
+    frozen = getattr(sys, "frozen", False) if frozen is None else frozen
+    if frozen and app_dir.name.lower() == "dist":
+        return app_dir.parent / APP_DATA_DIRNAME
+    return app_dir / APP_DATA_DIRNAME
+
+
+def resolve_runtime_paths(
+    app_file: Path | None = None,
+    executable_path: Path | None = None,
+    frozen: bool | None = None,
+) -> dict[str, Path]:
+    frozen = getattr(sys, "frozen", False) if frozen is None else frozen
+    if frozen:
+        app_dir = Path(executable_path or sys.executable).parent
+    else:
+        app_dir = Path(app_file or __file__).parent
+    res_dir = _res_dir() if app_file is None and executable_path is None else app_dir
+    data_root = _data_root_for_app_dir(app_dir, frozen)
+    return {
+        "app_dir": app_dir,
+        "res_dir": res_dir,
+        "data_root": data_root,
+        "songs_dir": data_root / "songs",
+        "out_dir": data_root / "out",
+        "config_path": data_root / "config.json",
+        "slides_path": data_root / "slides.json",
+    }
+
+
+APP_DIR     = _app_dir()
+BASE_DIR    = APP_DIR
 RES_DIR     = _res_dir()
-OUT_DIR     = BASE_DIR / "out"
-CONFIG_PATH = BASE_DIR / "config.json"
-SLIDES_PATH = BASE_DIR / "slides.json"
-SONGLIST_EXAMPLE_PATH = BASE_DIR / "songlist_example.json"
+DATA_ROOT   = _data_root_for_app_dir(APP_DIR)
+DEFAULT_SONGS_DIR = DATA_ROOT / "songs"
+OUT_DIR     = DATA_ROOT / "out"
+CONFIG_PATH = DATA_ROOT / "config.json"
+SLIDES_PATH = DATA_ROOT / "slides.json"
+SONGLIST_EXAMPLE_PATH = APP_DIR / "songlist_example.json"
 _FFMPEG_BUNDLED = RES_DIR / "ffmpeg.exe"
 _AUTO_SEGMENT = object()
 
@@ -777,7 +813,163 @@ def do_slice(
     return 0
 
 
-# ─── 配置 ─────────────────────────────────────────────────────────────────────
+# ─── 运行数据迁移 / 配置 ─────────────────────────────────────────────────────
+
+@dataclass
+class MigrationReport:
+    songs: int = 0
+    out: bool = False
+    config: bool = False
+    slides: bool = False
+    failures: list[str] = field(default_factory=list)
+
+    def has_activity(self) -> bool:
+        return bool(self.songs or self.out or self.config or self.slides or self.failures)
+
+    def message(self) -> str:
+        parts = []
+        if self.songs:
+            parts.append(f"songs {self.songs} 项")
+        if self.out:
+            parts.append("out 已迁移")
+        if self.config:
+            parts.append("config 已迁移")
+        if self.slides:
+            parts.append("slides 已迁移")
+        if self.failures:
+            parts.append(f"失败 {len(self.failures)} 项")
+        return "已迁移运行数据至 ArcSlicerData：" + "，".join(parts) + "。"
+
+
+def _norm_path(path: Path) -> str:
+    return os.path.normcase(os.path.abspath(str(path)))
+
+
+def _same_path(a: Path, b: Path) -> bool:
+    return _norm_path(a) == _norm_path(b)
+
+
+def _legacy_runtime_roots(app_dir: Path = APP_DIR, data_root: Path = DATA_ROOT) -> list[Path]:
+    roots = []
+    base = data_root.parent
+    for candidate in (base, base / "dist", app_dir):
+        if candidate != data_root and candidate not in roots:
+            roots.append(candidate)
+    return roots
+
+
+def _rewrite_legacy_config_songs_dir(cfg: dict, legacy_roots: list[Path], new_songs_dir: Path) -> dict:
+    if not isinstance(cfg, dict):
+        return cfg
+    current = cfg.get("songs_dir")
+    if not isinstance(current, str) or not current:
+        return cfg
+    current_path = Path(current)
+    for root in legacy_roots:
+        if _same_path(current_path, root / "songs"):
+            cfg = dict(cfg)
+            cfg["songs_dir"] = str(new_songs_dir)
+            return cfg
+    return cfg
+
+
+def _is_dir_link(path: Path, is_junction_fn=None) -> bool:
+    if path.is_symlink():
+        return True
+    if is_junction_fn is None:
+        is_junction_fn = getattr(os.path, "isjunction", lambda _p: False)
+    try:
+        return bool(is_junction_fn(path))
+    except OSError:
+        return False
+
+
+def _create_dir_link(target: Path, link_path: Path) -> None:
+    if sys.platform == "win32":
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link_path), str(target)],
+            check=True, capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    else:
+        os.symlink(target, link_path, target_is_directory=True)
+
+
+def migrate_legacy_runtime_data(
+    data_root: Path = DATA_ROOT,
+    legacy_roots: list[Path] | None = None,
+    copytree_fn=shutil.copytree,
+    copy2_fn=shutil.copy2,
+    link_fn=_create_dir_link,
+    is_junction_fn=None,
+) -> MigrationReport:
+    data_root = Path(data_root)
+    songs_target = data_root / "songs"
+    out_target = data_root / "out"
+    config_target = data_root / "config.json"
+    slides_target = data_root / "slides.json"
+    legacy_roots = legacy_roots or _legacy_runtime_roots(data_root=data_root)
+    report = MigrationReport()
+
+    data_root.mkdir(parents=True, exist_ok=True)
+
+    for root in legacy_roots:
+        root = Path(root)
+        old_songs = root / "songs"
+        if old_songs.is_dir() and not _same_path(old_songs, songs_target):
+            songs_target.mkdir(parents=True, exist_ok=True)
+            for item in old_songs.iterdir():
+                dest = songs_target / item.name
+                if dest.exists() or dest.is_symlink():
+                    continue
+                try:
+                    if _is_dir_link(item, is_junction_fn):
+                        link_fn(item.resolve(strict=False), dest)
+                    elif item.is_dir():
+                        copytree_fn(item, dest)
+                    elif item.is_file():
+                        copy2_fn(item, dest)
+                    else:
+                        continue
+                    report.songs += 1
+                except Exception as ex:
+                    report.failures.append(f"songs/{item.name}: {ex}")
+
+        old_out = root / "out"
+        if old_out.is_dir() and not out_target.exists() and not _same_path(old_out, out_target):
+            try:
+                copytree_fn(old_out, out_target)
+                report.out = True
+            except Exception as ex:
+                report.failures.append(f"out: {ex}")
+
+        old_config = root / "config.json"
+        if old_config.is_file() and not config_target.exists() and not _same_path(old_config, config_target):
+            try:
+                cfg = json.loads(old_config.read_text(encoding="utf-8"))
+                cfg = _rewrite_legacy_config_songs_dir(cfg, legacy_roots, songs_target)
+                config_target.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+                report.config = True
+            except Exception as ex:
+                report.failures.append(f"config.json: {ex}")
+
+        old_slides = root / "slides.json"
+        if old_slides.is_file() and not slides_target.exists() and not _same_path(old_slides, slides_target):
+            try:
+                copy2_fn(old_slides, slides_target)
+                report.slides = True
+            except Exception as ex:
+                report.failures.append(f"slides.json: {ex}")
+
+    return report
+
+
+def prepare_runtime_data() -> MigrationReport:
+    report = migrate_legacy_runtime_data()
+    DATA_ROOT.mkdir(parents=True, exist_ok=True)
+    DEFAULT_SONGS_DIR.mkdir(parents=True, exist_ok=True)
+    return report
+
 
 def load_config() -> dict:
     if CONFIG_PATH.exists():
@@ -785,7 +977,7 @@ def load_config() -> dict:
             return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except Exception:
             pass
-    return {"songs_dir": str(BASE_DIR / "songs")}
+    return {"songs_dir": str(DEFAULT_SONGS_DIR)}
 
 
 def save_config(cfg: dict) -> None:
@@ -1615,6 +1807,7 @@ class SonglistPanel(QFrame):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self._migration_report = prepare_runtime_data()
         self._cfg    = load_config()
         self._rows: list[SegmentRow] = []
         self._worker: SlicerWorker | None = None
@@ -1629,6 +1822,8 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         self._setup_ui()
+        if self._migration_report.has_activity():
+            self._push_log(self._migration_report.message(), "muted")
         self._load_initial_data()
 
     # ── UI 构建 ───────────────────────────────────────────────────────────────
@@ -1867,7 +2062,7 @@ class MainWindow(QMainWindow):
         self._dir_path.setToolTip(p)
 
     def _browse_songs_dir(self):
-        d = self._cfg.get("songs_dir", str(BASE_DIR))
+        d = self._cfg.get("songs_dir", str(DEFAULT_SONGS_DIR))
         path = QFileDialog.getExistingDirectory(self, "选择 songs 根目录", d)
         if path:
             self._cfg["songs_dir"] = path
@@ -1879,7 +2074,7 @@ class MainWindow(QMainWindow):
 
     def _add_song_folder(self, src_path: str):
         src = Path(src_path)
-        songs_dir = Path(self._cfg.get("songs_dir", str(BASE_DIR / "songs")))
+        songs_dir = Path(self._cfg.get("songs_dir", str(DEFAULT_SONGS_DIR)))
 
         ok, msg, song_id = import_song_folder(src, songs_dir)
         if ok and song_id == src.name and (songs_dir / src.name).resolve() == src.resolve():
@@ -1955,7 +2150,7 @@ class MainWindow(QMainWindow):
     def _refresh_arc_cut_warnings(self):
         try:
             song_id = self._song_box.currentText()
-            songs_dir = Path(self._cfg.get("songs_dir", str(BASE_DIR / "songs")))
+            songs_dir = Path(self._cfg.get("songs_dir", str(DEFAULT_SONGS_DIR)))
             aff_path = songs_dir / song_id / "2.aff"
             if not song_id or not aff_path.is_file():
                 self._clear_arc_cut_warnings()
@@ -2029,7 +2224,7 @@ class MainWindow(QMainWindow):
         self._set_running(True)
         self._push_log("▶ 开始切片…", "muted")
 
-        songs_dir     = Path(self._cfg.get("songs_dir", str(BASE_DIR / "songs")))
+        songs_dir     = Path(self._cfg.get("songs_dir", str(DEFAULT_SONGS_DIR)))
         songlist_meta = self._songlist_panel.get_meta()
         self._worker = SlicerWorker(
             songs_dir, data["song_id"], data["segments"], data["speed"], songlist_meta
