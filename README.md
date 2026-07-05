@@ -114,6 +114,12 @@ ArcSlicerData/
 
 `current_export` 每次导出安全重建，仅包含本次结果。`library_export` 是长期累计导出包：只有开启 Songlist 时才允许更新，按 `song.id` 合并歌曲，按 `pack.id` 合并曲包。它不是 Version 2.2 的“安全合并到外部目标壳 songs 根目录”功能。
 
+## 外部目标壳合并
+
+当前版本不会直接写入用户的外部目标壳。需要实机验证时，请把 `ArcSlicerData/out/current_export/songs/` 复制到测试壳副本中。
+
+Version 2.2 的目标是新增“外部壳合并”流程：选择目标壳 `songs` 目录，先检查合并计划，再由用户确认写入，并提供受影响文件备份与失败恢复。该功能尚未实现，且不会替代 `library_export`。
+
 ## Songlist 填写说明
 
 勾选 **生成 songlist** 后，可展开 Songlist 项填写以下字段。未勾选时只保存表单，不输出 songlist。
@@ -177,4 +183,4 @@ ArcSlicerData/out/<export_target>/songs/pack/<img>
 - 当前固定处理 `2.aff`，即 FTR 谱面。
 - 非线性 Arc 在片段边界被截断时，界面会显示提示：边界坐标会按原缓动计算，但 Arc 片段内部轨迹可能与原谱存在轻微差异。
 - 非零 AudioOffset、以及部分 Camera / Scenecontrol 持续时间在变速切片时，仍建议人工复核。
-- 尚未实现多难度切片、官方曲包封面 / topbar 资源库、外部目标壳安全合并、波形选段或循环试听。
+- 尚未实现外部目标壳安全合并、多难度切片、官方曲包封面 / topbar 资源库、波形选段或循环试听。
