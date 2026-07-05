@@ -1,6 +1,7 @@
 import json
 import math
 import re
+import shutil
 import sys
 import tempfile
 import types
@@ -14,6 +15,8 @@ class _Fake:
         self._tooltip = ""
         self._fixed_height = None
         self._visible = True
+        self._checked = False
+        self._enabled = True
         self._children = []
 
     def __call__(self, *args, **kwargs):
@@ -68,6 +71,18 @@ class _Fake:
 
     def isVisible(self):
         return self._visible
+
+    def setChecked(self, checked):
+        self._checked = bool(checked)
+
+    def isChecked(self):
+        return self._checked
+
+    def setEnabled(self, enabled):
+        self._enabled = bool(enabled)
+
+    def isEnabled(self):
+        return self._enabled
 
     def deleteLater(self):
         pass
@@ -194,6 +209,8 @@ class Gate0SongAndSpeedTests(unittest.TestCase):
         self.assertEqual(entry["bpm_base"], 360.0)
         self.assertEqual(entry["bpm"], "360")
         self.assertEqual(entry["audioPreviewEnd"], 5000)
+        self.assertEqual([d["ratingClass"] for d in entry["difficulties"]], [0, 1, 2])
+        self.assertEqual([d["rating"] for d in entry["difficulties"]], [-1, -1, 9])
 
     def test_manual_songlist_preserves_complex_bpm_string(self):
         meta = {
@@ -862,6 +879,198 @@ class Gate0UiSaveTests(unittest.TestCase):
             self.assertEqual(slides_path.read_text(encoding="utf-8"), "original")
             self.assertTrue(any("速度无效" in text for text, _ in logs))
             self.assertTrue(all(kind == "err" for _, kind in logs))
+
+
+class Gate0RuntimeDataPathTests(unittest.TestCase):
+    def test_source_runtime_paths_use_project_data_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            app_file = project / "app.py"
+            paths = app.resolve_runtime_paths(app_file=app_file, frozen=False)
+
+            self.assertEqual(paths["app_dir"], project)
+            self.assertEqual(paths["data_root"], project / "ArcSlicerData")
+            self.assertEqual(paths["songs_dir"], project / "ArcSlicerData" / "songs")
+            self.assertEqual(paths["out_dir"], project / "ArcSlicerData" / "out")
+
+    def test_frozen_dist_runtime_paths_use_parent_data_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            exe = Path(td) / "project" / "dist" / "ArcSlicer.exe"
+            paths = app.resolve_runtime_paths(executable_path=exe, frozen=True)
+
+            self.assertEqual(paths["app_dir"], exe.parent)
+            self.assertEqual(paths["data_root"], exe.parent.parent / "ArcSlicerData")
+
+    def test_frozen_non_dist_runtime_paths_use_exe_dir_data_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            exe = Path(td) / "portable" / "ArcSlicer.exe"
+            paths = app.resolve_runtime_paths(executable_path=exe, frozen=True)
+
+            self.assertEqual(paths["app_dir"], exe.parent)
+            self.assertEqual(paths["data_root"], exe.parent / "ArcSlicerData")
+
+    def test_migrates_source_root_data_and_rewrites_default_songs_dir(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            data_root = project / "ArcSlicerData"
+            song = project / "songs" / "song_a"
+            out = project / "out"
+            song.mkdir(parents=True)
+            out.mkdir(parents=True)
+            (song / "2.aff").write_text("-\n", encoding="utf-8")
+            (out / "songlist").write_text("old", encoding="utf-8")
+            (project / "config.json").write_text(
+                json.dumps({"songs_dir": str(project / "songs"), "keep": True}),
+                encoding="utf-8",
+            )
+            (project / "slides.json").write_text('{"segments":[]}', encoding="utf-8")
+
+            report = app.migrate_legacy_runtime_data(data_root, [project])
+
+            self.assertEqual(report.songs, 1)
+            self.assertTrue(report.out)
+            self.assertTrue(report.config)
+            self.assertTrue(report.slides)
+            self.assertTrue((data_root / "songs" / "song_a" / "2.aff").exists())
+            self.assertEqual((data_root / "out" / "songlist").read_text(encoding="utf-8"), "old")
+            cfg = json.loads((data_root / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(cfg["songs_dir"], str(data_root / "songs"))
+            self.assertTrue((project / "songs" / "song_a" / "2.aff").exists())
+            self.assertTrue((project / "out" / "songlist").exists())
+            self.assertTrue((project / "config.json").exists())
+            self.assertTrue((project / "slides.json").exists())
+
+    def test_migrates_dist_data_to_project_data_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            dist = project / "dist"
+            data_root = project / "ArcSlicerData"
+            song = dist / "songs" / "song_b"
+            out = dist / "out"
+            song.mkdir(parents=True)
+            out.mkdir(parents=True)
+            (song / "2.aff").write_text("-\n", encoding="utf-8")
+            (out / "songlist").write_text("dist", encoding="utf-8")
+            (dist / "config.json").write_text(
+                json.dumps({"songs_dir": str(dist / "songs")}),
+                encoding="utf-8",
+            )
+            (dist / "slides.json").write_text('{"speed":1}', encoding="utf-8")
+
+            report = app.migrate_legacy_runtime_data(data_root, [project, dist])
+
+            self.assertEqual(report.songs, 1)
+            self.assertTrue(report.out)
+            self.assertTrue(report.config)
+            self.assertTrue(report.slides)
+            self.assertTrue((data_root / "songs" / "song_b" / "2.aff").exists())
+            self.assertEqual((data_root / "out" / "songlist").read_text(encoding="utf-8"), "dist")
+            cfg = json.loads((data_root / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(cfg["songs_dir"], str(data_root / "songs"))
+
+    def test_existing_data_root_content_is_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            data_root = project / "ArcSlicerData"
+            old_song = project / "songs" / "song_a"
+            new_song = data_root / "songs" / "song_a"
+            old_song.mkdir(parents=True)
+            new_song.mkdir(parents=True)
+            (old_song / "2.aff").write_text("old", encoding="utf-8")
+            (new_song / "2.aff").write_text("new", encoding="utf-8")
+            data_root.mkdir(exist_ok=True)
+            (data_root / "config.json").write_text(json.dumps({"songs_dir": "custom"}), encoding="utf-8")
+            (project / "config.json").write_text(json.dumps({"songs_dir": str(project / "songs")}), encoding="utf-8")
+
+            report = app.migrate_legacy_runtime_data(data_root, [project])
+
+            self.assertFalse(report.config)
+            self.assertEqual(report.songs, 0)
+            self.assertEqual((new_song / "2.aff").read_text(encoding="utf-8"), "new")
+            cfg = json.loads((data_root / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(cfg["songs_dir"], "custom")
+
+    def test_external_config_songs_dir_is_preserved(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            data_root = project / "ArcSlicerData"
+            external = Path(td) / "external_songs"
+            project.mkdir()
+            (project / "config.json").write_text(json.dumps({"songs_dir": str(external)}), encoding="utf-8")
+
+            app.migrate_legacy_runtime_data(data_root, [project])
+            cfg = json.loads((data_root / "config.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(cfg["songs_dir"], str(external))
+
+    def test_second_migration_call_is_quiet_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            data_root = project / "ArcSlicerData"
+            song = project / "songs" / "song_a"
+            song.mkdir(parents=True)
+            (song / "2.aff").write_text("-\n", encoding="utf-8")
+
+            first = app.migrate_legacy_runtime_data(data_root, [project])
+            second = app.migrate_legacy_runtime_data(data_root, [project])
+
+            self.assertTrue(first.has_activity())
+            self.assertFalse(second.has_activity())
+            self.assertEqual((data_root / "songs" / "song_a" / "2.aff").read_text(encoding="utf-8"), "-\n")
+
+    def test_junction_like_song_entry_recreates_link_without_copytree(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            data_root = project / "ArcSlicerData"
+            linked = project / "songs" / "linked_song"
+            linked.mkdir(parents=True)
+            calls = {"linked": [], "copytree": []}
+
+            def is_junction(path):
+                return Path(path).name == "linked_song"
+
+            def link_fn(target, dest):
+                calls["linked"].append((Path(target), Path(dest)))
+                Path(dest).write_text("link placeholder", encoding="utf-8")
+
+            def copytree_fn(src, dest):
+                calls["copytree"].append((Path(src), Path(dest)))
+                shutil.copytree(src, dest)
+
+            report = app.migrate_legacy_runtime_data(
+                data_root,
+                [project],
+                copytree_fn=copytree_fn,
+                link_fn=link_fn,
+                is_junction_fn=is_junction,
+            )
+
+            self.assertEqual(report.songs, 1)
+            self.assertEqual(len(calls["linked"]), 1)
+            self.assertEqual(calls["copytree"], [])
+
+    def test_song_entry_failure_does_not_abort_other_items(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            data_root = project / "ArcSlicerData"
+            good = project / "songs" / "good"
+            bad = project / "songs" / "bad"
+            good.mkdir(parents=True)
+            bad.mkdir(parents=True)
+            (good / "2.aff").write_text("-\n", encoding="utf-8")
+            (bad / "2.aff").write_text("-\n", encoding="utf-8")
+
+            def copytree_fn(src, dest):
+                if Path(src).name == "bad":
+                    raise OSError("boom")
+                return shutil.copytree(src, dest)
+
+            report = app.migrate_legacy_runtime_data(data_root, [project], copytree_fn=copytree_fn)
+
+            self.assertEqual(report.songs, 1)
+            self.assertEqual(len(report.failures), 1)
+            self.assertTrue((data_root / "songs" / "good" / "2.aff").exists())
+            self.assertFalse((data_root / "songs" / "bad").exists())
 
 
 class Gate0PyQtImportTests(unittest.TestCase):
