@@ -1,8 +1,8 @@
 # Arc Slicer 项目需求书
 
-> 文档状态：设计基线（修订 1.4，替代 1.3）
+> 文档状态：当前实现基线（修订 1.4，替代 1.3）
 > 项目名称：Arc Slicer
-> 当前阶段：Gate 0 已正式关闭；运行数据目录稳定化已完成。当前主线为 Version 2.1「导出元数据、练习曲包与双层输出工作流」。
+> 当前阶段：Gate 0 已正式关闭；运行数据目录稳定化已完成；Version 2.1「导出元数据、练习曲包与双层输出工作流」当前实现基线已形成。
 > 已锁定基线：
 > - `c0f5d80 feat(gate0): complete stable PyQt slicing baseline`
 > - `b6b1770 feat(runtime): stabilize persistent data directory`
@@ -16,9 +16,9 @@
 > 本次修订重点：
 > - Gate 0 状态改为正式关闭，更新 Arc 风险提示的实际交互；
 > - 固化 `ArcSlicerData/` 运行数据目录；
-> - 重写 Version 2.1 的导出规则：显式元数据开关、包含倍速的片段 ID、曲包输出、封面生成、双层导出包；
+> - 固化 Version 2.1 的已实现导出规则：显式元数据开关、包含倍速的片段 ID、曲包输出、封面生成、双层导出包；
 > - 明确歌曲曲绘三个标准文件全部迁移；
-> - 将多难度读取与完整 difficulties 输出列入后续版本；
+> - 明确 V2.1 使用 `ratingClass 0 / 1 / 2` 兼容占位，多难度读取与完整 `0..4` 输出列入后续版本；
 > - 将官方曲包封面 / topbar 本地资源选择列入后续功能。
 
 ---
@@ -133,6 +133,14 @@ Arc Slicer 是面向 Arcaea 自制壳 / 本地资源环境的谱面练习切分�
 * 基础自动回归测试；
 * 真实壳实机导入、进入歌曲与基础游玩验证；
 * Gate 0 非线性 Arc 风险提示的实际 UI 验证。
+* `current_export` / `library_export` 双层导出；
+* songlist / packlist 显式开关，默认关闭；
+* Songlist / Packlist 独立折叠 UI；
+* 片段 ID 包含 start / end / speed token；
+* 三种歌曲曲绘按存在情况全量迁移；
+* 曲包封面输出为 `374 × 750` PNG；
+* V2.1 songlist `difficulties` 使用 `[0, 1, 2]` 兼容占位；
+* OGG 时长读取、片段边界校验与终点超时时的显式“设为上限”操作。
 
 ### 3.2 当前明确限制
 
@@ -144,8 +152,9 @@ Arc Slicer 是面向 Arcaea 自制壳 / 本地资源环境的谱面练习切分�
 * Camera / Scenecontrol 部分持续时间参数尚未随 speed 完整处理；
 * 非线性 Arc 中途截断仅保证切点端坐标正确，Arc 内部轨迹仍为近似；
 * 当前 Timing 补齐策略不保留切片开始时的原始拍线 / 小节线相位；
-* 仍未实现完整曲包导出、总导出包、曲包封面、packlist；
-* 当前 songlist 的旧模板 fragment 路径必须在 Version 2.1 中退出正式输出链路。
+* 当前尚未实现外部目标壳 `songs/` 根目录的安全合并；
+* 当前尚未实现波形选段、循环试听、Combo 与多难度切片；
+* 当前尚未实现官方曲包封面 / topbar 本地资源库选择。
 
 ---
 
@@ -349,9 +358,9 @@ write_library_export: bool
 
 任一导出操作至少选择一个目标；两个都未选择时必须阻止导出并提示。
 
-### 5.7 ExportPlan
+### 5.7 导出计划与校验
 
-导出必须先生成 ExportPlan，再执行文件写入：
+导出必须在文件发布前形成明确的导出计划并完成校验。当前实现可由 staging 目录、发布参数与校验结果共同承载；后续可收敛为显式 `ExportPlan` 数据结构：
 
 ```text
 source_song
@@ -389,8 +398,9 @@ warnings
 
 * 两个开关默认关闭；
 * `packlist_enabled` 依赖 `songlist_enabled`；
-* 开启 packlist 时自动开启 songlist；
-* 关闭 songlist 时必须同时关闭并禁用 packlist；
+* `songlist_enabled = false` 时，Packlist UI 隐藏，packlist 不生效；
+* 关闭 songlist 不清空用户此前填写的 pack 字段，也不强制清空已保存的 `packlist_enabled` 偏好；
+* 重新开启 songlist 后，Packlist 项恢复显示，并保留此前输入与勾选偏好；
 * 用户填写但未启用开关的元数据仍保存到 `slides.json`，但不得输出 songlist、packlist 或曲包资源；
 * 普通切片不应因未填写元数据而受阻；
 * 不得以“某字段非空”自动生成元数据文件；
@@ -883,7 +893,8 @@ low < end_ms < high
 * 生成 `songs/songlist`、`songs/packlist`、`songs/pack/<img_name>`；
 * 生成本次导出包并可选更新总导出包；
 * 总导出包合并 songlist、packlist、歌曲资源、曲包封面；
-* 导出前生成 ExportPlan、进行校验和冲突提示。
+* 导出前形成明确导出计划，进行校验和冲突提示。
+* 读取 OGG 时长并校验片段边界，终点超时时提供显式“设为上限”操作。
 
 ## 双层输出目录
 
@@ -913,7 +924,7 @@ ArcSlicerData/out/
 ## 本次导出包规则
 
 * 用户启用“生成本次导出包”时，先清空并重建 `current_export/`；
-* 仅包含本次 ExportPlan 的资源与元数据；
+* 仅包含本次导出计划的资源与元数据；
 * 用于直接分享给他人；
 * 不应混入过去导出的孤儿歌曲、旧 songlist 条目或旧 pack 资源。
 
@@ -927,7 +938,8 @@ ArcSlicerData/out/
   * 不存在则复制；
   * 同名且内容相同则复用；
   * 同名但内容不同则报冲突，要求用户修改 `img_name` 或封面来源；
-* songlist 关闭时仍可生成普通本次资源包；但更新总导出包时必须明确提示其资源不会获得 songlist 索引；
+* songlist 关闭时仍可生成普通本次资源包；
+* `library_export` 仅在 songlist 开启时更新，避免向长期总包写入无 songlist 索引的孤立资源；
 * 后续可提供“总导出包完整性检查与重建”功能。
 
 ## 验收标准
@@ -941,6 +953,8 @@ ArcSlicerData/out/
 * 总导出包可累计多个源曲 / pack；
 * 相同片段 ID 重导出时，总导出包保持元数据与资源一致；
 * 当前导出包与总导出包都可整体复制其 `songs/` 目录到目标壳进行验证。
+* 片段起点 / 终点为非负整数毫秒，终点大于起点，且边界不得超过 OGG 时长；
+* 终点超时时，界面显示明确错误与“设为上限”快捷操作，且不会静默改写用户输入。
 
 # Version 2.2：安全合并至目标目录
 
@@ -1122,6 +1136,8 @@ ArcSlicerData/out/
 * 找不到选定 AFF；
 * AFF 无法解析；
 * 结束时间小于等于开始时间；
+* 起点或终点不是非负整数毫秒；
+* 起点或终点超过当前 OGG 时长；
 * speed 非有限正数；
 * songlist / packlist 开关依赖错误；
 * SongTemplate 不合法；
@@ -1136,7 +1152,7 @@ ArcSlicerData/out/
 
 输出原则：
 
-1. 先生成 ExportPlan；
+1. 先形成明确导出计划；
 2. 先校验；
 3. 先写入 staging 或临时目录；
 4. 再更新所选导出目标；
@@ -1170,7 +1186,8 @@ ArcSlicerData/out/
 至少覆盖：
 
 * songlist / packlist 开关默认关闭；
-* 开启 packlist 自动启用 songlist；
+* songlist 关闭时 Packlist UI 隐藏，packlist 不生效；
+* 重新开启 songlist 后恢复此前保存的 packlist 偏好与字段；
 * songlist 关闭时不产生 songlist、packlist；
 * 填写表单但不开启时仅保存 slides，不输出元数据；
 * `songlist_fragment.json` 不再生成；
@@ -1189,6 +1206,9 @@ ArcSlicerData/out/
 * 同名 pack img 内容冲突阻止更新；
 * 两个输出目标均未选择时报错；
 * 失败时不留下半写入 songlist / packlist。
+* OGG 时长读取成功时显示终点上限；
+* 终点超过 OGG 时长时显示“设为上限”快捷操作；
+* 输入、切换歌曲、加载方案或导出时均不得静默截断终点。
 
 ### 13.3 实机导入测试
 
