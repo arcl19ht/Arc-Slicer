@@ -13,7 +13,9 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 
 from PyQt6.QtCore import (
@@ -84,6 +86,10 @@ RES_DIR     = _res_dir()
 DATA_ROOT   = _data_root_for_app_dir(APP_DIR)
 DEFAULT_SONGS_DIR = DATA_ROOT / "songs"
 OUT_DIR     = DATA_ROOT / "out"
+CURRENT_EXPORT_ROOT = OUT_DIR / "current_export"
+CURRENT_EXPORT_SONGS_DIR = CURRENT_EXPORT_ROOT / "songs"
+LIBRARY_EXPORT_ROOT = OUT_DIR / "library_export"
+LIBRARY_EXPORT_SONGS_DIR = LIBRARY_EXPORT_ROOT / "songs"
 CONFIG_PATH = DATA_ROOT / "config.json"
 SLIDES_PATH = DATA_ROOT / "slides.json"
 SONGLIST_EXAMPLE_PATH = APP_DIR / "songlist_example.json"
@@ -648,6 +654,206 @@ def slice_ogg(in_path: Path, out_path: Path, start_ms: int, end_ms: int, speed: 
     subprocess.run(cmd, check=True, creationflags=flags)
 
 
+# ─── V2.1 导出路径底座 ───────────────────────────────────────────────────────
+
+JACKET_FILENAMES = ("1080_base.jpg", "base.jpg", "1080_base_256.jpg")
+
+
+def current_export_root(out_dir: Path | None = None) -> Path:
+    return Path(out_dir or OUT_DIR) / "current_export"
+
+
+def current_export_songs_dir(out_dir: Path | None = None) -> Path:
+    return current_export_root(out_dir) / "songs"
+
+
+def library_export_root(out_dir: Path | None = None) -> Path:
+    return Path(out_dir or OUT_DIR) / "library_export"
+
+
+def library_export_songs_dir(out_dir: Path | None = None) -> Path:
+    return library_export_root(out_dir) / "songs"
+
+
+def _speed_text(speed: float) -> str:
+    speed = validate_speed_value(float(speed))
+    text = format(speed, ".12g")
+    decimal = Decimal(text).normalize()
+    out = format(decimal, "f")
+    if "." in out:
+        out = out.rstrip("0").rstrip(".")
+    return out or "0"
+
+
+def normalize_speed_token(speed: float) -> str:
+    return _speed_text(speed).replace(".", "p")
+
+
+def build_segment_id(source_id: str, start_ms: int, end_ms: int, speed: float) -> str:
+    if not source_id:
+        raise ValueError("source_id 不能为空")
+    return f"{source_id}_{int(start_ms)}_{int(end_ms)}_x{normalize_speed_token(speed)}"
+
+
+def build_segment_display_title(source_title: str, start_ms: int, end_ms: int, speed: float) -> str:
+    title = str(source_title or "").strip() or "Untitled"
+    return f"{title} [{int(start_ms)}–{int(end_ms)}ms · {_speed_text(speed)}×]"
+
+
+def copy_song_jackets(source_dir: Path, out_dir: Path) -> list[Path]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    copied = []
+    for name in JACKET_FILENAMES:
+        src = Path(source_dir) / name
+        if src.is_file():
+            dest = Path(out_dir) / name
+            shutil.copy2(src, dest)
+            copied.append(dest)
+    return copied
+
+
+def create_current_export_stage(out_dir: Path | None = None) -> Path:
+    out_dir = Path(out_dir or OUT_DIR)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for _ in range(100):
+        stage = out_dir / f".current_export_staging_{uuid.uuid4().hex}"
+        try:
+            (stage / "songs").mkdir(parents=True)
+            return stage
+        except FileExistsError:
+            continue
+    raise RuntimeError("无法创建 current_export staging 目录")
+
+
+def _resolved(path: Path) -> Path:
+    return Path(path).resolve(strict=False)
+
+
+def _is_direct_child(child: Path, parent: Path) -> bool:
+    return _resolved(child).parent == _resolved(parent)
+
+
+def _path_is_link_or_junction(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    try:
+        return bool(getattr(os.path, "isjunction", lambda _p: False)(path))
+    except OSError:
+        return False
+
+
+def _assert_safe_current_export_path(path: Path, out_dir: Path) -> None:
+    path = Path(path)
+    out_dir = Path(out_dir)
+    expected = current_export_root(out_dir)
+    if _resolved(path) != _resolved(expected):
+        raise RuntimeError(f"拒绝操作非 current_export 路径: {path}")
+    if _resolved(path) in {_resolved(out_dir), _resolved(DATA_ROOT), _resolved(library_export_root(out_dir))}:
+        raise RuntimeError(f"拒绝操作危险路径: {path}")
+
+
+def _assert_safe_stage_path(stage_root: Path, out_dir: Path) -> None:
+    stage_root = Path(stage_root)
+    out_dir = Path(out_dir)
+    if not _is_direct_child(stage_root, out_dir):
+        raise RuntimeError(f"staging 目录必须位于 OUT_DIR 下: {stage_root}")
+    if not stage_root.name.startswith(".current_export_staging_"):
+        raise RuntimeError(f"非法 staging 目录名: {stage_root.name}")
+    if _resolved(stage_root) in {
+        _resolved(out_dir),
+        _resolved(current_export_root(out_dir)),
+        _resolved(library_export_root(out_dir)),
+        _resolved(DATA_ROOT),
+    }:
+        raise RuntimeError(f"拒绝操作危险 staging 路径: {stage_root}")
+
+
+def cleanup_current_export_stage(stage_root: Path, out_dir: Path | None = None) -> None:
+    out_dir = Path(out_dir or OUT_DIR)
+    _assert_safe_stage_path(stage_root, out_dir)
+    stage_root = Path(stage_root)
+    if stage_root.exists():
+        if _path_is_link_or_junction(stage_root):
+            raise RuntimeError(f"拒绝删除链接 staging 目录: {stage_root}")
+        shutil.rmtree(stage_root)
+
+
+def publish_current_export_stage(
+    stage_root: Path,
+    out_dir: Path | None = None,
+    rename_fn=None,
+    rmtree_fn=shutil.rmtree,
+) -> None:
+    out_dir = Path(out_dir or OUT_DIR)
+    stage_root = Path(stage_root)
+    current = current_export_root(out_dir)
+    backup = out_dir / f".current_export_backup_{uuid.uuid4().hex}"
+    rename_fn = rename_fn or (lambda src, dest: Path(src).rename(dest))
+
+    _assert_safe_stage_path(stage_root, out_dir)
+    _assert_safe_current_export_path(current, out_dir)
+    if not stage_root.is_dir():
+        raise RuntimeError(f"staging 目录不存在: {stage_root}")
+    if current.exists() and _path_is_link_or_junction(current):
+        raise RuntimeError("current_export 是符号链接或 Junction，拒绝发布以避免误删目标")
+
+    def move_dir(src: Path, dest: Path, allow_copy_fallback: bool = False) -> None:
+        try:
+            rename_fn(src, dest)
+            return
+        except Exception:
+            if not allow_copy_fallback:
+                raise
+            if not Path(src).is_dir() or _path_is_link_or_junction(src):
+                raise
+            shutil.copytree(src, dest)
+            rmtree_fn(src)
+
+    def restore_backup() -> None:
+        if not backup.exists() or current.exists():
+            return
+        try:
+            rename_fn(backup, current)
+        except Exception:
+            shutil.copytree(backup, current)
+            rmtree_fn(backup)
+
+    moved_old = False
+    published = False
+    try:
+        if current.exists():
+            move_dir(current, backup, allow_copy_fallback=True)
+            moved_old = True
+        move_dir(stage_root, current, allow_copy_fallback=True)
+        published = True
+        if backup.exists():
+            rmtree_fn(backup)
+    except Exception as ex:
+        if moved_old and not published and current.exists():
+            try:
+                if current.is_dir() and not _path_is_link_or_junction(current):
+                    rmtree_fn(current)
+            except Exception:
+                pass
+        if moved_old and backup.exists() and not current.exists():
+            try:
+                restore_backup()
+            except Exception:
+                pass
+        if not moved_old and backup.exists():
+            try:
+                rmtree_fn(backup)
+            except Exception:
+                pass
+        if stage_root.exists() and stage_root.name.startswith(".current_export_staging_"):
+            try:
+                if not _path_is_link_or_junction(stage_root):
+                    rmtree_fn(stage_root)
+            except Exception:
+                pass
+        raise RuntimeError(f"发布 current_export 失败: {ex}") from ex
+
+
 # ─── songlist ─────────────────────────────────────────────────────────────────
 
 def make_songlist_fragment(new_id: str, start_ms: int, end_ms: int, speed: float) -> dict | None:
@@ -747,68 +953,82 @@ def do_slice(
         return 1
 
     in_dir = songs_dir / song_id
-    in_aff, in_ogg, in_jpg = in_dir / "2.aff", in_dir / "base.ogg", in_dir / "base.jpg"
+    in_aff, in_ogg = in_dir / "2.aff", in_dir / "base.ogg"
 
     for p in (in_aff, in_ogg):
         if not p.exists():
             log_fn(f"✗ 找不到文件: {p}", "err")
             return 1
 
-    out_root = OUT_DIR / "songs"
-    out_root.mkdir(parents=True, exist_ok=True)
+    try:
+        stage_root = create_current_export_stage()
+    except RuntimeError as ex:
+        log_fn(f"✗ {ex}", "err")
+        return 1
+
+    out_root = stage_root / "songs"
     all_song_entries: list[dict] = []
 
-    for i, seg in enumerate(segments):
-        s, e = int(seg["s"]), int(seg["e"])
-        if e <= s:
-            log_fn(f"✗ 无效时间段 s={s} e={e}", "err")
-            return 1
+    try:
+        for i, seg in enumerate(segments):
+            s, e = int(seg["s"]), int(seg["e"])
+            if e <= s:
+                log_fn(f"✗ 无效时间段 s={s} e={e}", "err")
+                cleanup_current_export_stage(stage_root)
+                return 1
 
-        new_id   = f"{song_id}_{s}_{e}"
-        out_dir  = out_root / new_id
-        out_dir.mkdir(parents=True, exist_ok=True)
+            new_id   = build_segment_id(song_id, s, e, speed)
+            out_dir  = out_root / new_id
+            out_dir.mkdir(parents=True, exist_ok=True)
 
-        if in_jpg.exists():
-            shutil.copy2(in_jpg, out_dir / "base.jpg")
+            copy_song_jackets(in_dir, out_dir)
 
-        log_fn(f"  ♪ 音频 {s}ms – {e}ms  speed={speed}…", "normal")
+            log_fn(f"  ♪ 音频 {s}ms – {e}ms  speed={speed}…", "normal")
+            try:
+                slice_ogg(in_ogg, out_dir / "base.ogg", s, e, speed)
+            except subprocess.CalledProcessError as ex:
+                log_fn(f"✗ ffmpeg 失败: {ex}", "err")
+                cleanup_current_export_stage(stage_root)
+                return 1
+
+            log_fn(f"  ✎ 谱面 {s}ms – {e}ms…", "normal")
+            aff_warnings: list[str] = []
+            new_aff = slice_aff(in_aff.read_text(encoding="utf-8", errors="replace"), s, e, speed, aff_warnings)
+            for warning in aff_warnings:
+                log_fn(f"  ⚠ {warning}", "muted")
+            (out_dir / "2.aff").write_text(new_aff, encoding="utf-8")
+
+            if songlist_meta:
+                entry = make_songlist_entry(new_id, i, s, e, speed, songlist_meta)
+                (out_dir / "songlist").write_text(
+                    json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                all_song_entries.append(entry["songs"][0])
+                log_fn(f"  ✎ songlist → {new_id}", "muted")
+
+            log_fn(f"✓ 输出 → out/current_export/songs/{new_id}/", "ok")
+
+        # 临时兼容旧手填 SonglistPanel：仅写入本次 current_export 的 songs 根。
+        if songlist_meta and all_song_entries:
+            merged_path = out_root / "songlist"
+            merged_path.write_text(
+                json.dumps({"songs": all_song_entries}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            log_fn(f"✓ 合并 songlist → out/current_export/songs/songlist（共 {len(all_song_entries)} 首）", "ok")
+
         try:
-            slice_ogg(in_ogg, out_dir / "base.ogg", s, e, speed)
-        except subprocess.CalledProcessError as ex:
-            log_fn(f"✗ ffmpeg 失败: {ex}", "err")
+            publish_current_export_stage(stage_root)
+        except RuntimeError as ex:
+            log_fn(f"✗ {ex}", "err")
             return 1
-
-        log_fn(f"  ✎ 谱面 {s}ms – {e}ms…", "normal")
-        aff_warnings: list[str] = []
-        new_aff = slice_aff(in_aff.read_text(encoding="utf-8", errors="replace"), s, e, speed, aff_warnings)
-        for warning in aff_warnings:
-            log_fn(f"  ⚠ {warning}", "muted")
-        (out_dir / "2.aff").write_text(new_aff, encoding="utf-8")
-
-        frag = make_songlist_fragment(new_id, s, e, speed)
-        if frag:
-            (out_dir / "songlist_fragment.json").write_text(
-                json.dumps(frag, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-
-        if songlist_meta:
-            entry = make_songlist_entry(new_id, i, s, e, speed, songlist_meta)
-            (out_dir / "songlist").write_text(
-                json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            all_song_entries.append(entry["songs"][0])
-            log_fn(f"  ✎ songlist → {new_id}", "muted")
-
-        log_fn(f"✓ 输出 → out/songs/{new_id}/", "ok")
-
-    # 合并 songlist 输出到 out/ 根目录
-    if songlist_meta and all_song_entries:
-        merged_path = OUT_DIR / "songlist"
-        merged_path.write_text(
-            json.dumps({"songs": all_song_entries}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        log_fn(f"✓ 合并 songlist → out/songlist（共 {len(all_song_entries)} 首）", "ok")
+    except Exception as ex:
+        try:
+            cleanup_current_export_stage(stage_root)
+        except Exception as cleanup_ex:
+            log_fn(f"✗ 清理 staging 失败: {cleanup_ex}", "err")
+        log_fn(f"✗ 切片失败: {ex}", "err")
+        return 1
 
     return 0
 
@@ -1043,7 +1263,7 @@ class SlicerWorker(QThread):
             log("  songlist 生成: 开启", "muted")
         code = do_slice(self.songs_dir, self.song_id, self.segments, self.speed, log, self.songlist_meta)
         if code == 0:
-            log("✓ 全部完成！输出目录: out/songs/", "ok")
+            log("✓ 全部完成！输出目录: out/current_export/songs/", "ok")
         self.done_signal.emit(code)
 
 
