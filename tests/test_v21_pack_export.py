@@ -277,6 +277,7 @@ class V21PackDoSliceTests(_PackExportCase):
         song = _read_json(songs / "songlist")["songs"][0]
         pack = _read_json(songs / "packlist")["packs"][0]
         self.assertEqual(song["set"], "prelude_pack")
+        self.assertEqual([d["ratingClass"] for d in song["difficulties"]], [0, 1, 2])
         self.assertEqual(pack["id"], "prelude_pack")
         self.assertEqual(pack["img"], "select_prelude_pack.png")
         self.assertEqual(pack["section"], "collab")

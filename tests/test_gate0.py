@@ -195,6 +195,8 @@ class Gate0SongAndSpeedTests(unittest.TestCase):
         self.assertEqual(entry["bpm_base"], 360.0)
         self.assertEqual(entry["bpm"], "360")
         self.assertEqual(entry["audioPreviewEnd"], 5000)
+        self.assertEqual([d["ratingClass"] for d in entry["difficulties"]], [0, 1, 2])
+        self.assertEqual([d["rating"] for d in entry["difficulties"]], [-1, -1, 9])
 
     def test_manual_songlist_preserves_complex_bpm_string(self):
         meta = {

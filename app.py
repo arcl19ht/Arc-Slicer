@@ -917,6 +917,42 @@ def song_template_from_form(data: dict) -> SongTemplate:
         raise ValueError(f"Songlist 表单字段格式无效: {ex}") from ex
 
 
+def _song_meta_value(meta, key: str):
+    if hasattr(meta, key):
+        return getattr(meta, key)
+    return meta[key]
+
+
+def build_ftr_compat_difficulties(meta) -> list[dict]:
+    chart_designer = _song_meta_value(meta, "chart_designer")
+    jacket_designer = _song_meta_value(meta, "jacket_designer")
+    rating = int(_song_meta_value(meta, "rating"))
+    rating_plus = bool(_song_meta_value(meta, "rating_plus"))
+    return [
+        {
+            "ratingClass": 0,
+            "chartDesigner": chart_designer,
+            "jacketDesigner": jacket_designer,
+            "rating": -1,
+            "ratingPlus": False,
+        },
+        {
+            "ratingClass": 1,
+            "chartDesigner": chart_designer,
+            "jacketDesigner": jacket_designer,
+            "rating": -1,
+            "ratingPlus": False,
+        },
+        {
+            "ratingClass": 2,
+            "chartDesigner": chart_designer,
+            "jacketDesigner": jacket_designer,
+            "rating": rating,
+            "ratingPlus": rating_plus,
+        },
+    ]
+
+
 def build_songlist_entry(
     template: SongTemplate,
     segment_id: str,
@@ -943,13 +979,7 @@ def build_songlist_entry(
         "bg": template.bg,
         "date": int(time.time()),
         "version": template.version,
-        "difficulties": [{
-            "ratingClass": 2,
-            "chartDesigner": template.chart_designer,
-            "jacketDesigner": template.jacket_designer,
-            "rating": int(template.rating),
-            "ratingPlus": bool(template.rating_plus),
-        }],
+        "difficulties": build_ftr_compat_difficulties(template),
     }
 
 
@@ -1440,13 +1470,7 @@ def make_songlist_entry(
             "bg": meta["bg"],
             "date": int(time.time()),
             "version": meta["version"],
-            "difficulties": [{
-                "ratingClass": 2,
-                "chartDesigner": meta["chart_designer"],
-                "jacketDesigner": meta["jacket_designer"],
-                "rating": int(meta["rating"]),
-                "ratingPlus": bool(meta["rating_plus"]),
-            }],
+            "difficulties": build_ftr_compat_difficulties(meta),
         }]
     }
 

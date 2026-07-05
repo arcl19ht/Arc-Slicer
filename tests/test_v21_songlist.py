@@ -130,6 +130,17 @@ def _valid_form(**overrides):
     return data
 
 
+def _assert_ftr_compat_difficulties(testcase, song, rating=9, rating_plus=False):
+    difficulties = song["difficulties"]
+    testcase.assertEqual(len(difficulties), 3)
+    testcase.assertEqual([d["ratingClass"] for d in difficulties], [0, 1, 2])
+    testcase.assertEqual([d["rating"] for d in difficulties], [-1, -1, rating])
+    testcase.assertEqual([d["ratingPlus"] for d in difficulties], [False, False, rating_plus])
+    for diff in difficulties:
+        testcase.assertEqual(diff["chartDesigner"], "Chart")
+        testcase.assertEqual(diff["jacketDesigner"], "Jacket")
+
+
 class _ExportCase(unittest.TestCase):
     def setUp(self):
         self._old_out_dir = app.OUT_DIR
@@ -230,7 +241,7 @@ class V21SonglistOutputTests(_ExportCase):
         self.assertNotIn("idx", song)
         self.assertEqual(song["bpm_base"], 360.0)
         self.assertEqual(song["bpm"], "360")
-        self.assertEqual(song["difficulties"][0]["ratingClass"], 2)
+        _assert_ftr_compat_difficulties(self, song)
 
     def test_complex_bpm_string_is_preserved(self):
         self._do_slice([{"s": 21000, "e": 22000}], speed=2.0, enabled=True, form=_valid_form(bpm="120-180"))
@@ -238,6 +249,18 @@ class V21SonglistOutputTests(_ExportCase):
 
         self.assertEqual(song["bpm_base"], 360.0)
         self.assertEqual(song["bpm"], "120-180")
+
+    def test_current_export_all_segments_have_ftr_compat_difficulties(self):
+        self._do_slice(
+            [{"s": 21000, "e": 22000}, {"s": 23000, "e": 24000}],
+            enabled=True,
+            form=_valid_form(rating="10", rating_plus=True),
+        )
+        songs = json.loads((app.current_export_songs_dir(app.OUT_DIR) / "songlist").read_text(encoding="utf-8"))["songs"]
+
+        for song in songs:
+            self.assertNotIn("idx", song)
+            _assert_ftr_compat_difficulties(self, song, rating=10, rating_plus=True)
 
     def test_enabled_invalid_form_fails_and_preserves_current_export(self):
         current_song = app.current_export_songs_dir(app.OUT_DIR) / "old_segment"
@@ -257,6 +280,18 @@ class V21SonglistOutputTests(_ExportCase):
 
 
 class V21SongTemplateTests(unittest.TestCase):
+    def test_build_ftr_compat_difficulties_shape(self):
+        template = app.song_template_from_form(_valid_form(rating="8", rating_plus=True))
+        difficulties = app.build_ftr_compat_difficulties(template)
+
+        self.assertEqual(len(difficulties), 3)
+        self.assertEqual([d["ratingClass"] for d in difficulties], [0, 1, 2])
+        self.assertEqual([d["rating"] for d in difficulties], [-1, -1, 8])
+        self.assertEqual([d["ratingPlus"] for d in difficulties], [False, False, True])
+        for diff in difficulties:
+            self.assertEqual(diff["chartDesigner"], "Chart")
+            self.assertEqual(diff["jacketDesigner"], "Jacket")
+
     def test_build_songlist_document_shape(self):
         template = app.song_template_from_form(_valid_form())
         entry = app.build_songlist_entry(

@@ -455,6 +455,26 @@ songlist.set = pack_id
 songlist.set 默认 single，允许用户明确修改
 ```
 
+### 6.2.1 V2.1 固定 FTR 的 difficulty 兼容规则
+
+当前 V2.1 固定切分并输出 FTR / `2.aff`。
+
+已实机确认：目标壳中，新建曲包至少需要有一首归属该曲包的歌曲，在 songlist `difficulties` 中明确列出 `ratingClass = 0`、`1`、`2`，才能正常进入。
+
+为了确保单曲导出也满足该条件，并保持同一曲包内切片歌曲结构一致，工具对每个输出切片歌曲统一写入：
+
+* `ratingClass 0`：`rating = -1`；
+* `ratingClass 1`：`rating = -1`；
+* `ratingClass 2`：使用当前填写的实际 `rating`；
+* 三项按 `0`、`1`、`2` 升序；
+* 三项均保留 `chartDesigner` 与 `jacketDesigner`；
+* `0` / `1` 的 `ratingPlus` 固定 `false`；
+* `2` 的 `ratingPlus` 使用当前表单值。
+
+这只是无谱面难度占位，不表示工具已经支持 PST / PRS 切片。实际 AFF 输出仍只有 `2.aff`。
+
+`ratingClass 3` / `4` 与实际多难度读取、输出，仍属于后续 Version 2.5。
+
 ### 6.3 Packlist 输出与字段校验
 
 启用 packlist 后：
@@ -1222,7 +1242,8 @@ ArcSlicerData/out/
 * packlist `img` 决定实际 `songs/pack/<img_name>` 文件名；
 * `pack/1080/` topbar 为后续本地官方资源选择功能；
 * 本次导出包每次重建，总导出包长期合并；
-* 多难度、Combo 与完整 difficulties 输出归入后续 Version 2.5。
+* V2.1 固定输出 FTR / `2.aff`，并为目标壳兼容在 `difficulties` 中写入 `ratingClass 0 / 1 / 2`；
+* 多难度、Combo 与 `ratingClass 0..4` 完整 difficulties 输出归入后续 Version 2.5。
 
 ### 15.2 仍待验证或后续决定
 

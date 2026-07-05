@@ -182,14 +182,14 @@ class _ExportCase(unittest.TestCase):
     def log(self, text, kind="normal"):
         self.logs.append((text, kind))
 
-    def do_slice(self, segments, *, songlist=True, current=True, library=True):
+    def do_slice(self, segments, *, songlist=True, current=True, library=True, form=None):
         return app.do_slice(
             self.songs_dir,
             "prelude_heavensdoor",
             segments,
             1.0,
             self.log,
-            _form(),
+            form or _form(),
             songlist,
             None,
             current,
@@ -229,6 +229,34 @@ class V21LibraryDoSliceTests(_ExportCase):
         self.assertTrue(library_songlist.exists())
         self.assertEqual((current / "old_current.txt").read_text(encoding="utf-8"), "keep")
         self.assertEqual(list((app.current_export_songs_dir(app.OUT_DIR)).glob("prelude_*")), [])
+
+    def test_library_reexport_replaces_entry_with_ftr_compat_difficulties(self):
+        library = app.library_export_songs_dir(app.OUT_DIR)
+        library.mkdir(parents=True)
+        segment_id = "prelude_heavensdoor_21000_22000_x1"
+        _write_songlist(library / "songlist", [{
+            "id": segment_id,
+            "title_localized": {"en": "Old"},
+            "difficulties": [{"ratingClass": 2, "rating": 7}],
+        }])
+        (library / segment_id).mkdir()
+        (library / segment_id / "old.txt").write_text("old", encoding="utf-8")
+
+        code = self.do_slice(
+            [{"s": 21000, "e": 22000}],
+            songlist=True,
+            current=False,
+            library=True,
+            form=_form(rating="10", rating_plus=True),
+        )
+
+        self.assertEqual(code, 0, self.logs)
+        song = json.loads((library / "songlist").read_text(encoding="utf-8"))["songs"][0]
+        self.assertEqual(song["id"], segment_id)
+        self.assertEqual([d["ratingClass"] for d in song["difficulties"]], [0, 1, 2])
+        self.assertEqual([d["rating"] for d in song["difficulties"]], [-1, -1, 10])
+        self.assertEqual([d["ratingPlus"] for d in song["difficulties"]], [False, False, True])
+        self.assertFalse((library / segment_id / "old.txt").exists())
 
     def test_both_targets_use_one_slice_pass(self):
         code = self.do_slice(
