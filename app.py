@@ -2613,9 +2613,23 @@ class SegmentRow(QFrame):
         end_error_lay.setSpacing(8)
         end_error_lay.addWidget(self._end_error)
         self._end_cap_btn = QPushButton("")
+        self._end_cap_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._end_cap_btn.setFixedHeight(20)
         self._end_cap_btn.setStyleSheet(
-            f"background: transparent; border: none; color: {C_ACCENT}; "
-            f"font-size: 10px; font-weight: 700; padding: 0;"
+            "QPushButton {"
+            "background: #FFF3EA; "
+            f"border: 1px solid {C_ACCENT}; "
+            "border-radius: 6px; "
+            f"color: {C_ACCENT_H}; "
+            "font-size: 10px; "
+            "font-weight: 700; "
+            "padding: 1px 7px;"
+            "}"
+            "QPushButton:hover {"
+            "background: #FBE2D5; "
+            f"border-color: {C_ACCENT_H}; "
+            f"color: {C_ACCENT_H};"
+            "}"
         )
         self._end_cap_btn.hide()
         self._end_cap_btn.clicked.connect(lambda: self.end_cap_requested.emit(self))

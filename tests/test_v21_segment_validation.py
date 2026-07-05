@@ -44,6 +44,15 @@ class _Fake:
     def setToolTip(self, text):
         self._tooltip = str(text)
 
+    def setStyleSheet(self, text):
+        self._stylesheet = str(text)
+
+    def styleSheet(self):
+        return getattr(self, "_stylesheet", "")
+
+    def setCursor(self, cursor):
+        self._cursor = cursor
+
     def setVisible(self, visible):
         self._visible = bool(visible)
 
@@ -283,6 +292,13 @@ class SegmentValidationUiFlowTests(unittest.TestCase):
 
         row.set_time_errors("", "")
         self.assertFalse(row._end_cap_btn.isVisible())
+
+    def test_end_cap_button_has_button_like_style(self):
+        source = Path("app.py").read_text(encoding="utf-8")
+        self.assertIn("self._end_cap_btn.setCursor(Qt.CursorShape.PointingHandCursor)", source)
+        self.assertIn("QPushButton:hover", source)
+        self.assertIn("border-radius: 6px", source)
+        self.assertIn("background: #FFF3EA", source)
 
     def test_refresh_skips_completely_blank_row_until_export(self):
         win = object.__new__(app.MainWindow)
