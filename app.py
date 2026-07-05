@@ -635,6 +635,7 @@ _FFMPEG_DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)")
 class SegmentValidationResult:
     start_error: str = ""
     end_error: str = ""
+    end_cap_ms: int | None = None
     first_field: str | None = None
     first_message: str = ""
 
@@ -783,6 +784,7 @@ def validate_segment_bounds(
         result.start_error = f"起点不能超过音频时长：{format_duration_ms(audio_duration_ms)}"
     elif end > audio_duration_ms:
         result.end_error = f"终点不能超过音频时长：{format_duration_ms(audio_duration_ms)}"
+        result.end_cap_ms = int(audio_duration_ms)
 
     if result.start_error:
         result.first_field = "start"
@@ -2552,6 +2554,7 @@ class ArcCutStatus(QFrame):
 class SegmentRow(QFrame):
     deleted = pyqtSignal(object)   # emits self
     changed = pyqtSignal()
+    end_cap_requested = pyqtSignal(object)
 
     def __init__(self, index: int, s: int | None, e: int | None, parent=None):
         super().__init__(parent)
@@ -2602,7 +2605,23 @@ class SegmentRow(QFrame):
         self._start_error = self._make_time_error_label()
         self._end_error = self._make_time_error_label()
         lay.addWidget(self._start_error, 3, 1)
-        lay.addWidget(self._end_error, 3, 3)
+
+        end_error_box = QWidget()
+        end_error_box.setStyleSheet("background: transparent; border: none;")
+        end_error_lay = QHBoxLayout(end_error_box)
+        end_error_lay.setContentsMargins(0, 0, 0, 0)
+        end_error_lay.setSpacing(8)
+        end_error_lay.addWidget(self._end_error)
+        self._end_cap_btn = QPushButton("")
+        self._end_cap_btn.setStyleSheet(
+            f"background: transparent; border: none; color: {C_ACCENT}; "
+            f"font-size: 10px; font-weight: 700; padding: 0;"
+        )
+        self._end_cap_btn.hide()
+        self._end_cap_btn.clicked.connect(lambda: self.end_cap_requested.emit(self))
+        end_error_lay.addWidget(self._end_cap_btn)
+        end_error_lay.addStretch()
+        lay.addWidget(end_error_box, 3, 3)
 
         self._dur = QLabel()
         self._dur.setStyleSheet(
@@ -2699,11 +2718,25 @@ class SegmentRow(QFrame):
     def end_text(self) -> str:
         return self._end.text()
 
-    def set_time_errors(self, start_error: str = "", end_error: str = "") -> None:
+    def set_time_errors(
+        self,
+        start_error: str = "",
+        end_error: str = "",
+        end_cap_ms: int | None = None,
+    ) -> None:
         for label, message in ((self._start_error, start_error), (self._end_error, end_error)):
             label.setText(message)
             label.setToolTip(message)
             label.setVisible(bool(message))
+        if end_cap_ms is None:
+            self._end_cap_btn.setText("")
+            self._end_cap_btn.setToolTip("")
+            self._end_cap_btn.hide()
+        else:
+            text = f"设为上限 {int(end_cap_ms)} ms"
+            self._end_cap_btn.setText(text)
+            self._end_cap_btn.setToolTip(text)
+            self._end_cap_btn.show()
 
     def clear_time_errors(self) -> None:
         self.set_time_errors("", "")
@@ -2712,6 +2745,10 @@ class SegmentRow(QFrame):
         widget = self._start if field == "start" else self._end
         widget.setFocus()
         widget.selectAll()
+
+    def set_end_text(self, end_ms: int) -> None:
+        self._end.setText(str(int(end_ms)))
+        self._on_change()
 
     def set_arc_cut_indicators(self, start_hits: list[dict], end_hits: list[dict]) -> None:
         for status in self._arc_statuses:
@@ -3506,6 +3543,7 @@ class MainWindow(QMainWindow):
         row.changed.connect(self._refresh_seg_header)
         row.changed.connect(self._schedule_arc_cut_warning_refresh)
         row.changed.connect(self._schedule_segment_time_validation)
+        row.end_cap_requested.connect(self._set_row_end_to_audio_duration)
         self._rows.append(row)
         self._segs_layout.addWidget(row)
         self._refresh_seg_header()
@@ -3567,7 +3605,7 @@ class MainWindow(QMainWindow):
         try:
             self._audio_duration_ms = probe_audio_duration_ms(audio_path)
             self._audio_duration_error = ""
-            text = f"音频时长：{format_duration_ms(self._audio_duration_ms)}"
+            text = f"音频时长：{format_duration_ms(self._audio_duration_ms)}（终点上限：{self._audio_duration_ms} ms）"
             self._audio_duration_label.setText(text)
             self._audio_duration_label.setToolTip(str(audio_path))
         except Exception as ex:
@@ -3585,16 +3623,24 @@ class MainWindow(QMainWindow):
                 row.clear_time_errors()
                 continue
             result = validate_segment_bounds(row.start_text(), row.end_text(), duration_ms)
-            row.set_time_errors(result.start_error, result.end_error)
+            row.set_time_errors(result.start_error, result.end_error, result.end_cap_ms)
 
     def _first_segment_validation_error(self) -> tuple[int, SegmentRow, SegmentValidationResult] | None:
         duration_ms = self._audio_duration_ms
         for index, row in enumerate(self._rows):
             result = validate_segment_bounds(row.start_text(), row.end_text(), duration_ms)
-            row.set_time_errors(result.start_error, result.end_error)
+            row.set_time_errors(result.start_error, result.end_error, result.end_cap_ms)
             if not result.ok:
                 return index, row, result
         return None
+
+    def _set_row_end_to_audio_duration(self, row: SegmentRow):
+        if self._audio_duration_ms is None:
+            return
+        row.set_end_text(self._audio_duration_ms)
+        self._refresh_seg_header()
+        self._refresh_segment_time_validation()
+        self._schedule_arc_cut_warning_refresh()
 
     def _show_segment_validation_error(self, index: int, row: SegmentRow, result: SegmentValidationResult):
         title = "时间段无效"

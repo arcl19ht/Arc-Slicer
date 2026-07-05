@@ -117,6 +117,7 @@ class _Row:
         self._start = str(start)
         self._end = str(end)
         self.errors = None
+        self.end_cap_ms = None
         self.focused = None
 
     def start_text(self):
@@ -125,14 +126,16 @@ class _Row:
     def end_text(self):
         return self._end
 
-    def set_time_errors(self, start_error="", end_error=""):
+    def set_time_errors(self, start_error="", end_error="", end_cap_ms=None):
         self.errors = (start_error, end_error)
+        self.end_cap_ms = end_cap_ms
 
     def focus_time_field(self, field):
         self.focused = field
 
     def clear_time_errors(self):
         self.errors = ("", "")
+        self.end_cap_ms = None
 
 
 class SegmentDurationFunctionTests(unittest.TestCase):
@@ -187,15 +190,34 @@ class SegmentBoundsValidationTests(unittest.TestCase):
         start = app.validate_segment_bounds("1000", "1001", 1000)
         self.assertEqual(start.first_field, "start")
         self.assertIn("起点不能超过音频时长：0:01.000", start.start_error)
+        self.assertIsNone(start.end_cap_ms)
 
         end = app.validate_segment_bounds("0", "1001", 1000)
         self.assertEqual(end.first_field, "end")
         self.assertIn("终点不能超过音频时长：0:01.000", end.end_error)
+        self.assertEqual(end.end_cap_ms, 1000)
 
     def test_unknown_duration_blocks_semantically_valid_segment(self):
         result = app.validate_segment_bounds("0", "1000", None)
         self.assertEqual(result.first_field, "end")
         self.assertEqual(result.end_error, "无法读取当前曲目的音频时长")
+        self.assertIsNone(result.end_cap_ms)
+
+    def test_end_cap_is_only_available_for_integer_end_over_audio_duration(self):
+        equal = app.validate_segment_bounds("0", "1000", 1000)
+        self.assertTrue(equal.ok)
+        self.assertIsNone(equal.end_cap_ms)
+
+        below = app.validate_segment_bounds("0", "999", 1000)
+        self.assertTrue(below.ok)
+        self.assertIsNone(below.end_cap_ms)
+
+        invalid_end = app.validate_segment_bounds("0", "-", 1000)
+        self.assertIsNone(invalid_end.end_cap_ms)
+
+        start_over = app.validate_segment_bounds("1000", "2000", 1000)
+        self.assertEqual(start_over.first_field, "start")
+        self.assertIsNone(start_over.end_cap_ms)
 
 
 class AudioProbeTests(unittest.TestCase):
@@ -244,10 +266,23 @@ class SegmentValidationUiFlowTests(unittest.TestCase):
         self.assertEqual(row._start_error.text(), "起点不能为空")
         self.assertTrue(row._start_error.isVisible())
         self.assertFalse(row._end_error.isVisible())
+        self.assertFalse(row._end_cap_btn.isVisible())
 
         row.clear_time_errors()
         self.assertEqual(row._start_error.text(), "")
         self.assertFalse(row._start_error.isVisible())
+        self.assertFalse(row._end_cap_btn.isVisible())
+
+    def test_segmentrow_shows_end_cap_button_only_when_requested(self):
+        row = app.SegmentRow(1, 0, 2000)
+        row.set_time_errors("", "终点不能超过音频时长：0:01.000", 1000)
+
+        self.assertTrue(row._end_error.isVisible())
+        self.assertEqual(row._end_cap_btn.text(), "设为上限 1000 ms")
+        self.assertTrue(row._end_cap_btn.isVisible())
+
+        row.set_time_errors("", "")
+        self.assertFalse(row._end_cap_btn.isVisible())
 
     def test_refresh_skips_completely_blank_row_until_export(self):
         win = object.__new__(app.MainWindow)
@@ -296,9 +331,40 @@ class SegmentValidationUiFlowTests(unittest.TestCase):
                 app.MainWindow._refresh_current_audio_duration(win)
                 self.assertEqual(win._audio_duration_ms, 1234)
                 self.assertIn("0:01.234", win._audio_duration_label.text())
+                self.assertIn("终点上限：1234 ms", win._audio_duration_label.text())
                 self.assertIn("终点不能超过音频时长", win._rows[0].errors[1])
+                self.assertEqual(win._rows[0].end_cap_ms, 1234)
             finally:
                 app.probe_audio_duration_ms = old_probe
+
+    def test_set_end_to_audio_duration_requires_explicit_action(self):
+        win = object.__new__(app.MainWindow)
+        row = app.SegmentRow(1, 0, 2000)
+        win._rows = [row]
+        win._audio_duration_ms = 1000
+        win._refresh_seg_header = lambda: None
+        win._schedule_arc_cut_warning_refresh = lambda: None
+
+        app.MainWindow._refresh_segment_time_validation(win)
+        self.assertEqual(row.end_text(), "2000")
+        self.assertTrue(row._end_cap_btn.isVisible())
+
+        app.MainWindow._set_row_end_to_audio_duration(win, row)
+        self.assertEqual(row.end_text(), "1000")
+        self.assertEqual(row.e_val, 1000)
+        self.assertFalse(row._end_cap_btn.isVisible())
+        self.assertEqual(row._end_error.text(), "")
+
+    def test_refresh_does_not_silently_clamp_timeout_end(self):
+        win = object.__new__(app.MainWindow)
+        row = app.SegmentRow(1, 0, 2000)
+        win._rows = [row]
+        win._audio_duration_ms = 1000
+
+        app.MainWindow._refresh_segment_time_validation(win)
+
+        self.assertEqual(row.end_text(), "2000")
+        self.assertTrue(row._end_cap_btn.isVisible())
 
 
 if __name__ == "__main__":
