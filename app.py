@@ -857,6 +857,7 @@ def publish_current_export_stage(
 # ─── songlist ─────────────────────────────────────────────────────────────────
 
 def make_songlist_fragment(new_id: str, start_ms: int, end_ms: int, speed: float) -> dict | None:
+    """旧兼容函数：V2.1 正式导出流程不再调用 songlist_fragment.json 路径。"""
     if not SONGLIST_EXAMPLE_PATH.exists():
         return None
     try:
@@ -888,6 +889,69 @@ def make_songlist_fragment(new_id: str, start_ms: int, end_ms: int, speed: float
         if "bpm" in out and isinstance(out["bpm"], str):
             out["bpm"] = _scale_bpm_string(out["bpm"], speed)
     return {"songs": [out]}
+
+
+def song_template_from_form(data: dict) -> SongTemplate:
+    if not isinstance(data, dict):
+        raise ValueError("Songlist 表单无效")
+    try:
+        return SongTemplate(
+            title_base=str(data.get("title_base", "")).strip(),
+            artist=str(data.get("artist", "")).strip(),
+            bpm=str(data.get("bpm", "")).strip(),
+            bpm_base=float(data.get("bpm_base", 0) or 0),
+            set=str(data.get("set", "")).strip() or "single",
+            purchase=str(data.get("purchase", "")).strip(),
+            side=int(data.get("side", 0) or 0),
+            bg=str(data.get("bg", "")).strip(),
+            version=str(data.get("version", "")).strip(),
+            chart_designer=str(data.get("chart_designer", "")).strip(),
+            jacket_designer=str(data.get("jacket_designer", "")).strip(),
+            rating=int(data.get("rating", 9) or 9),
+            rating_plus=bool(data.get("rating_plus", False)),
+        )
+    except (TypeError, ValueError) as ex:
+        raise ValueError(f"Songlist 表单字段格式无效: {ex}") from ex
+
+
+def build_songlist_entry(
+    template: SongTemplate,
+    segment_id: str,
+    display_title: str,
+    start_ms: int,
+    end_ms: int,
+    speed: float,
+) -> dict:
+    validate_speed_value(speed)
+    clip_ms = int(round((end_ms - start_ms) / speed))
+    bpm_base = round(template.bpm_base * speed, 2) if abs(speed - 1.0) > 1e-9 else template.bpm_base
+    bpm = _scale_bpm_string(template.bpm, speed) if abs(speed - 1.0) > 1e-9 else template.bpm
+    return {
+        "id": segment_id,
+        "title_localized": {"en": display_title},
+        "artist": template.artist,
+        "bpm": bpm,
+        "bpm_base": bpm_base,
+        "set": template.set or "single",
+        "purchase": template.purchase,
+        "audioPreview": 0,
+        "audioPreviewEnd": min(30000, max(0, clip_ms)),
+        "side": int(template.side),
+        "bg": template.bg,
+        "date": int(time.time()),
+        "version": template.version,
+        "difficulties": [{
+            "ratingClass": 2,
+            "chartDesigner": template.chart_designer,
+            "jacketDesigner": template.jacket_designer,
+            "rating": int(template.rating),
+            "ratingPlus": bool(template.rating_plus),
+        }],
+    }
+
+
+def build_songlist_document(entries: list[dict]) -> dict:
+    return {"songs": list(entries)}
 
 
 # ─── 核心切片 ─────────────────────────────────────────────────────────────────
@@ -938,6 +1002,8 @@ def do_slice(
     speed: float,
     log_fn,
     songlist_meta: dict | None = None,
+    songlist_enabled: bool = False,
+    song_template: SongTemplate | None = None,
 ) -> int:
     try:
         validate_speed_value(speed)
@@ -951,6 +1017,14 @@ def do_slice(
     except RuntimeError as ex:
         log_fn(f"✗ {ex}", "err")
         return 1
+
+    if songlist_enabled:
+        if song_template is None:
+            try:
+                song_template = song_template_from_form(songlist_meta or {})
+            except ValueError as ex:
+                log_fn(f"✗ Songlist 信息无效: {ex}", "err")
+                return 1
 
     in_dir = songs_dir / song_id
     in_aff, in_ogg = in_dir / "2.aff", in_dir / "base.ogg"
@@ -998,21 +1072,18 @@ def do_slice(
                 log_fn(f"  ⚠ {warning}", "muted")
             (out_dir / "2.aff").write_text(new_aff, encoding="utf-8")
 
-            if songlist_meta:
-                entry = make_songlist_entry(new_id, i, s, e, speed, songlist_meta)
-                (out_dir / "songlist").write_text(
-                    json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8"
-                )
-                all_song_entries.append(entry["songs"][0])
+            if songlist_enabled and song_template:
+                display_title = build_segment_display_title(song_template.title_base or song_id, s, e, speed)
+                entry = build_songlist_entry(song_template, new_id, display_title, s, e, speed)
+                all_song_entries.append(entry)
                 log_fn(f"  ✎ songlist → {new_id}", "muted")
 
             log_fn(f"✓ 输出 → out/current_export/songs/{new_id}/", "ok")
 
-        # 临时兼容旧手填 SonglistPanel：仅写入本次 current_export 的 songs 根。
-        if songlist_meta and all_song_entries:
+        if songlist_enabled:
             merged_path = out_root / "songlist"
             merged_path.write_text(
-                json.dumps({"songs": all_song_entries}, ensure_ascii=False, indent=2),
+                json.dumps(build_songlist_document(all_song_entries), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
             log_fn(f"✓ 合并 songlist → out/current_export/songs/songlist（共 {len(all_song_entries)} 首）", "ok")
@@ -1059,6 +1130,23 @@ class MigrationReport:
         if self.failures:
             parts.append(f"失败 {len(self.failures)} 项")
         return "已迁移运行数据至 ArcSlicerData：" + "，".join(parts) + "。"
+
+
+@dataclass
+class SongTemplate:
+    title_base: str
+    artist: str
+    bpm: str
+    bpm_base: float
+    set: str
+    purchase: str
+    side: int
+    bg: str
+    version: str
+    chart_designer: str
+    jacket_designer: str
+    rating: int
+    rating_plus: bool
 
 
 def _norm_path(path: Path) -> str:
@@ -1245,6 +1333,8 @@ class SlicerWorker(QThread):
     def __init__(
         self, songs_dir: Path, song_id: str, segments: list,
         speed: float, songlist_meta: dict | None = None,
+        songlist_enabled: bool = False,
+        song_template: SongTemplate | None = None,
     ):
         super().__init__()
         self.songs_dir     = songs_dir
@@ -1252,6 +1342,8 @@ class SlicerWorker(QThread):
         self.segments      = segments
         self.speed         = speed
         self.songlist_meta = songlist_meta
+        self.songlist_enabled = songlist_enabled
+        self.song_template = song_template
 
     def run(self):
         def log(text, kind="normal"):
@@ -1259,9 +1351,12 @@ class SlicerWorker(QThread):
 
         log(f"  songs 目录: {self.songs_dir}", "muted")
         log(f"  曲目: {self.song_id}  速度: {self.speed}  段数: {len(self.segments)}", "muted")
-        if self.songlist_meta:
+        if self.songlist_enabled:
             log("  songlist 生成: 开启", "muted")
-        code = do_slice(self.songs_dir, self.song_id, self.segments, self.speed, log, self.songlist_meta)
+        code = do_slice(
+            self.songs_dir, self.song_id, self.segments, self.speed, log,
+            self.songlist_meta, self.songlist_enabled, self.song_template,
+        )
         if code == 0:
             log("✓ 全部完成！输出目录: out/current_export/songs/", "ok")
         self.done_signal.emit(code)
@@ -1908,6 +2003,13 @@ class SonglistPanel(QFrame):
         self._toggle_btn.clicked.connect(self._toggle)
         outer.addWidget(self._toggle_btn)
 
+        self._enabled = QCheckBox("生成 songlist")
+        self._enabled.setChecked(False)
+        self._enabled.setStyleSheet(
+            f"color: {C_TEXT2}; font-size: 13px; background: transparent; border: none;"
+        )
+        outer.addWidget(self._enabled)
+
         # 面板主体
         self._body = QFrame()
         self._body.setObjectName("songlistBody")
@@ -1979,8 +2081,19 @@ class SonglistPanel(QFrame):
 
     # ── 读 / 写 ───────────────────────────────────────────────────────────────
 
+    def is_songlist_enabled(self) -> bool:
+        return self._enabled.isChecked()
+
+    def set_songlist_enabled(self, enabled: bool):
+        self._enabled.setChecked(bool(enabled))
+
+    def get_form_data(self) -> dict:
+        data = {key: self._inputs[key].text().strip() for _label, key, _placeholder in self._FIELDS}
+        data["rating_plus"] = self._rating_plus.isChecked()
+        return data
+
     def get_meta(self) -> dict | None:
-        """返回配置字典，面板未展开时返回 None（不生成 songlist）。"""
+        """返回兼容旧调用的已校验配置字典；V2.1 导出使用 SongTemplate。"""
         if not self._expanded:
             return None
         try:
@@ -2006,6 +2119,8 @@ class SonglistPanel(QFrame):
         """从保存的数据恢复面板内容。"""
         if not meta:
             return
+        if "songlist_enabled" in meta:
+            self.set_songlist_enabled(bool(meta["songlist_enabled"]))
         str_keys = ("title_base", "artist", "bpm", "set", "purchase", "bg", "version",
                     "chart_designer", "jacket_designer")
         for k in str_keys:
@@ -2270,6 +2385,8 @@ class MainWindow(QMainWindow):
             added_segment = True
         if not added_segment:
             self._add_segment(None, None)
+        if hasattr(self._songlist_panel, "set_songlist_enabled"):
+            self._songlist_panel.set_songlist_enabled(bool(data.get("songlist_enabled", False)))
         if data.get("songlist"):
             self._songlist_panel.set_meta(data["songlist"])
         self._schedule_arc_cut_warning_refresh()
@@ -2398,14 +2515,23 @@ class MainWindow(QMainWindow):
             self._clear_arc_cut_warnings()
 
     def _collect(self, speed: float | None = None) -> dict:
+        songlist_enabled = (
+            bool(self._songlist_panel.is_songlist_enabled())
+            if hasattr(self._songlist_panel, "is_songlist_enabled")
+            else False
+        )
+        if hasattr(self._songlist_panel, "get_form_data"):
+            songlist_form = self._songlist_panel.get_form_data()
+        else:
+            songlist_form = self._songlist_panel.get_meta() or {}
         data: dict = {
             "song_id":  self._song_box.currentText(),
             "speed":    parse_speed_text(self._speed_input.text()) if speed is None else speed,
             "segments": [r.to_dict() for r in self._rows if r.to_dict()],
+            "songlist_enabled": songlist_enabled,
+            "packlist_enabled": False,
+            "songlist": songlist_form,
         }
-        meta = self._songlist_panel.get_meta()
-        if meta is not None:
-            data["songlist"] = meta
         return data
 
     # ── 保存 / 运行 / 打开 ────────────────────────────────────────────────────
@@ -2437,6 +2563,13 @@ class MainWindow(QMainWindow):
         if not data["segments"]:
             self._push_log("✗ 至少需要一个时间段", "err")
             return
+        songlist_template = None
+        if data.get("songlist_enabled"):
+            try:
+                songlist_template = song_template_from_form(data.get("songlist") or {})
+            except ValueError as ex:
+                self._push_log(f"✗ Songlist 信息无效: {ex}", "err")
+                return
 
         self._save_slides()
         self._log_widget.clear()
@@ -2445,9 +2578,10 @@ class MainWindow(QMainWindow):
         self._push_log("▶ 开始切片…", "muted")
 
         songs_dir     = Path(self._cfg.get("songs_dir", str(DEFAULT_SONGS_DIR)))
-        songlist_meta = self._songlist_panel.get_meta()
+        songlist_meta = data.get("songlist") or {}
         self._worker = SlicerWorker(
-            songs_dir, data["song_id"], data["segments"], data["speed"], songlist_meta
+            songs_dir, data["song_id"], data["segments"], data["speed"],
+            songlist_meta, bool(data.get("songlist_enabled")), songlist_template,
         )
         self._worker.log_signal.connect(self._push_log)
         self._worker.done_signal.connect(self._on_done)
