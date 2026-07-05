@@ -368,6 +368,22 @@ class ExternalMergePlanTests(unittest.TestCase):
             library_alias_plan = external_merge.build_external_merge_plan(current, library_alias)
             self.assertIn("target_is_tool_export", _codes(library_alias_plan))
 
+    def test_library_export_input_is_blocked_even_with_aliases(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current = base / "ArcSlicerData" / "out" / "library_export" / "songs"
+            target = base / "target"
+            _setup_current(current, [_song("song_a")], None)
+            _setup_target(target, [], [_pack("pack_a")])
+
+            plan = external_merge.build_external_merge_plan(current, target)
+            self.assertIn("current_is_library_export", _codes(plan))
+            self.assertFalse(plan.is_ready)
+
+            alias = base / "ArcSlicerData" / "out" / "current_export" / ".." / "library_export" / "songs"
+            alias_plan = external_merge.build_external_merge_plan(alias, target)
+            self.assertIn("current_is_library_export", _codes(alias_plan))
+
     def test_update_same_pack_same_img_missing_target_image_is_blocked(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)

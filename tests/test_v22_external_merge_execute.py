@@ -424,6 +424,99 @@ class ExternalMergeExecuteTests(unittest.TestCase):
             self.assertFalse(result.success)
             self.assertFalse(_arc_tmp_paths(target))
 
+    def test_manifest_checkpoint_failure_returns_result_and_records_rollback_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current, target, backup_root = base / "current", base / "target", base / "backups"
+            _setup_current(current, [_song("new_song")], None)
+            _setup_target(target, [], [_pack("pack_a")])
+            before = _snapshot(target)
+            original_write_manifest = external_merge._write_manifest
+            calls = {"count": 0}
+
+            def flaky_write_manifest(backup_dir, manifest):
+                calls["count"] += 1
+                if calls["count"] >= 3:
+                    raise OSError("manifest write fail")
+                return original_write_manifest(backup_dir, manifest)
+
+            with mock.patch("external_merge._write_manifest", side_effect=flaky_write_manifest):
+                result = external_merge.execute_external_merge(_plan(current, target), backup_root=backup_root)
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.status, "failed_rollback_incomplete")
+            self.assertTrue(result.backup_dir.exists())
+            self.assertIn("manifest write fail", "\n".join(result.rollback_errors))
+            self.assertEqual(_snapshot(target), before)
+            self.assertFalse(_arc_tmp_paths(target))
+
+    def test_backup_after_stale_writes_stale_no_write_manifest(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current, target, backup_root = base / "current", base / "target", base / "backups"
+            _setup_current(current, [_song("new_song")], None)
+            _setup_target(target, [], [_pack("pack_a")])
+            original_backup = external_merge._backup_affected_items
+
+            def backup_then_mutate(plan, backup_dir, ctx, checkpoint):
+                original_backup(plan, backup_dir, ctx, checkpoint)
+                _write_json(target / "songlist", {"songs": [_song("external")]})
+
+            with mock.patch("external_merge._backup_affected_items", side_effect=backup_then_mutate):
+                result = external_merge.execute_external_merge(_plan(current, target), backup_root=backup_root)
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.status, "stale_plan")
+            self.assertTrue(result.backup_dir.exists())
+            self.assertEqual(result.changed_paths, [])
+            self.assertFalse(list(target.parent.glob(".arc_slicer_merge_stage_*")))
+            self.assertEqual([s["id"] for s in _read_json(target / "songlist")["songs"]], ["external"])
+            manifest = _read_json(result.backup_dir / "manifest.json")
+            self.assertEqual(manifest["status"], "stale_no_write")
+            self.assertEqual(manifest["changed_paths"], [])
+
+    def test_library_export_input_is_rejected_without_backup(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current = base / "ArcSlicerData" / "out" / "library_export" / "songs"
+            target = base / "target"
+            backup_root = base / "backups"
+            _setup_current(current, [_song("song_a")], None)
+            _setup_target(target, [], [_pack("pack_a")])
+            before = _snapshot(target)
+            plan = external_merge.build_external_merge_plan(current, target)
+
+            result = external_merge.execute_external_merge(plan, backup_root=backup_root)
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.status, "rejected")
+            self.assertIn("current_is_library_export", {issue.code for issue in result.execution_issues})
+            self.assertFalse(backup_root.exists())
+            self.assertEqual(_snapshot(target), before)
+
+    def test_completed_manifest_write_failure_does_not_rollback_successful_merge(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current, target, backup_root = base / "current", base / "target", base / "backups"
+            _setup_current(current, [_song("new_song")], None)
+            _setup_target(target, [], [_pack("pack_a")])
+            original_write_manifest = external_merge._write_manifest
+
+            def fail_completed_manifest(backup_dir, manifest):
+                if manifest.get("status") == "completed":
+                    raise OSError("completed manifest write fail")
+                return original_write_manifest(backup_dir, manifest)
+
+            with mock.patch("external_merge._write_manifest", side_effect=fail_completed_manifest):
+                result = external_merge.execute_external_merge(_plan(current, target), backup_root=backup_root)
+
+            self.assertTrue(result.success)
+            self.assertEqual(result.status, "completed")
+            self.assertTrue((target / "new_song" / "base.ogg").exists())
+            self.assertTrue(result.backup_dir.exists())
+            self.assertIn("completed manifest write fail", "\n".join(issue.message for issue in result.execution_issues))
+            self.assertFalse(_arc_tmp_paths(target))
+
 
 if __name__ == "__main__":
     unittest.main()

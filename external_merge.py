@@ -97,6 +97,8 @@ def build_external_merge_plan(current_songs_dir: Path, target_songs_dir: Path) -
 
     _validate_root(plan, current_songs_dir, "current", "current_songs_dir")
     _validate_root(plan, target_songs_dir, "target", "target_songs_dir")
+    if _is_library_export_songs_dir(current_songs_dir):
+        _block(plan, "current_is_library_export", "library_export/songs must not be used as external merge input.", current_songs_dir)
     if _same_path(current_songs_dir, target_songs_dir):
         _block(plan, "target_equals_current_input", "target songs directory must not equal current input.", target_songs_dir)
     if _is_tool_export_songs_dir(target_songs_dir):
@@ -157,7 +159,7 @@ def execute_external_merge(plan: ExternalMergePlan, *, backup_root: Path) -> Ext
             success=False,
             status="rejected",
             plan=plan,
-            message="合并计划存在阻止项，未执行写入。",
+            message="merge plan has blockers; no writes were performed.",
             execution_issues=list(plan.blockers),
         )
 
@@ -167,7 +169,7 @@ def execute_external_merge(plan: ExternalMergePlan, *, backup_root: Path) -> Ext
             success=False,
             status="rejected",
             plan=fresh,
-            message="重新检查合并计划失败，未执行写入。",
+            message="fresh merge plan has blockers; no writes were performed.",
             execution_issues=list(fresh.blockers),
         )
     if fresh.snapshot_fingerprint != plan.snapshot_fingerprint:
@@ -175,7 +177,7 @@ def execute_external_merge(plan: ExternalMergePlan, *, backup_root: Path) -> Ext
             success=False,
             status="stale_plan",
             plan=fresh,
-            message="外部目标壳或当前导出内容在检查后发生变化，请重新检查合并计划。",
+            message="external target or current export changed after plan check.",
         )
 
     safety_issues = _execution_safety_issues(fresh, backup_root)
@@ -184,12 +186,13 @@ def execute_external_merge(plan: ExternalMergePlan, *, backup_root: Path) -> Ext
             success=False,
             status="rejected",
             plan=fresh,
-            message="执行路径安全校验失败，未写入目标壳。",
+            message="execution path safety check failed; no writes were performed.",
             execution_issues=safety_issues,
         )
 
     backup_dir: Path | None = None
     stage_dir: Path | None = None
+    manifest: dict[str, Any] | None = None
     ctx: dict[str, Any] = {
         "backed_up_items": [],
         "created_target_items": [],
@@ -207,14 +210,15 @@ def execute_external_merge(plan: ExternalMergePlan, *, backup_root: Path) -> Ext
 
         refreshed = build_external_merge_plan(plan.current_songs_dir, plan.target_songs_dir)
         if refreshed.snapshot_fingerprint != fresh.snapshot_fingerprint or refreshed.blockers:
-            manifest.update(_manifest_runtime_fields(ctx, "rolled_back"))
-            _write_manifest(backup_dir, manifest)
+            manifest_issues = _try_write_manifest_status(backup_dir, manifest, ctx, "stale_no_write")
             return ExternalMergeResult(
                 success=False,
                 status="stale_plan",
                 plan=refreshed,
                 backup_dir=backup_dir,
-                message="备份后检测到内容变化，未写入目标壳；请重新检查合并计划。",
+                message="stale plan detected after backup; no target writes were performed.",
+                changed_paths=[],
+                execution_issues=manifest_issues,
             )
 
         stage_dir = _create_staging_dir(fresh.target_songs_dir)
@@ -224,14 +228,15 @@ def execute_external_merge(plan: ExternalMergePlan, *, backup_root: Path) -> Ext
         final = build_external_merge_plan(plan.current_songs_dir, plan.target_songs_dir)
         if final.snapshot_fingerprint != fresh.snapshot_fingerprint or final.blockers:
             _cleanup_temp_path(stage_dir)
-            manifest.update(_manifest_runtime_fields(ctx, "stale_no_write"))
-            _write_manifest(backup_dir, manifest)
+            manifest_issues = _try_write_manifest_status(backup_dir, manifest, ctx, "stale_no_write")
             return ExternalMergeResult(
                 success=False,
                 status="stale_plan",
                 plan=final,
                 backup_dir=backup_dir,
                 message="stale plan detected after staging; no target writes were performed.",
+                changed_paths=[],
+                execution_issues=manifest_issues,
             )
 
         _install_song_directories(fresh, stage_dir, ctx, lambda label: _checkpoint(backup_dir, manifest, ctx, label))
@@ -247,40 +252,54 @@ def execute_external_merge(plan: ExternalMergePlan, *, backup_root: Path) -> Ext
         _cleanup_swaps(ctx)
         _cleanup_temp_path(stage_dir)
         _checkpoint(backup_dir, manifest, ctx, "temporary_paths_cleaned")
-        manifest.update(_manifest_runtime_fields(ctx, "completed"))
-        _write_manifest(backup_dir, manifest)
+        manifest_issues = _try_write_manifest_status(backup_dir, manifest, ctx, "completed")
         return ExternalMergeResult(
             success=True,
             status="completed",
             plan=fresh,
             backup_dir=backup_dir,
-            message="外部目标壳合并完成。",
+            message="external merge completed.",
             changed_paths=list(ctx["changed_paths"]),
+            execution_issues=manifest_issues,
         )
     except Exception as ex:
+        manifest_errors: list[str] = []
+
+        def rollback_checkpoint(label: str) -> None:
+            if backup_dir is None or manifest is None:
+                return
+            try:
+                _checkpoint(backup_dir, manifest, ctx, label)
+            except Exception as manifest_ex:
+                manifest_errors.append(f"manifest checkpoint {label}: {manifest_ex}")
+
         rollback_errors = _rollback(
             fresh,
             backup_dir,
             ctx,
-            (lambda label: _checkpoint(backup_dir, manifest, ctx, label)) if backup_dir is not None else None,
+            rollback_checkpoint if backup_dir is not None and manifest is not None else None,
         ) if backup_dir is not None else [str(ex)]
+        rollback_errors.extend(manifest_errors)
         if stage_dir is not None:
             try:
                 _cleanup_temp_path(stage_dir)
             except Exception as cleanup_ex:
-                rollback_errors.append(f"清理 staging 失败: {cleanup_ex}")
+                rollback_errors.append(f"cleanup staging failed: {cleanup_ex}")
         status = "failed_rollback_incomplete" if rollback_errors else "failed_rolled_back"
         if backup_dir is not None:
-            manifest = _base_manifest(fresh, backup_dir, "rollback_incomplete" if rollback_errors else "rolled_back")
+            final_manifest = _base_manifest(fresh, backup_dir, "rollback_incomplete" if rollback_errors else "rolled_back")
             ctx["rollback_errors"] = rollback_errors
-            manifest.update(_manifest_runtime_fields(ctx, manifest["status"]))
-            _write_manifest(backup_dir, manifest)
+            final_manifest_issues = _try_write_manifest_status(backup_dir, final_manifest, ctx, final_manifest["status"])
+            if final_manifest_issues:
+                rollback_errors.extend(issue.message for issue in final_manifest_issues)
+                ctx["rollback_errors"] = rollback_errors
+                status = "failed_rollback_incomplete"
         return ExternalMergeResult(
             success=False,
             status=status,
             plan=fresh,
             backup_dir=backup_dir,
-            message=f"合并失败，{'恢复不完整' if rollback_errors else '已自动恢复'}：{ex}",
+            message=f"merge failed; {'rollback incomplete' if rollback_errors else 'rolled back'}: {ex}",
             changed_paths=list(ctx["changed_paths"]),
             rollback_errors=rollback_errors,
             execution_issues=[MergeIssue(BLOCKER, "execution_failed", str(ex))],
@@ -435,6 +454,20 @@ def _checkpoint(backup_dir: Path, manifest: dict[str, Any], ctx: dict[str, Any],
     ctx.setdefault("checkpoints", []).append(label)
     manifest.update(_manifest_runtime_fields(ctx, "in_progress"))
     _write_manifest(backup_dir, manifest)
+
+
+def _try_write_manifest_status(
+    backup_dir: Path,
+    manifest: dict[str, Any],
+    ctx: dict[str, Any],
+    status: str,
+) -> list[MergeIssue]:
+    manifest.update(_manifest_runtime_fields(ctx, status))
+    try:
+        _write_manifest(backup_dir, manifest)
+        return []
+    except Exception as ex:
+        return [MergeIssue(WARNING, "manifest_write_failed", f"manifest write failed: {ex}", (str(backup_dir / "manifest.json"),))]
 
 
 def _action_to_json(action: MergeAction) -> dict[str, Any]:
@@ -1188,6 +1221,11 @@ def _is_tool_export_songs_dir(path: Path) -> bool:
         "out",
         "library_export",
     ]
+
+
+def _is_library_export_songs_dir(path: Path) -> bool:
+    parts = [p.lower() for p in Path(_norm_abs(path)).parts]
+    return len(parts) >= 4 and parts[-1] == "songs" and parts[-4:-1] == ["arcslicerdata", "out", "library_export"]
 
 
 def _action(
