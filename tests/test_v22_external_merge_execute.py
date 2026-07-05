@@ -74,6 +74,13 @@ def _snapshot(root: Path) -> dict[str, bytes]:
     }
 
 
+def _arc_tmp_paths(root: Path) -> list[Path]:
+    return [
+        path for path in root.parent.rglob("*")
+        if path.name.startswith((".arc_slicer_tmp_", ".arc_slicer_merge_stage_", ".arc_slicer_swap_"))
+    ]
+
+
 def _plan(current: Path, target: Path):
     plan = external_merge.build_external_merge_plan(current, target)
     assert plan.is_ready, plan.blockers
@@ -208,8 +215,8 @@ class ExternalMergeExecuteTests(unittest.TestCase):
             old_snapshot = _snapshot(target)
             original_install_pack = external_merge._install_pack_image
 
-            def failing_install_pack(source, target_path):
-                original_install_pack(source, target_path)
+            def failing_install_pack(source, target_path, *, replace):
+                original_install_pack(source, target_path, replace=replace)
                 raise OSError("boom after pack image")
 
             with mock.patch("external_merge._install_pack_image", side_effect=failing_install_pack):
@@ -220,8 +227,19 @@ class ExternalMergeExecuteTests(unittest.TestCase):
             self.assertEqual(result.rollback_errors, [])
             self.assertEqual(_snapshot(target), old_snapshot)
             self.assertFalse(list(target.parent.glob(".arc_slicer_merge_stage_*")))
+            self.assertFalse(_arc_tmp_paths(target))
             manifest = _read_json(result.backup_dir / "manifest.json")
             self.assertEqual(manifest["status"], "rolled_back")
+            self.assertEqual((result.backup_dir / "before" / "songlist").read_bytes(), old_snapshot["songlist"])
+            self.assertEqual((result.backup_dir / "before" / "packlist").read_bytes(), old_snapshot["packlist"])
+            self.assertEqual(
+                (result.backup_dir / "before" / "pack" / "select_pack_a.png").read_bytes(),
+                old_snapshot[str(Path("pack") / "select_pack_a.png")],
+            )
+            self.assertEqual(
+                (result.backup_dir / "before" / "songs" / "song_b" / "base.ogg").read_bytes(),
+                old_snapshot[str(Path("song_b") / "base.ogg")],
+            )
 
     def test_rollback_failure_reports_incomplete(self):
         with tempfile.TemporaryDirectory() as td:
@@ -231,8 +249,8 @@ class ExternalMergeExecuteTests(unittest.TestCase):
             _setup_target(target, [_song("song_b", title="old")], [_pack("pack_a")])
             original_install_song = external_merge._install_song_directory
 
-            def failing_install_song(source, target_path, swap):
-                original_install_song(source, target_path, swap)
+            def failing_install_song(source, target_path, swap, ctx):
+                original_install_song(source, target_path, swap, ctx)
                 raise OSError("song install fail")
 
             with mock.patch("external_merge._install_song_directory", side_effect=failing_install_song), \
@@ -276,6 +294,135 @@ class ExternalMergeExecuteTests(unittest.TestCase):
             issues = external_merge._execution_safety_issues(plan, backup_root)
 
             self.assertIn("write_path_escape", {issue.code for issue in issues})
+
+    def test_final_stale_after_staging_target_songlist_change_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current, target, backup_root = base / "current", base / "target", base / "backups"
+            _setup_current(current, [_song("new_song")], None)
+            _setup_target(target, [], [_pack("pack_a")])
+            before = _snapshot(target)
+            original_stage = external_merge._stage_inputs
+
+            def staging_then_mutate(plan, stage_dir):
+                original_stage(plan, stage_dir)
+                _write_json(target / "songlist", {"songs": [_song("external")]})
+
+            with mock.patch("external_merge._stage_inputs", side_effect=staging_then_mutate):
+                result = external_merge.execute_external_merge(_plan(current, target), backup_root=backup_root)
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.status, "stale_plan")
+            self.assertEqual(result.changed_paths, [])
+            self.assertFalse((target / "new_song").exists())
+            self.assertFalse(list(target.parent.glob(".arc_slicer_merge_stage_*")))
+            manifest = _read_json(result.backup_dir / "manifest.json")
+            self.assertEqual(manifest["status"], "stale_no_write")
+            self.assertEqual(manifest["changed_paths"], [])
+            self.assertNotEqual(_snapshot(target), before)
+            self.assertEqual([s["id"] for s in _read_json(target / "songlist")["songs"]], ["external"])
+
+    def test_final_stale_after_staging_current_song_change_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current, target, backup_root = base / "current", base / "target", base / "backups"
+            _setup_current(current, [_song("new_song")], None)
+            _setup_target(target, [], [_pack("pack_a")])
+            before = _snapshot(target)
+            original_stage = external_merge._stage_inputs
+
+            def staging_then_mutate(plan, stage_dir):
+                original_stage(plan, stage_dir)
+                (current / "new_song" / "base.ogg").write_bytes(b"changed current")
+
+            with mock.patch("external_merge._stage_inputs", side_effect=staging_then_mutate):
+                result = external_merge.execute_external_merge(_plan(current, target), backup_root=backup_root)
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.status, "stale_plan")
+            self.assertEqual(_snapshot(target), before)
+            self.assertFalse(list(target.parent.glob(".arc_slicer_merge_stage_*")))
+
+    def test_final_stale_after_staging_target_song_dir_change_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current, target, backup_root = base / "current", base / "target", base / "backups"
+            _setup_current(current, [_song("song_b", title="new")], None)
+            _setup_target(target, [_song("song_b", title="old")], [_pack("pack_a")])
+            before = _snapshot(target)
+            original_stage = external_merge._stage_inputs
+
+            def staging_then_mutate(plan, stage_dir):
+                original_stage(plan, stage_dir)
+                (target / "song_b" / "base.ogg").write_bytes(b"external target change")
+
+            with mock.patch("external_merge._stage_inputs", side_effect=staging_then_mutate):
+                result = external_merge.execute_external_merge(_plan(current, target), backup_root=backup_root)
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.status, "stale_plan")
+            self.assertEqual((target / "song_b" / "base.ogg").read_bytes(), b"external target change")
+            self.assertNotEqual(_snapshot(target), before)
+            self.assertFalse(list(target.parent.glob(".arc_slicer_merge_stage_*")))
+
+    def test_add_song_race_does_not_delete_external_directory(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current, target, backup_root = base / "current", base / "target", base / "backups"
+            _setup_current(current, [_song("new_song")], None)
+            _setup_target(target, [], [_pack("pack_a")])
+            original_install = external_merge._install_song_directory
+
+            def racing_install(source, target_path, swap, ctx):
+                _make_song_dir(target, "new_song", b"external")
+                original_install(source, target_path, swap, ctx)
+
+            with mock.patch("external_merge._install_song_directory", side_effect=racing_install):
+                result = external_merge.execute_external_merge(_plan(current, target), backup_root=backup_root)
+
+            self.assertFalse(result.success)
+            self.assertEqual((target / "new_song" / "base.ogg").read_bytes(), b"external")
+            manifest = _read_json(result.backup_dir / "manifest.json")
+            self.assertNotIn("new_song", manifest["created_target_items"])
+
+    def test_add_pack_image_race_does_not_delete_external_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current, target, backup_root = base / "current", base / "target", base / "backups"
+            _setup_current(current, [_song("song_a")], [_pack("pack_a")])
+            _setup_target(target, [], [_pack("pack_old", "old.png")])
+            original_install = external_merge._install_pack_image
+
+            def racing_install(source, target_path, *, replace):
+                (target / "pack" / "select_pack_a.png").write_bytes(b"external image")
+                original_install(source, target_path, replace=replace)
+
+            with mock.patch("external_merge._install_pack_image", side_effect=racing_install):
+                result = external_merge.execute_external_merge(_plan(current, target), backup_root=backup_root)
+
+            self.assertFalse(result.success)
+            self.assertEqual((target / "pack" / "select_pack_a.png").read_bytes(), b"external image")
+            manifest = _read_json(result.backup_dir / "manifest.json")
+            self.assertNotIn("pack/select_pack_a.png", manifest["created_target_items"])
+
+    def test_temp_files_are_cleaned_after_json_replace_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current, target, backup_root = base / "current", base / "target", base / "backups"
+            _setup_current(current, [_song("song_b", title="new")], None)
+            _setup_target(target, [_song("song_b", title="old")], [_pack("pack_a")])
+            original_replace = external_merge.os.replace
+
+            def failing_replace(src, dst):
+                if Path(dst).name == "songlist":
+                    raise OSError("json replace fail")
+                return original_replace(src, dst)
+
+            with mock.patch("external_merge.os.replace", side_effect=failing_replace):
+                result = external_merge.execute_external_merge(_plan(current, target), backup_root=backup_root)
+
+            self.assertFalse(result.success)
+            self.assertFalse(_arc_tmp_paths(target))
 
 
 if __name__ == "__main__":

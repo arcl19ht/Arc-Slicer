@@ -332,6 +332,96 @@ class ExternalMergePlanTests(unittest.TestCase):
             self.assertIn("input_songlist_invalid_json", _codes(plan))
             self.assertFalse(plan.is_ready)
 
+    def test_unsafe_input_song_ids_are_blocked_without_path_reads(self):
+        unsafe_ids = ["../escape", "a\\b", "C:\\escape", "\\\\server\\share", ".", "..", "pack", "unlock", "songlist", "CON"]
+        for song_id in unsafe_ids:
+            with self.subTest(song_id=song_id):
+                with tempfile.TemporaryDirectory() as td:
+                    base = Path(td)
+                    current = base / "current"
+                    target = base / "target"
+                    current.mkdir()
+                    _write_json(current / "songlist", {"songs": [_song(song_id)]})
+                    _setup_target(target, [], [_pack("pack_a")])
+
+                    plan = external_merge.build_external_merge_plan(current, target)
+
+                    self.assertIn("input_song_id_unsafe", _codes(plan))
+                    self.assertFalse((base / "escape").exists())
+
+    def test_target_equals_current_and_tool_export_aliases_are_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current = base / "ArcSlicerData" / "out" / "current_export" / "songs"
+            library = base / "ArcSlicerData" / "out" / "library_export" / "songs"
+            _setup_current(current, [_song("song_a")], None)
+            _setup_target(library, [], [_pack("pack_a")])
+
+            same_plan = external_merge.build_external_merge_plan(current, current / ".." / "songs")
+            self.assertIn("target_equals_current_input", _codes(same_plan))
+
+            current_alias = base / "ArcSlicerData" / "out" / "library_export" / ".." / "current_export" / "songs"
+            current_alias_plan = external_merge.build_external_merge_plan(current, current_alias)
+            self.assertIn("target_is_tool_export", _codes(current_alias_plan))
+
+            library_alias = base / "ArcSlicerData" / "out" / "current_export" / ".." / "library_export" / "songs"
+            library_alias_plan = external_merge.build_external_merge_plan(current, library_alias)
+            self.assertIn("target_is_tool_export", _codes(library_alias_plan))
+
+    def test_update_same_pack_same_img_missing_target_image_is_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current = base / "current"
+            target = base / "target"
+            _setup_current(current, [_song("song_a")], [_pack("pack_a")])
+            _setup_target(target, [], [_pack("pack_a")])
+            (target / "pack" / "select_pack_a.png").unlink()
+
+            plan = external_merge.build_external_merge_plan(current, target)
+
+            self.assertIn("target_pack_image_missing_for_update", _codes(plan))
+
+    def test_nested_symlink_in_song_dirs_is_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current = base / "current"
+            target = base / "target"
+            outside = base / "outside"
+            outside.mkdir()
+            _setup_current(current, [_song("song_a")], None)
+            _setup_target(target, [_song("song_a")], [_pack("pack_a")])
+            try:
+                os.symlink(outside, current / "song_a" / "nested_link", target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink creation is unavailable")
+
+            input_plan = external_merge.build_external_merge_plan(current, target)
+            self.assertIn("input_song_dir_contains_link", _codes(input_plan))
+
+            (current / "song_a" / "nested_link").unlink()
+            os.symlink(outside, target / "song_a" / "nested_link", target_is_directory=True)
+            target_plan = external_merge.build_external_merge_plan(current, target)
+            self.assertIn("target_song_dir_contains_link", _codes(target_plan))
+
+    def test_target_pack_image_symlink_is_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current = base / "current"
+            target = base / "target"
+            outside = base / "outside.png"
+            outside.write_bytes(b"outside")
+            _setup_current(current, [_song("song_a")], [_pack("pack_a")])
+            _setup_target(target, [], [_pack("pack_a")])
+            (target / "pack" / "select_pack_a.png").unlink()
+            try:
+                os.symlink(outside, target / "pack" / "select_pack_a.png")
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink creation is unavailable")
+
+            plan = external_merge.build_external_merge_plan(current, target)
+
+            self.assertIn("target_pack_image_is_link", _codes(plan))
+
 
 if __name__ == "__main__":
     unittest.main()
