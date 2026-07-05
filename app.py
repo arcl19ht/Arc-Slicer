@@ -954,6 +954,169 @@ def build_songlist_document(entries: list[dict]) -> dict:
     return {"songs": list(entries)}
 
 
+def _bool_pref(value, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        raw = value.strip().lower()
+        if raw in ("true", "1", "yes", "on"):
+            return True
+        if raw in ("false", "0", "no", "off"):
+            return False
+    return default
+
+
+def effective_library_export_enabled(library_export_enabled: bool, songlist_enabled: bool) -> bool:
+    return bool(library_export_enabled and songlist_enabled)
+
+
+def _load_songlist_document(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as ex:
+        raise ValueError(f"无法读取 songlist JSON: {ex}") from ex
+    if not isinstance(data, dict) or not isinstance(data.get("songs"), list):
+        raise ValueError("songlist 顶层必须为 {\"songs\": [...]}")
+    for item in data["songs"]:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"]:
+            raise ValueError("songlist 中每个条目必须包含非空字符串 id")
+    return data
+
+
+def merge_songlist_entries(existing_entries: list[dict], new_entries: list[dict]) -> list[dict]:
+    new_by_id: dict[str, dict] = {}
+    new_order: list[str] = []
+    for entry in new_entries:
+        song_id = entry.get("id") if isinstance(entry, dict) else None
+        if not isinstance(song_id, str) or not song_id:
+            raise ValueError("本次 songlist 条目缺少有效 id")
+        if song_id not in new_by_id:
+            new_order.append(song_id)
+        new_by_id[song_id] = entry
+
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for entry in existing_entries:
+        song_id = entry.get("id") if isinstance(entry, dict) else None
+        if not isinstance(song_id, str) or not song_id or song_id in seen:
+            continue
+        if song_id in new_by_id:
+            merged.append(new_by_id[song_id])
+        else:
+            merged.append(entry)
+        seen.add(song_id)
+
+    for song_id in new_order:
+        if song_id not in seen:
+            merged.append(new_by_id[song_id])
+            seen.add(song_id)
+    return merged
+
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f".{path.name}.tmp_{uuid.uuid4().hex}"
+    try:
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def _copy_replace_dir_with_backup(src: Path, target: Path, backup: Path) -> bool:
+    had_target = target.exists()
+    if had_target:
+        if _path_is_link_or_junction(target):
+            raise RuntimeError(f"目标歌曲目录是符号链接或 Junction，拒绝替换: {target}")
+        try:
+            target.rename(backup)
+        except Exception:
+            shutil.copytree(target, backup)
+            shutil.rmtree(target)
+    shutil.copytree(src, target)
+    return had_target
+
+
+def _restore_dir_backup(target: Path, backup: Path, had_target: bool) -> None:
+    if target.exists() and not _path_is_link_or_junction(target):
+        shutil.rmtree(target)
+    if had_target and backup.exists():
+        try:
+            backup.rename(target)
+        except Exception:
+            shutil.copytree(backup, target)
+            shutil.rmtree(backup)
+
+
+def merge_staging_into_library_export(
+    stage_root: Path,
+    out_dir: Path | None = None,
+    fail_after_dirs: bool = False,
+) -> None:
+    out_dir = Path(out_dir or OUT_DIR)
+    stage_root = Path(stage_root)
+    staging_songs = stage_root / "songs"
+    staging_songlist = staging_songs / "songlist"
+    if not staging_songlist.is_file():
+        raise RuntimeError("更新总导出包需要 staging/songs/songlist")
+
+    staging_doc = _load_songlist_document(staging_songlist)
+    new_entries = staging_doc["songs"]
+    song_ids = [entry["id"] for entry in new_entries]
+    if len(song_ids) != len(set(song_ids)):
+        raise RuntimeError("本次 songlist 含有重复 id，拒绝更新总导出包")
+
+    for song_id in song_ids:
+        src_dir = staging_songs / song_id
+        if not src_dir.is_dir():
+            raise RuntimeError(f"staging 缺少歌曲目录: {song_id}")
+
+    library_songs = library_export_songs_dir(out_dir)
+    library_songlist = library_songs / "songlist"
+    existing_entries: list[dict] = []
+    if library_songlist.exists():
+        existing_entries = _load_songlist_document(library_songlist)["songs"]
+
+    for song_id in song_ids:
+        target_dir = library_songs / song_id
+        if target_dir.exists() and _path_is_link_or_junction(target_dir):
+            raise RuntimeError(f"目标歌曲目录是符号链接或 Junction，拒绝替换: {target_dir}")
+
+    merged_doc = build_songlist_document(merge_songlist_entries(existing_entries, new_entries))
+    library_songs.mkdir(parents=True, exist_ok=True)
+
+    backups: list[tuple[Path, Path, bool]] = []
+    try:
+        for song_id in song_ids:
+            src_dir = staging_songs / song_id
+            target_dir = library_songs / song_id
+            backup = library_songs / f".{song_id}_backup_{uuid.uuid4().hex}"
+            had_target = _copy_replace_dir_with_backup(src_dir, target_dir, backup)
+            backups.append((target_dir, backup, had_target))
+
+        if fail_after_dirs:
+            raise RuntimeError("测试注入：歌曲目录替换后失败")
+
+        _atomic_write_json(library_songlist, merged_doc)
+    except Exception:
+        for target_dir, backup, had_target in reversed(backups):
+            try:
+                _restore_dir_backup(target_dir, backup, had_target)
+            except Exception:
+                pass
+        raise
+    else:
+        for _target_dir, backup, _had_target in backups:
+            if backup.exists() and not _path_is_link_or_junction(backup):
+                shutil.rmtree(backup)
+
+
 # ─── 核心切片 ─────────────────────────────────────────────────────────────────
 
 def make_songlist_entry(
@@ -1004,6 +1167,8 @@ def do_slice(
     songlist_meta: dict | None = None,
     songlist_enabled: bool = False,
     song_template: SongTemplate | None = None,
+    current_export_enabled: bool = True,
+    library_export_enabled: bool = True,
 ) -> int:
     try:
         validate_speed_value(speed)
@@ -1025,6 +1190,13 @@ def do_slice(
             except ValueError as ex:
                 log_fn(f"✗ Songlist 信息无效: {ex}", "err")
                 return 1
+
+    effective_library = effective_library_export_enabled(library_export_enabled, songlist_enabled)
+    if library_export_enabled and not songlist_enabled:
+        log_fn("  更新总导出包需要启用 songlist；本次不会修改 library_export。", "muted")
+    if not current_export_enabled and not effective_library:
+        log_fn("✗ 至少需要选择一个有效导出目标。", "err")
+        return 1
 
     in_dir = songs_dir / song_id
     in_aff, in_ogg = in_dir / "2.aff", in_dir / "base.ogg"
@@ -1088,10 +1260,32 @@ def do_slice(
             )
             log_fn(f"✓ 合并 songlist → out/current_export/songs/songlist（共 {len(all_song_entries)} 首）", "ok")
 
-        try:
-            publish_current_export_stage(stage_root)
-        except RuntimeError as ex:
-            log_fn(f"✗ {ex}", "err")
+        library_ok = True
+        if effective_library:
+            try:
+                merge_staging_into_library_export(stage_root)
+                log_fn("✓ 更新总导出包 → out/library_export/songs/", "ok")
+            except Exception as ex:
+                library_ok = False
+                log_fn(f"✗ 更新总导出包失败: {ex}", "err")
+
+        current_ok = True
+        if current_export_enabled:
+            try:
+                publish_current_export_stage(stage_root)
+                log_fn("✓ 生成本次导出包 → out/current_export/songs/", "ok")
+            except RuntimeError as ex:
+                current_ok = False
+                log_fn(f"✗ {ex}", "err")
+        else:
+            cleanup_current_export_stage(stage_root)
+            log_fn("  本次导出包：未启用，已清理临时 staging。", "muted")
+
+        if not library_ok or not current_ok:
+            if current_ok and not library_ok:
+                log_fn("⚠ 本次导出包已完成，但总导出包更新失败。", "err")
+            elif library_ok and not current_ok:
+                log_fn("⚠ 总导出包已完成，但本次导出包发布失败。", "err")
             return 1
     except Exception as ex:
         try:
@@ -1335,6 +1529,8 @@ class SlicerWorker(QThread):
         speed: float, songlist_meta: dict | None = None,
         songlist_enabled: bool = False,
         song_template: SongTemplate | None = None,
+        current_export_enabled: bool = True,
+        library_export_enabled: bool = True,
     ):
         super().__init__()
         self.songs_dir     = songs_dir
@@ -1344,6 +1540,8 @@ class SlicerWorker(QThread):
         self.songlist_meta = songlist_meta
         self.songlist_enabled = songlist_enabled
         self.song_template = song_template
+        self.current_export_enabled = current_export_enabled
+        self.library_export_enabled = library_export_enabled
 
     def run(self):
         def log(text, kind="normal"):
@@ -1353,9 +1551,15 @@ class SlicerWorker(QThread):
         log(f"  曲目: {self.song_id}  速度: {self.speed}  段数: {len(self.segments)}", "muted")
         if self.songlist_enabled:
             log("  songlist 生成: 开启", "muted")
+        log(
+            f"  导出目标: current={'开' if self.current_export_enabled else '关'} "
+            f"library={'开' if effective_library_export_enabled(self.library_export_enabled, self.songlist_enabled) else '关'}",
+            "muted",
+        )
         code = do_slice(
             self.songs_dir, self.song_id, self.segments, self.speed, log,
             self.songlist_meta, self.songlist_enabled, self.song_template,
+            self.current_export_enabled, self.library_export_enabled,
         )
         if code == 0:
             log("✓ 全部完成！输出目录: out/current_export/songs/", "ok")
@@ -1970,6 +2174,8 @@ class SegmentRow(QFrame):
 class SonglistPanel(QFrame):
     """可折叠的 Songlist 元数据配置面板。"""
 
+    enabled_changed = pyqtSignal()
+
     # 字段定义：(显示标签, key, 占位提示)
     _FIELDS = [
         ("曲名基础 TITLE BASE",          "title_base",      "e.g. Fractureray"),
@@ -2008,6 +2214,7 @@ class SonglistPanel(QFrame):
         self._enabled.setStyleSheet(
             f"color: {C_TEXT2}; font-size: 13px; background: transparent; border: none;"
         )
+        self._enabled.clicked.connect(lambda: self.enabled_changed.emit())
         outer.addWidget(self._enabled)
 
         # 面板主体
@@ -2315,7 +2522,36 @@ class MainWindow(QMainWindow):
 
         # ── Songlist 配置面板
         self._songlist_panel = SonglistPanel()
+        self._songlist_panel.enabled_changed.connect(self._refresh_export_target_state)
         lay.addWidget(self._songlist_panel)
+        lay.addSpacing(16)
+
+        # ── 导出目标
+        target_frame = QFrame()
+        target_frame.setStyleSheet(
+            f"QFrame {{ background: {C_CARD2}; border: 1px solid {C_BORDER2}; border-radius: 12px; }}"
+        )
+        target_lay = QVBoxLayout(target_frame)
+        target_lay.setContentsMargins(14, 12, 14, 12)
+        target_lay.setSpacing(8)
+        target_lay.addWidget(field_label("导出目标 EXPORT TARGETS"))
+        target_row = QHBoxLayout()
+        target_row.setSpacing(18)
+        self._current_export_check = QCheckBox("生成本次导出包")
+        self._current_export_check.setChecked(True)
+        self._library_export_check = QCheckBox("更新总导出包")
+        self._library_export_check.setChecked(True)
+        for box in (self._current_export_check, self._library_export_check):
+            box.setStyleSheet(
+                f"color: {C_TEXT2}; font-size: 13px; background: transparent; border: none;"
+            )
+        target_row.addWidget(self._current_export_check)
+        target_row.addWidget(self._library_export_check)
+        target_row.addStretch()
+        target_lay.addLayout(target_row)
+        self._library_export_note = make_label("需启用 songlist 后才能更新总导出包。", size=12, color=C_LABEL)
+        target_lay.addWidget(self._library_export_note)
+        lay.addWidget(target_frame)
         lay.addSpacing(16)
 
         # ── 日志
@@ -2331,6 +2567,7 @@ class MainWindow(QMainWindow):
 
         # 更新目录显示
         self._refresh_dir_label()
+        self._refresh_export_target_state()
 
     # ── 初始数据 ──────────────────────────────────────────────────────────────
 
@@ -2389,6 +2626,11 @@ class MainWindow(QMainWindow):
             self._songlist_panel.set_songlist_enabled(bool(data.get("songlist_enabled", False)))
         if data.get("songlist"):
             self._songlist_panel.set_meta(data["songlist"])
+        if hasattr(self, "_current_export_check"):
+            self._current_export_check.setChecked(_bool_pref(data.get("current_export_enabled"), True))
+        if hasattr(self, "_library_export_check"):
+            self._library_export_check.setChecked(_bool_pref(data.get("library_export_enabled"), True))
+            self._refresh_export_target_state()
         self._schedule_arc_cut_warning_refresh()
 
     # ── 目录操作 ──────────────────────────────────────────────────────────────
@@ -2397,6 +2639,15 @@ class MainWindow(QMainWindow):
         p = self._cfg.get("songs_dir", "")
         self._dir_path.setText(p)
         self._dir_path.setToolTip(p)
+
+    def _refresh_export_target_state(self):
+        songlist_enabled = (
+            self._songlist_panel.is_songlist_enabled()
+            if hasattr(self._songlist_panel, "is_songlist_enabled")
+            else False
+        )
+        self._library_export_check.setEnabled(bool(songlist_enabled))
+        self._library_export_note.setVisible(not songlist_enabled)
 
     def _browse_songs_dir(self):
         d = self._cfg.get("songs_dir", str(DEFAULT_SONGS_DIR))
@@ -2524,12 +2775,24 @@ class MainWindow(QMainWindow):
             songlist_form = self._songlist_panel.get_form_data()
         else:
             songlist_form = self._songlist_panel.get_meta() or {}
+        current_export_enabled = (
+            bool(self._current_export_check.isChecked())
+            if hasattr(self, "_current_export_check")
+            else True
+        )
+        library_export_enabled = (
+            bool(self._library_export_check.isChecked())
+            if hasattr(self, "_library_export_check")
+            else True
+        )
         data: dict = {
             "song_id":  self._song_box.currentText(),
             "speed":    parse_speed_text(self._speed_input.text()) if speed is None else speed,
             "segments": [r.to_dict() for r in self._rows if r.to_dict()],
             "songlist_enabled": songlist_enabled,
             "packlist_enabled": False,
+            "current_export_enabled": current_export_enabled,
+            "library_export_enabled": library_export_enabled,
             "songlist": songlist_form,
         }
         return data
@@ -2570,6 +2833,13 @@ class MainWindow(QMainWindow):
             except ValueError as ex:
                 self._push_log(f"✗ Songlist 信息无效: {ex}", "err")
                 return
+        effective_library = effective_library_export_enabled(
+            bool(data.get("library_export_enabled", True)),
+            bool(data.get("songlist_enabled", False)),
+        )
+        if not data.get("current_export_enabled", True) and not effective_library:
+            self._push_log("✗ 至少需要选择一个有效导出目标", "err")
+            return
 
         self._save_slides()
         self._log_widget.clear()
@@ -2582,6 +2852,8 @@ class MainWindow(QMainWindow):
         self._worker = SlicerWorker(
             songs_dir, data["song_id"], data["segments"], data["speed"],
             songlist_meta, bool(data.get("songlist_enabled")), songlist_template,
+            bool(data.get("current_export_enabled", True)),
+            bool(data.get("library_export_enabled", True)),
         )
         self._worker.log_signal.connect(self._push_log)
         self._worker.done_signal.connect(self._on_done)
