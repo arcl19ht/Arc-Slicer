@@ -15,7 +15,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass, field, replace
-from decimal import Decimal
+from decimal import Decimal, ROUND_FLOOR
 from pathlib import Path
 
 from PyQt6.QtCore import (
@@ -624,6 +624,173 @@ def _get_ffmpeg() -> str:
     raise RuntimeError(
         "找不到 ffmpeg。请将 ffmpeg.exe 放在应用同目录，或将其加入系统 PATH。"
     )
+
+
+TIME_INPUT_PATTERN = r"^-?\d*$"
+_TIME_INPUT_RE = re.compile(r"^-?\d*$")
+_FFMPEG_DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)")
+
+
+@dataclass
+class SegmentValidationResult:
+    start_error: str = ""
+    end_error: str = ""
+    first_field: str | None = None
+    first_message: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return not self.start_error and not self.end_error
+
+
+def is_time_input_text_allowed(text: str) -> bool:
+    return bool(_TIME_INPUT_RE.fullmatch(str(text)))
+
+
+def parse_duration_to_ms(value: str | int | float | Decimal) -> int:
+    try:
+        duration = Decimal(str(value).strip())
+    except Exception as ex:
+        raise ValueError("invalid duration") from ex
+    if not duration.is_finite() or duration < 0:
+        raise ValueError("invalid duration")
+    return int((duration * Decimal(1000)).to_integral_value(rounding=ROUND_FLOOR))
+
+
+def parse_ffmpeg_duration_to_ms(text: str) -> int:
+    m = _FFMPEG_DURATION_RE.search(text or "")
+    if not m:
+        raise ValueError("ffmpeg duration not found")
+    hours = int(m.group(1))
+    minutes = int(m.group(2))
+    seconds = Decimal(m.group(3))
+    total = Decimal(hours * 3600 + minutes * 60) + seconds
+    return parse_duration_to_ms(total)
+
+
+def format_duration_ms(duration_ms: int) -> str:
+    duration_ms = max(0, int(duration_ms))
+    total_seconds, ms = divmod(duration_ms, 1000)
+    minutes, seconds = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}.{ms:03d}"
+    return f"{minutes}:{seconds:02d}.{ms:03d}"
+
+
+def _get_ffprobe() -> str:
+    candidates = []
+    bundled = RES_DIR / ("ffprobe.exe" if sys.platform == "win32" else "ffprobe")
+    candidates.append(bundled)
+    try:
+        ffmpeg_path = Path(_get_ffmpeg())
+        candidates.append(ffmpeg_path.with_name("ffprobe.exe" if sys.platform == "win32" else "ffprobe"))
+    except RuntimeError:
+        pass
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    found = shutil.which("ffprobe")
+    if found:
+        return found
+    raise RuntimeError("找不到 ffprobe")
+
+
+def _subprocess_no_window_flag() -> int:
+    return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
+
+def probe_audio_duration_ms(audio_path: Path) -> int:
+    audio_path = Path(audio_path)
+    if not audio_path.is_file():
+        raise RuntimeError(f"音频文件不存在: {audio_path}")
+
+    errors: list[str] = []
+    try:
+        ffprobe = _get_ffprobe()
+        cp = subprocess.run(
+            [
+                ffprobe, "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=_subprocess_no_window_flag(),
+        )
+        if cp.stdout.strip():
+            return parse_duration_to_ms(cp.stdout.strip().splitlines()[0])
+        errors.append((cp.stderr or "ffprobe 未返回时长").strip())
+    except Exception as ex:
+        errors.append(f"ffprobe: {ex}")
+
+    try:
+        ffmpeg = _get_ffmpeg()
+        cp = subprocess.run(
+            [ffmpeg, "-hide_banner", "-i", str(audio_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=_subprocess_no_window_flag(),
+        )
+        return parse_ffmpeg_duration_to_ms((cp.stderr or "") + "\n" + (cp.stdout or ""))
+    except Exception as ex:
+        errors.append(f"ffmpeg: {ex}")
+
+    raise RuntimeError("; ".join(err for err in errors if err) or "无法读取音频时长")
+
+
+def _parse_non_negative_time_text(text: str, field_name: str) -> tuple[int | None, str]:
+    raw = str(text)
+    if raw == "":
+        return None, f"{field_name}不能为空"
+    if not is_time_input_text_allowed(raw) or raw == "-":
+        return None, f"{field_name}必须为非负整数毫秒"
+    value = int(raw)
+    if value < 0:
+        return None, f"{field_name}必须为非负整数毫秒"
+    return value, ""
+
+
+def validate_segment_bounds(
+    start_text: str,
+    end_text: str,
+    audio_duration_ms: int | None,
+) -> SegmentValidationResult:
+    start, start_error = _parse_non_negative_time_text(start_text, "起点")
+    end, end_error = _parse_non_negative_time_text(end_text, "终点")
+    result = SegmentValidationResult(start_error=start_error, end_error=end_error)
+
+    if result.start_error:
+        result.first_field = "start"
+        result.first_message = result.start_error
+        return result
+    if result.end_error:
+        result.first_field = "end"
+        result.first_message = result.end_error
+        return result
+
+    assert start is not None and end is not None
+    if end <= start:
+        result.end_error = "终点必须大于起点"
+    elif audio_duration_ms is None:
+        result.end_error = "无法读取当前曲目的音频时长"
+    elif start >= audio_duration_ms:
+        result.start_error = f"起点不能超过音频时长：{format_duration_ms(audio_duration_ms)}"
+    elif end > audio_duration_ms:
+        result.end_error = f"终点不能超过音频时长：{format_duration_ms(audio_duration_ms)}"
+
+    if result.start_error:
+        result.first_field = "start"
+        result.first_message = result.start_error
+    elif result.end_error:
+        result.first_field = "end"
+        result.first_message = result.end_error
+    return result
 
 
 def _atempo(speed: float) -> str:
@@ -2414,6 +2581,7 @@ class SegmentRow(QFrame):
         lay.addWidget(field_label("开始 START"), 0, 1)
         self._start = QLineEdit("" if s is None else str(s))
         self._start.setFixedWidth(110)
+        self._install_time_validator(self._start)
         lay.addWidget(self._start, 1, 1, Qt.AlignmentFlag.AlignVCenter)
 
         arrow = QLabel("→")
@@ -2424,7 +2592,13 @@ class SegmentRow(QFrame):
         lay.addWidget(field_label("结束 END"), 0, 3)
         self._end = QLineEdit("" if e is None else str(e))
         self._end.setFixedWidth(110)
+        self._install_time_validator(self._end)
         lay.addWidget(self._end, 1, 3, Qt.AlignmentFlag.AlignVCenter)
+
+        self._start_error = self._make_time_error_label()
+        self._end_error = self._make_time_error_label()
+        lay.addWidget(self._start_error, 2, 1)
+        lay.addWidget(self._end_error, 2, 3)
 
         self._dur = QLabel()
         self._dur.setStyleSheet(
@@ -2457,6 +2631,24 @@ class SegmentRow(QFrame):
         self._start.textChanged.connect(self._on_change)
         self._end.textChanged.connect(self._on_change)
         btn_del.clicked.connect(lambda: self.deleted.emit(self))
+
+    def _install_time_validator(self, field: QLineEdit) -> None:
+        try:
+            from PyQt6.QtCore import QRegularExpression
+            from PyQt6.QtGui import QRegularExpressionValidator
+
+            field.setValidator(QRegularExpressionValidator(QRegularExpression(TIME_INPUT_PATTERN), field))
+        except Exception:
+            pass
+
+    def _make_time_error_label(self) -> QLabel:
+        label = QLabel("")
+        label.setStyleSheet(
+            f"font-size: 10px; font-weight: 600; color: {C_ERR}; "
+            f"background: transparent; border: none;"
+        )
+        label.hide()
+        return label
 
     def _on_change(self):
         try:
@@ -2496,6 +2688,26 @@ class SegmentRow(QFrame):
 
     def update_index(self, index: int):
         self._badge.setText(str(index))
+
+    def start_text(self) -> str:
+        return self._start.text()
+
+    def end_text(self) -> str:
+        return self._end.text()
+
+    def set_time_errors(self, start_error: str = "", end_error: str = "") -> None:
+        for label, message in ((self._start_error, start_error), (self._end_error, end_error)):
+            label.setText(message)
+            label.setToolTip(message)
+            label.setVisible(bool(message))
+
+    def clear_time_errors(self) -> None:
+        self.set_time_errors("", "")
+
+    def focus_time_field(self, field: str | None) -> None:
+        widget = self._start if field == "start" else self._end
+        widget.setFocus()
+        widget.selectAll()
 
     def set_arc_cut_indicators(self, start_hits: list[dict], end_hits: list[dict]) -> None:
         for status in self._arc_statuses:
@@ -2833,6 +3045,11 @@ class MainWindow(QMainWindow):
         self._arc_warning_timer = QTimer(self)
         self._arc_warning_timer.setSingleShot(True)
         self._arc_warning_timer.timeout.connect(self._refresh_arc_cut_warnings)
+        self._segment_validation_timer = QTimer(self)
+        self._segment_validation_timer.setSingleShot(True)
+        self._segment_validation_timer.timeout.connect(self._refresh_segment_time_validation)
+        self._audio_duration_ms: int | None = None
+        self._audio_duration_error = ""
 
         self.setWindowTitle("Arc Slicer")
         self.setMinimumSize(620, 580)
@@ -2858,18 +3075,18 @@ class MainWindow(QMainWindow):
         outer = QVBoxLayout(central)
         outer.setContentsMargins(0, 0, 0, 0)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet("background: transparent; border: none;")
-        scroll.viewport().setAutoFillBackground(False)
-        outer.addWidget(scroll)
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setStyleSheet("background: transparent; border: none;")
+        self._scroll.viewport().setAutoFillBackground(False)
+        outer.addWidget(self._scroll)
 
         content = QWidget()
         content.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         content.setStyleSheet(f"QWidget {{ background: {C_BG}; }}")
-        scroll.setWidget(content)
+        self._scroll.setWidget(content)
 
         lay = QVBoxLayout(content)
         lay.setContentsMargins(30, 30, 30, 30)
@@ -2933,6 +3150,7 @@ class MainWindow(QMainWindow):
         self._song_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._song_box.currentTextChanged.connect(lambda text: self._songlist_panel.update_pack_defaults(text))
         self._song_box.currentTextChanged.connect(lambda _text: self._schedule_arc_cut_warning_refresh())
+        self._song_box.currentTextChanged.connect(lambda _text: self._refresh_current_audio_duration())
         song_col.addWidget(self._song_box)
         tb_lay.addLayout(song_col, 1)
 
@@ -2953,6 +3171,9 @@ class MainWindow(QMainWindow):
         self._seg_header = make_label("时间段 · 0 段 · 共 0.0s", size=13, weight=700, color=C_TEXT2)
         seg_head.addWidget(self._seg_header)
         seg_head.addStretch()
+        self._audio_duration_label = make_label("音频时长：—", size=12, color=C_LABEL)
+        seg_head.addWidget(self._audio_duration_label)
+        seg_head.addSpacing(14)
         seg_head.addWidget(make_label("毫秒 · 对应 .aff 整数时间", size=12, color=C_LABEL))
         lay.addLayout(seg_head)
 
@@ -3072,12 +3293,14 @@ class MainWindow(QMainWindow):
         self._song_box.clear()
         if not songs:
             self._song_box.addItem("（songs 目录为空）")
+            self._refresh_current_audio_duration()
             self._schedule_arc_cut_warning_refresh()
             return
         for s in songs:
             self._song_box.addItem(s)
         if current in songs:
             self._song_box.setCurrentText(current)
+        self._refresh_current_audio_duration()
         self._schedule_arc_cut_warning_refresh()
 
     def _apply_slides(self, data: dict):
@@ -3112,6 +3335,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_library_export_check"):
             self._library_export_check.setChecked(_bool_pref(data.get("library_export_enabled"), True))
             self._refresh_export_target_state()
+        self._refresh_current_audio_duration()
         self._schedule_arc_cut_warning_refresh()
 
     # ── 目录操作 ──────────────────────────────────────────────────────────────
@@ -3140,6 +3364,7 @@ class MainWindow(QMainWindow):
             save_config(self._cfg)
             self._refresh_dir_label()
             self._populate_songs(self._get_songs())
+            self._refresh_current_audio_duration()
             self._schedule_arc_cut_warning_refresh()
             self._push_log(f"✓ songs 目录 → {path}", "ok")
 
@@ -3162,6 +3387,7 @@ class MainWindow(QMainWindow):
             self._song_box.setCurrentIndex(idx)
         self._clear_segments()
         self._add_segment(None, None)
+        self._refresh_current_audio_duration()
         self._schedule_arc_cut_warning_refresh()
 
     # ── 段落管理 ──────────────────────────────────────────────────────────────
@@ -3183,9 +3409,11 @@ class MainWindow(QMainWindow):
         row.deleted.connect(self._remove_segment)
         row.changed.connect(self._refresh_seg_header)
         row.changed.connect(self._schedule_arc_cut_warning_refresh)
+        row.changed.connect(self._schedule_segment_time_validation)
         self._rows.append(row)
         self._segs_layout.addWidget(row)
         self._refresh_seg_header()
+        self._schedule_segment_time_validation()
         self._schedule_arc_cut_warning_refresh()
 
     def _remove_segment(self, row: SegmentRow):
@@ -3198,6 +3426,7 @@ class MainWindow(QMainWindow):
             self._add_segment(None, None)
             return
         self._refresh_seg_header()
+        self._schedule_segment_time_validation()
         self._schedule_arc_cut_warning_refresh()
 
     def _refresh_seg_header(self):
@@ -3213,6 +3442,78 @@ class MainWindow(QMainWindow):
 
     def _schedule_arc_cut_warning_refresh(self):
         self._arc_warning_timer.start(200)
+
+    def _schedule_segment_time_validation(self):
+        self._segment_validation_timer.start(120)
+
+    def _current_audio_path(self) -> Path | None:
+        song_id = self._song_box.currentText()
+        if not isinstance(song_id, str) or not song_id or "目录为空" in song_id:
+            return None
+        cfg = getattr(self, "_cfg", {})
+        raw_songs_dir = cfg.get("songs_dir", str(DEFAULT_SONGS_DIR)) if isinstance(cfg, dict) else str(DEFAULT_SONGS_DIR)
+        if not isinstance(raw_songs_dir, (str, os.PathLike)):
+            return None
+        songs_dir = Path(raw_songs_dir)
+        return songs_dir / song_id / "base.ogg"
+
+    def _refresh_current_audio_duration(self):
+        audio_path = self._current_audio_path()
+        if audio_path is None or not audio_path.is_file():
+            self._audio_duration_ms = None
+            self._audio_duration_error = ""
+            if hasattr(self, "_audio_duration_label"):
+                self._audio_duration_label.setText("音频时长：—")
+                self._audio_duration_label.setToolTip("")
+            self._refresh_segment_time_validation()
+            return
+
+        try:
+            self._audio_duration_ms = probe_audio_duration_ms(audio_path)
+            self._audio_duration_error = ""
+            text = f"音频时长：{format_duration_ms(self._audio_duration_ms)}"
+            self._audio_duration_label.setText(text)
+            self._audio_duration_label.setToolTip(str(audio_path))
+        except Exception as ex:
+            self._audio_duration_ms = None
+            self._audio_duration_error = str(ex)
+            self._audio_duration_label.setText("音频时长：无法读取")
+            self._audio_duration_label.setToolTip(str(ex))
+            self._push_log(f"⚠ 无法读取当前曲目的音频时长: {ex}", "muted")
+        self._refresh_segment_time_validation()
+
+    def _refresh_segment_time_validation(self):
+        duration_ms = self._audio_duration_ms
+        for row in self._rows:
+            if not row.start_text() and not row.end_text():
+                row.clear_time_errors()
+                continue
+            result = validate_segment_bounds(row.start_text(), row.end_text(), duration_ms)
+            row.set_time_errors(result.start_error, result.end_error)
+
+    def _first_segment_validation_error(self) -> tuple[int, SegmentRow, SegmentValidationResult] | None:
+        duration_ms = self._audio_duration_ms
+        for index, row in enumerate(self._rows):
+            result = validate_segment_bounds(row.start_text(), row.end_text(), duration_ms)
+            row.set_time_errors(result.start_error, result.end_error)
+            if not result.ok:
+                return index, row, result
+        return None
+
+    def _show_segment_validation_error(self, index: int, row: SegmentRow, result: SegmentValidationResult):
+        title = "时间段无效"
+        message = f"第 {index + 1} 个时间段：{result.first_message}"
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+
+            QMessageBox.warning(self, title, message)
+        except Exception:
+            self._push_log(f"✗ {message}", "err")
+        try:
+            self._scroll.ensureWidgetVisible(row)
+        except Exception:
+            pass
+        row.focus_time_field(result.first_field)
 
     def _clear_arc_cut_warnings(self):
         for row in self._rows:
@@ -3306,6 +3607,15 @@ class MainWindow(QMainWindow):
             speed = parse_speed_text(self._speed_input.text())
         except ValueError as ex:
             self._push_log(f"✗ 速度无效: {ex}", "err")
+            return
+        song_id = self._song_box.currentText()
+        if not isinstance(song_id, str) or not song_id or "目录为空" in song_id:
+            self._push_log("✗ 请先选择曲目 Song ID", "err")
+            return
+        self._refresh_current_audio_duration()
+        segment_error = self._first_segment_validation_error()
+        if segment_error:
+            self._show_segment_validation_error(*segment_error)
             return
         data = self._collect(speed)
         if not data["song_id"] or "目录为空" in data["song_id"]:
