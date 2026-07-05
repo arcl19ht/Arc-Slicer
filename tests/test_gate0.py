@@ -10,16 +10,67 @@ from pathlib import Path
 
 class _Fake:
     def __init__(self, *args, **kwargs):
-        pass
+        self._text = str(args[0]) if args else ""
+        self._tooltip = ""
+        self._fixed_height = None
+        self._visible = True
+        self._children = []
 
     def __call__(self, *args, **kwargs):
         return _Fake()
 
     def __getattr__(self, name):
+        if name in ("textChanged", "clicked"):
+            return _FakeSignal()
         return _Fake()
 
     def __or__(self, other):
         return self
+
+    def addWidget(self, widget, *args, **kwargs):
+        self._children.append(widget)
+
+    def addLayout(self, layout, *args, **kwargs):
+        self._children.append(layout)
+
+    def addStretch(self, *args, **kwargs):
+        pass
+
+    def setText(self, text):
+        self._text = str(text)
+
+    def text(self):
+        return self._text
+
+    def setToolTip(self, text):
+        self._tooltip = str(text)
+
+    def toolTip(self):
+        return self._tooltip
+
+    def setFixedHeight(self, height):
+        self._fixed_height = int(height)
+
+    def minimumHeight(self):
+        return self._fixed_height or 0
+
+    def maximumHeight(self):
+        return self._fixed_height or 16777215
+
+    def hide(self):
+        self._visible = False
+
+    def show(self):
+        self._visible = True
+
+    def setVisible(self, visible):
+        self._visible = bool(visible)
+
+    def isVisible(self):
+        return self._visible
+
+    def deleteLater(self):
+        pass
 
 
 class _FakeSignal:
@@ -41,11 +92,12 @@ def _install_fake_pyqt():
     qtcore.Qt = _Fake()
     qtcore.QThread = _Fake
     qtcore.pyqtSignal = lambda *args, **kwargs: _FakeSignal()
-    for name in ("QTimer", "QSize", "QMimeData", "QPoint", "QRect"):
+    for name in ("QTimer", "QSize", "QMimeData", "QPoint", "QRect", "QEvent"):
         setattr(qtcore, name, _Fake)
 
     for name in (
         "QColor", "QFont", "QPalette", "QPainter", "QLinearGradient",
+        "QPainterPath", "QPen",
         "QDragEnterEvent", "QDropEvent", "QDragLeaveEvent", "QMouseEvent",
         "QTextCursor",
     ):
@@ -557,32 +609,7 @@ class Gate0NonlinearArcWarningTests(unittest.TestCase):
         self.assertEqual(len(warnings[2]["start"]), 1)
         self.assertEqual(warnings[2]["end"], [])
 
-    def test_web_api_get_arc_cut_warnings_reads_current_songs_dir(self):
-        old_config = app.CONFIG_PATH
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            songs_dir = root / "songs"
-            song_dir = songs_dir / "song"
-            song_dir.mkdir(parents=True)
-            (song_dir / "base.ogg").write_bytes(b"")
-            (song_dir / "2.aff").write_text(
-                "AudioOffset:0\n-\ntiming(0,100.00,4.00);\n"
-                "arc(0,1000,0,1,si,0,1,0,none,false);\n",
-                encoding="utf-8",
-            )
-            app.CONFIG_PATH = root / "config.json"
-            app.CONFIG_PATH.write_text(json.dumps({"songs_dir": str(songs_dir)}), encoding="utf-8")
-            try:
-                result = app.ArcWebApi().get_arc_cut_warnings("song", [{"s": 250, "e": 750}])
-            finally:
-                app.CONFIG_PATH = old_config
-
-        self.assertEqual(len(result[0]["start"]), 1)
-        self.assertEqual(len(result[0]["end"]), 1)
-        self.assertEqual(result[0]["start"][0]["easing"], "si")
-
-    def test_web_api_allows_song_dir_junction_inside_songs_dir(self):
-        old_config = app.CONFIG_PATH
+    def test_arc_cut_warning_detection_allows_junction_song_dirs(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             source_song = root / "source_song"
@@ -605,17 +632,195 @@ class Gate0NonlinearArcWarningTests(unittest.TestCase):
                 )
             else:
                 linked_song.symlink_to(source_song, target_is_directory=True)
-            app.CONFIG_PATH = root / "config.json"
-            app.CONFIG_PATH.write_text(json.dumps({"songs_dir": str(songs_dir)}), encoding="utf-8")
-            try:
-                result = app.ArcWebApi().get_arc_cut_warnings("song", [{"s": 250, "e": 750}])
-            finally:
-                app.CONFIG_PATH = old_config
+            aff_text = (linked_song / "2.aff").read_text(encoding="utf-8")
+            result = app.find_nonlinear_arc_cut_warnings(aff_text, [{"s": 250, "e": 750}])
 
-        self.assertNotIn("__error", result)
         self.assertEqual(len(result[0]["start"]), 1)
         self.assertEqual(len(result[0]["end"]), 1)
         self.assertEqual(result[0]["start"][0]["easing"], "so")
+
+
+class Gate0PyQtSegmentRowTests(unittest.TestCase):
+    class _Layout(_Fake):
+        pass
+
+    class _SongBox:
+        def __init__(self, text="song"):
+            self._text = text
+
+        def currentText(self):
+            return self._text
+
+    class _SpeedInput:
+        def __init__(self, text="1.0"):
+            self._text = text
+
+        def text(self):
+            return self._text
+
+    class _SonglistPanel:
+        def get_meta(self):
+            return None
+
+    def _window_for_segments(self):
+        win = object.__new__(app.MainWindow)
+        win._rows = []
+        win._segs_layout = self._Layout()
+        win._refresh_seg_header = lambda: None
+        win._schedule_arc_cut_warning_refresh = lambda: None
+        return win
+
+    def test_segment_row_accepts_blank_times(self):
+        row = app.SegmentRow(1, None, None)
+
+        self.assertEqual(row._start.text(), "")
+        self.assertEqual(row._end.text(), "")
+        self.assertIsNone(row.s_val)
+        self.assertIsNone(row.e_val)
+        self.assertEqual(row._dur.text(), "\u2014")
+        self.assertIsNone(row.to_dict())
+        self.assertFalse(row._arc_indicator_box.isVisible())
+
+    def test_add_segment_explicit_blank_is_not_auto_segment(self):
+        win = self._window_for_segments()
+        app.MainWindow._add_segment(win, None, None)
+
+        self.assertEqual(len(win._rows), 1)
+        row = win._rows[0]
+        self.assertEqual(row._start.text(), "")
+        self.assertEqual(row._end.text(), "")
+        self.assertIsNone(row.to_dict())
+
+        win._song_box = self._SongBox()
+        win._speed_input = self._SpeedInput()
+        win._songlist_panel = self._SonglistPanel()
+        data = app.MainWindow._collect(win)
+        self.assertEqual(data["segments"], [])
+
+    def test_add_segment_auto_creates_blank_segment(self):
+        win = self._window_for_segments()
+        app.MainWindow._add_segment(win)
+        self.assertIsNone(win._rows[0].to_dict())
+        self.assertEqual(win._rows[0]._start.text(), "")
+        self.assertEqual(win._rows[0]._end.text(), "")
+
+        app.MainWindow._add_segment(win)
+        self.assertIsNone(win._rows[1].to_dict())
+
+    def test_blank_segment_does_not_call_arc_warning_detection(self):
+        with tempfile.TemporaryDirectory() as td:
+            songs_dir = Path(td) / "songs"
+            song_dir = songs_dir / "song"
+            song_dir.mkdir(parents=True)
+            (song_dir / "2.aff").write_text(
+                "AudioOffset:0\n-\ntiming(0,100.00,4.00);\n"
+                "arc(0,1000,0.00,1.00,si,0.00,1.00,0,none,false);\n",
+                encoding="utf-8",
+            )
+
+            row = app.SegmentRow(1, None, None)
+            win = object.__new__(app.MainWindow)
+            win._cfg = {"songs_dir": str(songs_dir)}
+            win._song_box = self._SongBox("song")
+            win._rows = [row]
+
+            old_find = app.find_nonlinear_arc_cut_warnings
+            called = {"value": False}
+
+            def fail_if_called(*args, **kwargs):
+                called["value"] = True
+                raise AssertionError("blank segment should not be checked")
+
+            app.find_nonlinear_arc_cut_warnings = fail_if_called
+            try:
+                app.MainWindow._refresh_arc_cut_warnings(win)
+            finally:
+                app.find_nonlinear_arc_cut_warnings = old_find
+
+            self.assertFalse(called["value"])
+            self.assertFalse(row._arc_indicator_box.isVisible())
+
+    def test_arc_cut_status_start_only(self):
+        row = app.SegmentRow(1, 21000, 22000)
+        row.set_arc_cut_warnings([{"easing": "si"}, {"easing": "b"}], [])
+
+        self.assertTrue(row._arc_indicator_box.isVisible())
+        self.assertEqual(len(row._arc_statuses), 1)
+        self.assertEqual(row._arc_statuses[0].boundary, "start")
+        self.assertEqual(row._arc_statuses[0].label.text(), "起点截断")
+        self.assertIsNone(row._arc_statuses[0]._card)
+
+    def test_arc_cut_info_content_start_text(self):
+        content = app._arc_cut_info_content(
+            [{"easing": "si"}, {"easing": "si"}, {"easing": "b"}],
+            "start",
+        )
+
+        self.assertIn("起点截断", content["title"])
+        self.assertIn("中间开始", content["body"])
+        self.assertIn("边界不会突跳", content["body"])
+        self.assertIn("只能近似原谱", content["body"])
+        self.assertEqual(content["summary"], "si × 2 · b × 1")
+
+    def test_arc_cut_status_end_only(self):
+        row = app.SegmentRow(1, 21000, 22000)
+        row.set_arc_cut_warnings([], [{"easing": "so"}, {"easing": "so"}, {"easing": "soso"}])
+
+        self.assertTrue(row._arc_indicator_box.isVisible())
+        self.assertEqual(len(row._arc_statuses), 1)
+        self.assertEqual(row._arc_statuses[0].boundary, "end")
+        self.assertEqual(row._arc_statuses[0].label.text(), "终点截断")
+        self.assertIsNone(row._arc_statuses[0]._card)
+
+    def test_arc_cut_info_content_end_text(self):
+        content = app._arc_cut_info_content(
+            [{"easing": "so"}, {"easing": "so"}, {"easing": "soso"}],
+            "end",
+        )
+
+        self.assertIn("终点截断", content["title"])
+        self.assertIn("中间结束", content["body"])
+        self.assertIn("边界不会突跳", content["body"])
+        self.assertEqual(content["summary"], "so × 2 · soso × 1")
+
+    def test_arc_cut_indicator_both_sides_and_cleared(self):
+        row = app.SegmentRow(1, 21000, 22000)
+        row.set_arc_cut_warnings([{"easing": "si"}], [{"easing": "soso"}])
+
+        self.assertTrue(row._arc_indicator_box.isVisible())
+        self.assertEqual(len(row._arc_statuses), 2)
+        self.assertEqual(row._arc_statuses[0].boundary, "start")
+        self.assertEqual(row._arc_statuses[1].boundary, "end")
+        self.assertEqual(row._arc_statuses[0].hits, [{"easing": "si"}])
+        self.assertEqual(row._arc_statuses[1].hits, [{"easing": "soso"}])
+        self.assertEqual(
+            app._arc_cut_info_content(row._arc_statuses[0].hits, "start")["summary"],
+            "si × 1",
+        )
+        self.assertEqual(
+            app._arc_cut_info_content(row._arc_statuses[1].hits, "end")["summary"],
+            "soso × 1",
+        )
+
+        row.set_arc_cut_warnings([], [])
+        self.assertFalse(row._arc_indicator_box.isVisible())
+        self.assertEqual(row._arc_statuses, [])
+
+    def test_arc_cut_status_for_fixture_end_cut(self):
+        aff_path = Path("tests/fixtures/gate0_arc_cases.aff")
+        aff_text = aff_path.read_text(encoding="utf-8", errors="replace")
+        warnings = app.find_nonlinear_arc_cut_warnings(aff_text, [{"s": 21000, "e": 22000}])
+        row = app.SegmentRow(1, 21000, 22000)
+        row.set_arc_cut_warnings(warnings[0]["start"], warnings[0]["end"])
+        content = app._arc_cut_info_content(warnings[0]["end"], "end")
+
+        self.assertEqual(warnings[0]["start"], [])
+        self.assertTrue(row._arc_indicator_box.isVisible())
+        self.assertEqual(len(row._arc_statuses), 1)
+        self.assertEqual(row._arc_statuses[0].boundary, "end")
+        self.assertIn("终点截断", content["title"])
+        self.assertIn("so × 6", content["summary"])
+        self.assertIn("soso × 2", content["summary"])
 
 
 class Gate0UiSaveTests(unittest.TestCase):
@@ -659,9 +864,8 @@ class Gate0UiSaveTests(unittest.TestCase):
             self.assertTrue(all(kind == "err" for _, kind in logs))
 
 
-class Gate0WebApiImportTests(unittest.TestCase):
-    def test_add_song_folder_path_imports_valid_song_dir_without_dialog(self):
-        old_config = app.CONFIG_PATH
+class Gate0PyQtImportTests(unittest.TestCase):
+    def test_import_song_folder_imports_valid_song_dir(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             src = root / "source_song"
@@ -669,39 +873,26 @@ class Gate0WebApiImportTests(unittest.TestCase):
             src.mkdir()
             (src / "base.ogg").write_bytes(b"")
             (src / "2.aff").write_text("-\n", encoding="utf-8")
-            app.CONFIG_PATH = root / "config.json"
-            app.CONFIG_PATH.write_text(json.dumps({"songs_dir": str(songs_dir)}), encoding="utf-8")
-            try:
-                api = app.ArcWebApi()
-                api._window = object()
-                result = api.add_song_folder_path(str(src))
-            finally:
-                app.CONFIG_PATH = old_config
+            ok, msg, song_id = app.import_song_folder(src, songs_dir)
 
-            self.assertTrue(result["ok"])
-            self.assertEqual(result["song_id"], "source_song")
+            self.assertTrue(ok, msg)
+            self.assertEqual(song_id, "source_song")
             self.assertTrue((songs_dir / "source_song" / "2.aff").exists())
 
-    def test_add_song_folder_path_rejects_empty_missing_and_file_paths(self):
-        old_config = app.CONFIG_PATH
+    def test_import_song_folder_rejects_missing_and_file_paths(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             songs_dir = root / "songs"
             file_path = root / "not_a_dir.aff"
             file_path.write_text("-", encoding="utf-8")
-            app.CONFIG_PATH = root / "config.json"
-            app.CONFIG_PATH.write_text(json.dumps({"songs_dir": str(songs_dir)}), encoding="utf-8")
-            try:
-                api = app.ArcWebApi()
-                cases = ["", str(root / "missing"), str(file_path)]
-                results = [api.add_song_folder_path(path) for path in cases]
-            finally:
-                app.CONFIG_PATH = old_config
+            results = [
+                app.import_song_folder(root / "missing", songs_dir),
+                app.import_song_folder(file_path, songs_dir),
+            ]
 
-            self.assertTrue(all(not result["ok"] for result in results))
-            self.assertIn("路径为空", results[0]["msg"])
-            self.assertIn("目录不存在", results[1]["msg"])
-            self.assertIn("请拖入歌曲文件夹", results[2]["msg"])
+            self.assertTrue(all(not result[0] for result in results))
+            self.assertIn("目录不存在", results[0][1])
+            self.assertIn("请拖入歌曲文件夹", results[1][1])
             self.assertFalse(songs_dir.exists())
 
 

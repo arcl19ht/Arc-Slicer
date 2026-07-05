@@ -1,92 +1,58 @@
 # Arc Slicer 2.0
 
-Arcaea 谱面切片工具，将一首完整谱面按时间段切成多个独立片段，支持变速处理，并自动生成 songlist。
+Arc Slicer is a local PyQt6 desktop tool for slicing an Arcaea song chart into
+smaller practice segments. Gate 0 currently focuses on FTR (`2.aff`) chart
+slicing, audio slicing/speed changes, and basic songlist output.
 
-## 功能
+## Runtime Requirements
 
-- 拖拽谱面文件夹直接导入
-- 自由添加多个切片时间段
-- 支持变速（0.5x、0.75x、1.0x、1.25x、1.5x、2.0x）
-- 自动切割 `.aff` 谱面和 `base.ogg` 音频
-- 自动生成每个片段的 `songlist` 文件
-- 生成合并的 `out/songlist`，包含所有片段，可直接导入游戏
-
-## 使用方法
-
-### 直接使用（推荐）
-
-从 [Releases](../../releases) 下载 `ArcSlicer.exe`，双击运行，无需安装任何依赖。
-
-### 从源码运行
-
-**环境要求**
 - Python 3.10+
 - PyQt6
-- ffmpeg（放在项目根目录下）
+- ffmpeg
 
-```bash
-python -m pip install PyQt6
+For source runs, place `ffmpeg.exe` in the project root or make sure `ffmpeg`
+is available from `PATH`.
+
+## Run From Source
+
+```powershell
 python app.py
 ```
 
-### 打包成 exe
+## Test
 
-1. 将 `ffmpeg.exe` 放在项目根目录
-2. 双击运行 `build.bat`
-
-生成的 exe 在 `dist\ArcSlicer.exe`。
-
-## 谱面文件夹结构
-
-输入的谱面文件夹需包含：
-
-```
-songs/
-└── your_song_id/
-    ├── 2.aff
-    ├── base.ogg
-    └── base.jpg   （可选）
+```powershell
+python -m unittest discover -s tests -v
 ```
 
-## 输出结构
+## Build
 
-```
-out/
-├── songlist              ← 合并 songlist（所有片段）
-└── songs/
-    ├── your_song_id_0_30000/
-    │   ├── 2.aff
-    │   ├── base.ogg
-    │   ├── base.jpg
-    │   └── songlist
-    └── your_song_id_30000_60000/
-        ├── 2.aff
-        ├── base.ogg
-        └── songlist
+Install PyInstaller, place `ffmpeg.exe` in the project root, then run:
+
+```powershell
+.\build.bat
 ```
 
-## Songlist 填写说明
+The build output is `dist\ArcSlicer.exe`.
 
-展开界面中的 **Songlist** 面板，填写以下字段：
+## Current Architecture
 
-| 字段 | 说明 |
-|------|------|
-| Title Base | 曲目名称，片段会自动加编号（01、02…） |
-| Artist | 曲师 |
-| BPM | 显示 BPM（字符串，如 `180` 或 `120-180`） |
-| BPM Base | 基准 BPM（数字，用于计算变速后的实际 BPM） |
-| Set | 曲包 ID（留空默认 `single`） |
-| Side | 0 = 光芒，1 = 纷争，2 = 消色 |
-| Rating | 定数（整数） |
-| Rating+ | 勾选表示 +（如 9+） |
-| BG | 背景图 ID |
-| Version | 版本号（如 `1.0`） |
-| Chart Designer | 谱师 |
-| Jacket Designer | 画师 |
+- The formal UI is native PyQt6.
+- The application entry point is `app.py`.
+- WebView / pywebview is not part of the current runtime path.
+- `ui.html` is not the current application entry point.
 
-难度固定为 FTR（ratingClass = 2）。
+## Current Gate 0 Scope
 
-## 注意事项
+- Songs listed in the UI must contain both `base.ogg` and `2.aff`.
+- Chart slicing is currently fixed to FTR (`2.aff`).
+- Speed must be a finite positive number.
+- AFF event times are scaled by speed, and Timing BPM is scaled by speed.
+- Nonlinear Arc boundary cuts are shown as a PyQt status indicator and info card.
+- AudioOffset alignment and Camera/Scenecontrol duration scaling are not solved in
+  Gate 0.
 
-- ffmpeg 不包含在源码中，需自行下载：https://ffmpeg.org/download.html
-- 打包后的 exe 已内置 ffmpeg，无需额外安装
+## Notes
+
+Runtime outputs such as `out/`, `songs/`, `config.json`, and `slides.json` are
+local data and are not part of the source baseline.

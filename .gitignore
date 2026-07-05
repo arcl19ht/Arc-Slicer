@@ -16,8 +16,17 @@ venv/
 
 # Runtime outputs
 out/
+songs/
+ArcSlicerData/
 slides.json
 config.json
+
+# Local test/resources
+kernal_test/
+pyqt_arc_cut_info_card_end.png
+
+# Local executables
+*.exe
 
 # Logs
 *.log

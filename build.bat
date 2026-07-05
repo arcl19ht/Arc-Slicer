@@ -26,11 +26,6 @@ if errorlevel 1 (
     echo Installing PyQt6...
     python -m pip install PyQt6
 )
-python -m pip show pywebview > nul 2>&1
-if errorlevel 1 (
-    echo Installing pywebview...
-    python -m pip install pywebview
-)
 python -m pip show pyinstaller > nul 2>&1
 if errorlevel 1 (
     echo Installing PyInstaller...

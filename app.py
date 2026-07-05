@@ -12,16 +12,15 @@ import re
 import shutil
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 
 from PyQt6.QtCore import (
     Qt, QThread, pyqtSignal, QTimer, QSize, QMimeData,
-    QPoint, QRect,
+    QPoint, QRect, QEvent,
 )
 from PyQt6.QtGui import (
-    QColor, QFont, QPalette, QPainter, QLinearGradient,
+    QColor, QFont, QPalette, QPainter, QPainterPath, QPen, QLinearGradient,
     QDragEnterEvent, QDropEvent, QDragLeaveEvent, QMouseEvent,
     QTextCursor,
 )
@@ -53,6 +52,7 @@ CONFIG_PATH = BASE_DIR / "config.json"
 SLIDES_PATH = BASE_DIR / "slides.json"
 SONGLIST_EXAMPLE_PATH = BASE_DIR / "songlist_example.json"
 _FFMPEG_BUNDLED = RES_DIR / "ffmpeg.exe"
+_AUTO_SEGMENT = object()
 
 # ─── 颜色常量 ─────────────────────────────────────────────────────────────────
 
@@ -89,7 +89,7 @@ AUDIO_OFFSET_WARNING = (
     "切片边界可能需要后续人工核验。"
 )
 NONLINEAR_ARC_EASINGS = {"b", "si", "so", "sisi", "siso", "sosi", "soso"}
-ARC_CUT_WARNING_LABEL = "⚠ 非线性 Arc 截断：近似"
+ARC_CUT_EASING_ORDER = ("si", "so", "b", "sisi", "siso", "sosi", "soso")
 _ARC_LINE_RE = re.compile(
     r"\s*arc\(([+-]?\d+),([+-]?\d+),(.*)\)\s*(\[(.*)\])?;\s*$",
     re.IGNORECASE,
@@ -350,16 +350,46 @@ def find_nonlinear_arc_cut_warnings(aff_text: str, segments: list[dict]) -> dict
     return warnings
 
 
-def _arc_cut_warning_tooltip(hits: list[dict]) -> str:
+def _arc_cut_easing_summary(hits: list[dict]) -> str:
     counts: dict[str, int] = {}
     for hit in hits:
         easing = str(hit.get("easing", "?"))
         counts[easing] = counts.get(easing, 0) + 1
-    summary = "，".join(f"{easing} × {count}" for easing, count in counts.items())
-    return (
-        f"此切点截断 {len(hits)} 条非线性 Arc：{summary}。\n"
-        "当前版本会正确计算边界坐标，但 Arc 内部轨迹仅为近似。"
-    )
+
+    ordered = [easing for easing in ARC_CUT_EASING_ORDER if easing in counts]
+    ordered.extend(sorted(easing for easing in counts if easing not in ARC_CUT_EASING_ORDER))
+    return " · ".join(f"{easing} × {counts[easing]}" for easing in ordered)
+
+
+def _arc_cut_info_content(hits: list[dict], boundary: str) -> dict[str, str]:
+    if boundary == "start":
+        return {
+            "title": f"起点截断 · {len(hits)} 条",
+            "body": (
+                "当前片段从非线性 Arc 的中间开始。\n"
+                "切片器已按原谱缓动计算新的起点坐标，\n"
+                "因此切片边界不会突跳。\n\n"
+                "但 AFF 无法表示被截取后的局部缓动曲线，\n"
+                "所以 Arc 在片段内部只能近似原谱，\n"
+                "可能存在轻微轨迹偏差。"
+            ),
+            "summary": _arc_cut_easing_summary(hits),
+            "footer": "线性 s Arc 不受此限制，因此不会显示该标记。",
+        }
+    else:
+        return {
+            "title": f"终点截断 · {len(hits)} 条",
+            "body": (
+                "当前片段在非线性 Arc 的中间结束。\n"
+                "切片器已按原谱缓动计算新的终点坐标，\n"
+                "因此切片边界不会突跳。\n\n"
+                "但 AFF 无法表示被截取后的局部缓动曲线，\n"
+                "所以 Arc 在片段内部只能近似原谱，\n"
+                "可能存在轻微轨迹偏差。"
+            ),
+            "summary": _arc_cut_easing_summary(hits),
+            "footer": "线性 s Arc 不受此限制，因此不会显示该标记。",
+        }
 
 
 def _slice_arc_line(stripped: str, s: int, e: int, start: int, speed: float) -> str | None:
@@ -762,6 +792,38 @@ def save_config(cfg: dict) -> None:
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def import_song_folder(src: Path, songs_dir: Path) -> tuple[bool, str, str | None]:
+    if not src.exists():
+        return False, "目录不存在", None
+    if not src.is_dir():
+        return False, "请拖入歌曲文件夹，而不是单个文件。", None
+
+    songs_dir.mkdir(parents=True, exist_ok=True)
+    dest = songs_dir / src.name
+
+    if dest.resolve() == src.resolve():
+        return True, f"文件夹已在 songs 目录中: {src.name}", src.name
+    if dest.exists():
+        return True, f"songs 目录中已有同名文件夹: {src.name}", src.name
+
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(dest), str(src)],
+                check=True, capture_output=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        else:
+            os.symlink(src, dest)
+        return True, f"已添加 {src.name}（快捷方式）", src.name
+    except Exception:
+        try:
+            shutil.copytree(src, dest)
+            return True, f"已复制 {src.name}", src.name
+        except Exception as ex:
+            return False, f"添加失败: {ex}", None
+
+
 # ─── Worker 线程 ──────────────────────────────────────────────────────────────
 
 class SlicerWorker(QThread):
@@ -791,202 +853,6 @@ class SlicerWorker(QThread):
         if code == 0:
             log("✓ 全部完成！输出目录: out/songs/", "ok")
         self.done_signal.emit(code)
-
-
-# ─── WebView API ─────────────────────────────────────────────────────────────
-
-class ArcWebApi:
-    """pywebview bridge used by ui.html."""
-
-    def __init__(self):
-        self._window = None
-        self._running = False
-
-    def bind_window(self, window) -> None:
-        self._window = window
-
-    def _safe_segments(self, segments) -> list[dict]:
-        if not isinstance(segments, list):
-            return []
-        out = []
-        for seg in segments:
-            if not isinstance(seg, dict):
-                out.append({"s": 0, "e": 0})
-                continue
-            try:
-                out.append({"s": int(seg.get("s", 0)), "e": int(seg.get("e", 0))})
-            except (TypeError, ValueError):
-                out.append({"s": 0, "e": 0})
-        return out
-
-    def _empty_arc_warnings(self, segments) -> dict[int, dict[str, list[dict]]]:
-        return {i: {"start": [], "end": []} for i in range(len(self._safe_segments(segments)))}
-
-    def _arc_warning_error(self, segments, message: str, detail: str) -> dict:
-        out = self._empty_arc_warnings(segments)
-        out["__error"] = {"message": message, "detail": detail}
-        return out
-
-    def _songs_dir(self) -> Path:
-        return Path(load_config().get("songs_dir", str(BASE_DIR / "songs")))
-
-    def _emit_log(self, text: str, kind: str = "normal") -> None:
-        if not self._window:
-            return
-        self._window.evaluate_js(f"window.__arcLog({json.dumps(text)}, {json.dumps(kind)});")
-
-    def _emit_done(self, code: int) -> None:
-        if not self._window:
-            return
-        self._window.evaluate_js(f"window.__arcDone({int(code)});")
-
-    def get_config(self) -> dict:
-        return load_config()
-
-    def get_songs(self) -> list[str]:
-        songs_dir = self._songs_dir()
-        if not songs_dir.is_dir():
-            return []
-        return sorted(item.name for item in songs_dir.iterdir() if is_sliceable_song_dir(item))
-
-    def get_slides(self) -> dict:
-        if not SLIDES_PATH.exists():
-            return {}
-        try:
-            return json.loads(SLIDES_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-
-    def save_slides(self, data: dict) -> dict:
-        SLIDES_PATH.write_text(json.dumps(data or {}, indent=2, ensure_ascii=False), encoding="utf-8")
-        return {"ok": True, "path": str(SLIDES_PATH)}
-
-    def get_arc_cut_warnings(self, song_id, segments) -> dict:
-        safe_segments = self._safe_segments(segments)
-        empty = {i: {"start": [], "end": []} for i in range(len(safe_segments))}
-        if not song_id or not isinstance(song_id, str):
-            return self._arc_warning_error(safe_segments, "song_id 为空", repr(song_id))
-
-        try:
-            song_path = Path(song_id)
-            if song_path.is_absolute() or song_path.name != song_id:
-                return self._arc_warning_error(
-                    safe_segments,
-                    "非法 song_id",
-                    repr(song_id),
-                )
-            songs_dir = self._songs_dir()
-            aff_path = songs_dir / song_id / "2.aff"
-            if not aff_path.is_file():
-                return self._arc_warning_error(safe_segments, "未找到 2.aff", str(aff_path.resolve(strict=False)))
-            aff_text = aff_path.read_text(encoding="utf-8", errors="replace")
-            return find_nonlinear_arc_cut_warnings(aff_text, safe_segments)
-        except Exception as ex:
-            return self._arc_warning_error(safe_segments, "读取谱面失败", repr(ex))
-
-    def run_slicer(self, data: dict) -> dict:
-        if self._running:
-            return {"ok": False, "msg": "任务正在运行"}
-        self._running = True
-
-        def work():
-            code = 1
-            try:
-                song_id = str((data or {}).get("song_id", ""))
-                speed = validate_speed_value(float((data or {}).get("speed", 1.0)))
-                segments = self._safe_segments((data or {}).get("segments", []))
-                self._emit_log("  songs 目录: " + str(self._songs_dir()), "muted")
-                self._emit_log(f"  曲目: {song_id}  速度: {speed}  段数: {len(segments)}", "muted")
-                code = do_slice(self._songs_dir(), song_id, segments, speed, self._emit_log, None)
-                if code == 0:
-                    self._emit_log("✓ 全部完成！输出目录: out/songs/", "ok")
-            except Exception as ex:
-                self._emit_log(f"✗ {ex}", "err")
-            finally:
-                self._running = False
-                self._emit_done(code)
-
-        threading.Thread(target=work, daemon=True).start()
-        return {"ok": True}
-
-    def browse_songs_dir(self) -> dict:
-        if not self._window:
-            return {"ok": False, "msg": "窗口未就绪"}
-        try:
-            import webview
-
-            result = self._window.create_file_dialog(webview.FOLDER_DIALOG, directory=str(self._songs_dir()))
-            if not result:
-                return {"ok": False, "msg": "已取消"}
-            path = result[0] if isinstance(result, (list, tuple)) else result
-            cfg = load_config()
-            cfg["songs_dir"] = str(path)
-            save_config(cfg)
-            return {"ok": True, "songs_dir": str(path)}
-        except Exception as ex:
-            return {"ok": False, "msg": str(ex)}
-
-    def _import_song_folder(self, src: Path) -> dict:
-        songs_dir = self._songs_dir()
-        songs_dir.mkdir(parents=True, exist_ok=True)
-        dest = songs_dir / src.name
-        if dest.resolve() == src.resolve():
-            return {"ok": True, "msg": f"{src.name} 已在 songs 目录中", "song_id": src.name}
-        if dest.exists():
-            return {"ok": True, "msg": f"{src.name} 已存在", "song_id": src.name}
-        try:
-            if sys.platform == "win32":
-                subprocess.run(
-                    ["cmd", "/c", "mklink", "/J", str(dest), str(src)],
-                    check=True, capture_output=True,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-            else:
-                os.symlink(src, dest)
-            return {"ok": True, "msg": f"已添加 {src.name}", "song_id": src.name}
-        except Exception:
-            shutil.copytree(src, dest)
-            return {"ok": True, "msg": f"已复制 {src.name}", "song_id": src.name}
-
-    def add_song_folder_path(self, src_path: str) -> dict:
-        try:
-            if not src_path or not isinstance(src_path, str):
-                return {"ok": False, "msg": "路径为空"}
-            src = Path(src_path)
-            if not src.exists():
-                return {"ok": False, "msg": "目录不存在"}
-            if not src.is_dir():
-                return {"ok": False, "msg": "请拖入歌曲文件夹，而不是单个文件。"}
-            return self._import_song_folder(src)
-        except Exception as ex:
-            return {"ok": False, "msg": str(ex)}
-
-    def add_song_folder(self) -> dict:
-        if not self._window:
-            return {"ok": False, "msg": "窗口未就绪"}
-        try:
-            import webview
-
-            result = self._window.create_file_dialog(webview.FOLDER_DIALOG, directory=str(BASE_DIR))
-            if not result:
-                return {"ok": False, "msg": "已取消"}
-            src = Path(result[0] if isinstance(result, (list, tuple)) else result)
-            return self.add_song_folder_path(str(src))
-        except Exception as ex:
-            return {"ok": False, "msg": str(ex)}
-
-    def open_out(self) -> dict:
-        OUT_DIR.mkdir(parents=True, exist_ok=True)
-        try:
-            if sys.platform == "win32":
-                os.startfile(OUT_DIR)
-            elif sys.platform == "darwin":
-                subprocess.run(["open", str(OUT_DIR)])
-            else:
-                subprocess.run(["xdg-open", str(OUT_DIR)])
-            return {"ok": True}
-        except Exception as ex:
-            return {"ok": False, "msg": str(ex)}
 
 
 # ─── 样式表 ───────────────────────────────────────────────────────────────────
@@ -1182,6 +1048,7 @@ def card_frame(bg: str = C_CARD, border: str = C_BORDER) -> QFrame:
 
 class DropZone(QFrame):
     folder_dropped = pyqtSignal(str)
+    invalid_dropped = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1256,15 +1123,205 @@ class DropZone(QFrame):
             if os.path.isdir(path):
                 self.folder_dropped.emit(path)
                 break
+            if path:
+                self.invalid_dropped.emit("请拖入歌曲文件夹，而不是单个文件。")
+                break
 
 
 # ─── SegmentRow ───────────────────────────────────────────────────────────────
+
+class ArcCutIndicator(QWidget):
+    def __init__(self, side: str, parent=None):
+        super().__init__(parent)
+        self.side = side
+        self.setFixedSize(26, 22)
+        self.setCursor(Qt.CursorShape.WhatsThisCursor)
+        self.setStyleSheet("background: transparent; border: none;")
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = QColor("#B06A3C")
+        pen = QPen(color, 1.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+
+        path = QPainterPath()
+        if self.side == "start":
+            painter.drawLine(8, 5, 8, 17)
+            path.moveTo(8, 14)
+            path.cubicTo(11, 7, 16, 7, 20, 11)
+        else:
+            painter.drawLine(18, 5, 18, 17)
+            path.moveTo(6, 11)
+            path.cubicTo(10, 7, 15, 7, 18, 14)
+        painter.drawPath(path)
+
+
+class ArcCutInfoCard(QFrame):
+    def __init__(self, owner, boundary: str, hits: list[dict]):
+        super().__init__(owner)
+        self.owner = owner
+        self.setObjectName("arcCutInfoCard")
+        self.setWindowFlags(
+            Qt.WindowType.ToolTip
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setMouseTracking(True)
+        self.setFixedWidth(300)
+        self.setStyleSheet(
+            f"QFrame#arcCutInfoCard {{ background: #FFFDF8; border: 1px solid #D8D2C4; "
+            f"border-radius: 8px; }}"
+            f"QLabel {{ color: {C_TEXT}; background: transparent; border: none; }}"
+        )
+
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(18)
+        shadow.setOffset(0, 4)
+        shadow.setColor(QColor(80, 65, 45, 36))
+        self.setGraphicsEffect(shadow)
+
+        content = _arc_cut_info_content(hits, boundary)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 11, 12, 11)
+        outer.setSpacing(8)
+
+        title = QLabel(content["title"])
+        title.setStyleSheet("font-size: 13px; font-weight: 700;")
+        outer.addWidget(title)
+
+        body = QLabel(content["body"])
+        body.setWordWrap(True)
+        body.setStyleSheet("font-size: 12px; line-height: 1.45;")
+        outer.addWidget(body)
+
+        hit_title = QLabel("本次命中")
+        hit_title.setStyleSheet(f"font-size: 11px; font-weight: 700; color: {C_MUTED};")
+        outer.addWidget(hit_title)
+
+        summary = QLabel(content["summary"])
+        summary.setWordWrap(True)
+        summary.setStyleSheet("font-size: 12px; font-weight: 600;")
+        outer.addWidget(summary)
+
+        footer = QLabel(content["footer"])
+        footer.setWordWrap(True)
+        footer.setStyleSheet(f"font-size: 11px; color: {C_MUTED}; line-height: 1.35;")
+        outer.addWidget(footer)
+        self.adjustSize()
+
+    def enterEvent(self, event):
+        self.owner.cancel_hide_card()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.owner.schedule_hide_card()
+        super().leaveEvent(event)
+
+
+class ArcCutStatus(QFrame):
+    def __init__(self, boundary: str, hits: list[dict], parent=None):
+        super().__init__(parent)
+        self.boundary = boundary
+        self.hits = list(hits)
+        self._card: ArcCutInfoCard | None = None
+        self._show_timer = QTimer(self)
+        self._show_timer.setSingleShot(True)
+        self._show_timer.timeout.connect(self.show_card)
+        self._hide_timer = QTimer(self)
+        self._hide_timer.setSingleShot(True)
+        self._hide_timer.timeout.connect(self.hide_card)
+
+        self.setCursor(Qt.CursorShape.WhatsThisCursor)
+        self.setMouseTracking(True)
+        self.setStyleSheet("background: transparent; border: none;")
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+        self.indicator = ArcCutIndicator(boundary, self)
+        self.label = QLabel("起点截断" if boundary == "start" else "终点截断")
+        self.label.setStyleSheet(
+            "font-size: 11px; font-weight: 600; color: #B06A3C; "
+            "background: transparent; border: none;"
+        )
+        lay.addWidget(self.indicator)
+        lay.addWidget(self.label)
+
+        for widget in (self, self.indicator, self.label):
+            widget.setMouseTracking(True)
+            widget.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Enter:
+            self.schedule_show_card()
+        elif event.type() == QEvent.Type.Leave:
+            self.schedule_hide_card()
+        return super().eventFilter(obj, event)
+
+    def schedule_show_card(self):
+        self._hide_timer.stop()
+        self._show_timer.start(100)
+
+    def schedule_hide_card(self):
+        self._show_timer.stop()
+        self._hide_timer.start(420)
+
+    def cancel_hide_card(self):
+        self._hide_timer.stop()
+
+    def show_card(self):
+        if self._card is None:
+            self._card = ArcCutInfoCard(self, self.boundary, self.hits)
+        self._position_card()
+        self._card.show()
+        self._card.raise_()
+
+    def hide_card(self):
+        if self._card is not None:
+            self._card.hide()
+
+    def deleteLater(self):
+        self.hide_card()
+        if self._card is not None:
+            self._card.deleteLater()
+            self._card = None
+        super().deleteLater()
+
+    def _position_card(self):
+        if self._card is None:
+            return
+        self._card.adjustSize()
+        card_w = self._card.width() or self._card.sizeHint().width()
+        card_h = self._card.height() or self._card.sizeHint().height()
+        top_left = self.mapToGlobal(QPoint(0, 0))
+        status_rect = QRect(top_left, self.size())
+
+        screen = self.screen() or QApplication.screenAt(status_rect.center()) or QApplication.primaryScreen()
+        available = screen.availableGeometry()
+        margin = 10
+
+        x = status_rect.left() - card_w - margin
+        if x < available.left():
+            x = status_rect.right() + margin
+        if x + card_w > available.right():
+            x = available.right() - card_w
+
+        y = status_rect.top()
+        if y + card_h > available.bottom():
+            y = status_rect.top() - card_h - margin
+        y = max(available.top(), min(y, available.bottom() - card_h))
+        x = max(available.left(), min(x, available.right() - card_w))
+        self._card.move(x, y)
+
 
 class SegmentRow(QFrame):
     deleted = pyqtSignal(object)   # emits self
     changed = pyqtSignal()
 
-    def __init__(self, index: int, s: int, e: int, parent=None):
+    def __init__(self, index: int, s: int | None, e: int | None, parent=None):
         super().__init__(parent)
         self.s_val = s
         self.e_val = e
@@ -1273,12 +1330,12 @@ class SegmentRow(QFrame):
         )
         self._setup_ui(index, s, e)
 
-    def _setup_ui(self, index: int, s: int, e: int):
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(16, 14, 16, 14)
-        lay.setSpacing(12)
+    def _setup_ui(self, index: int, s: int | None, e: int | None):
+        lay = QGridLayout(self)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setHorizontalSpacing(12)
+        lay.setVerticalSpacing(5)
 
-        # badge
         badge = QLabel(str(index))
         badge.setFixedSize(28, 28)
         badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1286,68 +1343,55 @@ class SegmentRow(QFrame):
             f"background: {C_BADGE_BG}; color: {C_ACCENT}; "
             f"font-weight: 700; font-size: 13px; border-radius: 8px; border: none;"
         )
-        lay.addWidget(badge)
+        lay.addWidget(badge, 1, 0, Qt.AlignmentFlag.AlignVCenter)
         self._badge = badge
 
-        # start field
-        start_col = QVBoxLayout()
-        start_col.setSpacing(5)
-        start_col.addWidget(field_label("开始 START"))
-        self._start = QLineEdit(str(s))
+        lay.addWidget(field_label("开始 START"), 0, 1)
+        self._start = QLineEdit("" if s is None else str(s))
         self._start.setFixedWidth(110)
-        start_col.addWidget(self._start)
-        self._start_warning = self._make_arc_warning_label()
-        start_col.addWidget(self._start_warning)
-        lay.addLayout(start_col)
+        lay.addWidget(self._start, 1, 1, Qt.AlignmentFlag.AlignVCenter)
 
         arrow = QLabel("→")
         arrow.setStyleSheet(f"color: #C9C4B8; font-size: 15px; background: transparent; border: none;")
-        arrow.setAlignment(Qt.AlignmentFlag.AlignBottom)
-        arrow.setContentsMargins(0, 0, 0, 9)
-        lay.addWidget(arrow)
+        arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(arrow, 1, 2, Qt.AlignmentFlag.AlignVCenter)
 
-        # end field
-        end_col = QVBoxLayout()
-        end_col.setSpacing(5)
-        end_col.addWidget(field_label("结束 END"))
-        self._end = QLineEdit(str(e))
+        lay.addWidget(field_label("结束 END"), 0, 3)
+        self._end = QLineEdit("" if e is None else str(e))
         self._end.setFixedWidth(110)
-        end_col.addWidget(self._end)
-        self._end_warning = self._make_arc_warning_label()
-        end_col.addWidget(self._end_warning)
-        lay.addLayout(end_col)
+        lay.addWidget(self._end, 1, 3, Qt.AlignmentFlag.AlignVCenter)
 
-        # duration label
         self._dur = QLabel()
         self._dur.setStyleSheet(
             f"font-family: 'Consolas','Courier New',monospace; font-size: 13px; "
             f"font-weight: 500; color: {C_LABEL}; background: transparent; border: none;"
         )
-        self._dur.setContentsMargins(0, 0, 0, 9)
         self._dur.setMinimumWidth(60)
-        lay.addWidget(self._dur)
+        self._dur.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(self._dur, 1, 4, Qt.AlignmentFlag.AlignVCenter)
 
-        lay.addStretch()
+        spacer = QWidget()
+        spacer.setStyleSheet("background: transparent; border: none;")
+        lay.addWidget(spacer, 1, 5)
+        lay.setColumnStretch(5, 1)
 
-        # delete
+        self._arc_indicator_box = QWidget()
+        self._arc_indicator_box.setStyleSheet("background: transparent; border: none;")
+        self._arc_status_layout = QHBoxLayout(self._arc_indicator_box)
+        self._arc_status_layout.setContentsMargins(0, 0, 0, 0)
+        self._arc_status_layout.setSpacing(12)
+        self._arc_statuses: list[ArcCutStatus] = []
+        lay.addWidget(self._arc_indicator_box, 1, 6, Qt.AlignmentFlag.AlignVCenter)
+        self.set_arc_cut_warnings([], [])
+
         btn_del = QPushButton("✕")
         btn_del.setObjectName("btnDel")
-        btn_del.setContentsMargins(0, 0, 0, 2)
-        lay.addWidget(btn_del)
+        lay.addWidget(btn_del, 1, 7, Qt.AlignmentFlag.AlignVCenter)
 
         self._update_dur()
         self._start.textChanged.connect(self._on_change)
         self._end.textChanged.connect(self._on_change)
         btn_del.clicked.connect(lambda: self.deleted.emit(self))
-
-    def _make_arc_warning_label(self) -> QLabel:
-        label = QLabel(ARC_CUT_WARNING_LABEL)
-        label.setStyleSheet(
-            "font-size: 10px; font-weight: 600; color: #B06A3C; "
-            "background: transparent; border: none;"
-        )
-        label.hide()
-        return label
 
     def _on_change(self):
         try:
@@ -1388,18 +1432,25 @@ class SegmentRow(QFrame):
     def update_index(self, index: int):
         self._badge.setText(str(index))
 
+    def set_arc_cut_indicators(self, start_hits: list[dict], end_hits: list[dict]) -> None:
+        for status in self._arc_statuses:
+            self._arc_status_layout.removeWidget(status)
+            status.deleteLater()
+        self._arc_statuses = []
+
+        if start_hits:
+            status = ArcCutStatus("start", start_hits, self._arc_indicator_box)
+            self._arc_status_layout.addWidget(status)
+            self._arc_statuses.append(status)
+        if end_hits:
+            status = ArcCutStatus("end", end_hits, self._arc_indicator_box)
+            self._arc_status_layout.addWidget(status)
+            self._arc_statuses.append(status)
+
+        self._arc_indicator_box.setVisible(bool(self._arc_statuses))
+
     def set_arc_cut_warnings(self, start_hits: list[dict], end_hits: list[dict]) -> None:
-        for label, hits in (
-            (self._start_warning, start_hits),
-            (self._end_warning, end_hits),
-        ):
-            if hits:
-                label.setText(ARC_CUT_WARNING_LABEL)
-                label.setToolTip(_arc_cut_warning_tooltip(hits))
-                label.show()
-            else:
-                label.setToolTip("")
-                label.hide()
+        self.set_arc_cut_indicators(start_hits, end_hits)
 
     def to_dict(self) -> dict | None:
         if self.s_val is None or self.e_val is None:
@@ -1649,6 +1700,7 @@ class MainWindow(QMainWindow):
         # ── 拖放区
         self._drop_zone = DropZone()
         self._drop_zone.folder_dropped.connect(self._add_song_folder)
+        self._drop_zone.invalid_dropped.connect(lambda msg: self._push_log(f"✗ {msg}", "err"))
         lay.addWidget(self._drop_zone)
         lay.addSpacing(18)
 
@@ -1702,7 +1754,7 @@ class MainWindow(QMainWindow):
         # ── 添加按钮
         btn_add = QPushButton("＋ 添加时间段")
         btn_add.setObjectName("btnAdd")
-        btn_add.clicked.connect(self._add_segment)
+        btn_add.clicked.connect(lambda: self._add_segment())
         lay.addWidget(btn_add)
         lay.addSpacing(20)
 
@@ -1763,7 +1815,7 @@ class MainWindow(QMainWindow):
                 return
             except Exception:
                 pass
-        self._add_segment()
+        self._add_segment(None, None)
 
     def _get_songs(self) -> list[str]:
         d = Path(self._cfg.get("songs_dir", ""))
@@ -1791,9 +1843,18 @@ class MainWindow(QMainWindow):
             idx = self._song_box.findText(data["song_id"])
             if idx >= 0:
                 self._song_box.setCurrentIndex(idx)
-        segs = data.get("segments") or [{"s": 0, "e": 60000}]
-        for seg in segs:
-            self._add_segment(seg.get("s", 0), seg.get("e", 60000))
+        added_segment = False
+        for seg in data.get("segments") or []:
+            if not isinstance(seg, dict):
+                continue
+            try:
+                s, e = int(seg["s"]), int(seg["e"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            self._add_segment(s, e)
+            added_segment = True
+        if not added_segment:
+            self._add_segment(None, None)
         if data.get("songlist"):
             self._songlist_panel.set_meta(data["songlist"])
         self._schedule_arc_cut_warning_refresh()
@@ -1819,49 +1880,38 @@ class MainWindow(QMainWindow):
     def _add_song_folder(self, src_path: str):
         src = Path(src_path)
         songs_dir = Path(self._cfg.get("songs_dir", str(BASE_DIR / "songs")))
-        songs_dir.mkdir(parents=True, exist_ok=True)
-        dest = songs_dir / src.name
 
-        if dest.resolve() == src.resolve():
-            self._push_log(f"  文件夹已在 songs 目录中: {src.name}", "muted")
-        elif dest.exists():
-            self._push_log(f"  songs 目录中已有同名文件夹: {src.name}", "muted")
+        ok, msg, song_id = import_song_folder(src, songs_dir)
+        if ok and song_id == src.name and (songs_dir / src.name).resolve() == src.resolve():
+            self._push_log(f"  {msg}", "muted")
+        elif ok and song_id == src.name and (songs_dir / src.name).exists():
+            self._push_log(f"✓ {msg}", "ok")
         else:
-            try:
-                if sys.platform == "win32":
-                    subprocess.run(
-                        ["cmd", "/c", "mklink", "/J", str(dest), str(src)],
-                        check=True, capture_output=True,
-                        creationflags=subprocess.CREATE_NO_WINDOW,
-                    )
-                else:
-                    os.symlink(src, dest)
-                self._push_log(f"✓ 已添加 {src.name}（快捷方式）", "ok")
-            except Exception:
-                try:
-                    shutil.copytree(src, dest)
-                    self._push_log(f"✓ 已复制 {src.name}", "ok")
-                except Exception as ex:
-                    self._push_log(f"✗ 添加失败: {ex}", "err")
-                    return
+            self._push_log(f"✗ {msg}", "err")
+            return
 
         self._populate_songs(self._get_songs())
-        idx = self._song_box.findText(src.name)
+        idx = self._song_box.findText(song_id or src.name)
         if idx >= 0:
             self._song_box.setCurrentIndex(idx)
+        self._clear_segments()
+        self._add_segment(None, None)
         self._schedule_arc_cut_warning_refresh()
 
     # ── 段落管理 ──────────────────────────────────────────────────────────────
 
-    def _add_segment(self, s: int = None, e: int = None):
-        if s is None:
-            # default: follow last segment
-            if self._rows:
-                last = self._rows[-1]
-                s = (last.e_val or 0) + 1000
-            else:
-                s = 0
-            e = s + 30000
+    def _clear_segments(self):
+        while self._rows:
+            row = self._rows.pop()
+            self._segs_layout.removeWidget(row)
+            row.deleteLater()
+
+    def _add_segment(self, s=_AUTO_SEGMENT, e=_AUTO_SEGMENT):
+        if s is _AUTO_SEGMENT and e is _AUTO_SEGMENT:
+            s = None
+            e = None
+        elif s is _AUTO_SEGMENT or e is _AUTO_SEGMENT:
+            raise ValueError("s and e must be provided together")
 
         row = SegmentRow(len(self._rows) + 1, s, e)
         row.deleted.connect(self._remove_segment)
@@ -1878,6 +1928,9 @@ class MainWindow(QMainWindow):
         row.deleteLater()
         for i, r in enumerate(self._rows):
             r.update_index(i + 1)
+        if not self._rows:
+            self._add_segment(None, None)
+            return
         self._refresh_seg_header()
         self._schedule_arc_cut_warning_refresh()
 
@@ -2034,11 +2087,14 @@ class MainWindow(QMainWindow):
             if os.path.isdir(path):
                 self._add_song_folder(path)
                 break
+            if path:
+                self._push_log("✗ 请拖入歌曲文件夹，而不是单个文件。", "err")
+                break
 
 
 # ─── 入口 ─────────────────────────────────────────────────────────────────────
 
-def _main_pyqt():
+def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Arc Slicer")
     app.setStyleSheet(QSS)
@@ -2052,33 +2108,6 @@ def _main_pyqt():
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
-
-
-def _main_webview():
-    import webview
-
-    ui_path = RES_DIR / "ui.html"
-    api = ArcWebApi()
-    window = webview.create_window(
-        "Arc Slicer",
-        ui_path.as_uri(),
-        js_api=api,
-        width=760,
-        height=900,
-        min_size=(620, 580),
-    )
-    api.bind_window(window)
-    webview.start(debug=False)
-
-
-def main():
-    if (RES_DIR / "ui.html").exists():
-        try:
-            _main_webview()
-            return
-        except ImportError:
-            pass
-    _main_pyqt()
 
 
 if __name__ == "__main__":
