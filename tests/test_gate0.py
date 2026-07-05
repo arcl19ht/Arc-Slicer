@@ -15,6 +15,8 @@ class _Fake:
         self._tooltip = ""
         self._fixed_height = None
         self._visible = True
+        self._checked = False
+        self._enabled = True
         self._children = []
 
     def __call__(self, *args, **kwargs):
@@ -69,6 +71,18 @@ class _Fake:
 
     def isVisible(self):
         return self._visible
+
+    def setChecked(self, checked):
+        self._checked = bool(checked)
+
+    def isChecked(self):
+        return self._checked
+
+    def setEnabled(self, enabled):
+        self._enabled = bool(enabled)
+
+    def isEnabled(self):
+        return self._enabled
 
     def deleteLater(self):
         pass

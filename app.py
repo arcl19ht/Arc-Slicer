@@ -2575,30 +2575,34 @@ class SegmentRow(QFrame):
             f"background: {C_BADGE_BG}; color: {C_ACCENT}; "
             f"font-weight: 700; font-size: 13px; border-radius: 8px; border: none;"
         )
-        lay.addWidget(badge, 1, 0, Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(badge, 2, 0, Qt.AlignmentFlag.AlignVCenter)
         self._badge = badge
 
-        lay.addWidget(field_label("开始 START"), 0, 1)
+        self._interval_label = field_label("片段区间（ms）")
+        lay.addWidget(self._interval_label, 0, 1, 1, 3)
+        self._start_sub_label = field_label("起点")
+        lay.addWidget(self._start_sub_label, 1, 1)
         self._start = QLineEdit("" if s is None else str(s))
         self._start.setFixedWidth(110)
         self._install_time_validator(self._start)
-        lay.addWidget(self._start, 1, 1, Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(self._start, 2, 1, Qt.AlignmentFlag.AlignVCenter)
 
         arrow = QLabel("→")
         arrow.setStyleSheet(f"color: #C9C4B8; font-size: 15px; background: transparent; border: none;")
         arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(arrow, 1, 2, Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(arrow, 2, 2, Qt.AlignmentFlag.AlignVCenter)
 
-        lay.addWidget(field_label("结束 END"), 0, 3)
+        self._end_sub_label = field_label("终点")
+        lay.addWidget(self._end_sub_label, 1, 3)
         self._end = QLineEdit("" if e is None else str(e))
         self._end.setFixedWidth(110)
         self._install_time_validator(self._end)
-        lay.addWidget(self._end, 1, 3, Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(self._end, 2, 3, Qt.AlignmentFlag.AlignVCenter)
 
         self._start_error = self._make_time_error_label()
         self._end_error = self._make_time_error_label()
-        lay.addWidget(self._start_error, 2, 1)
-        lay.addWidget(self._end_error, 2, 3)
+        lay.addWidget(self._start_error, 3, 1)
+        lay.addWidget(self._end_error, 3, 3)
 
         self._dur = QLabel()
         self._dur.setStyleSheet(
@@ -2607,11 +2611,11 @@ class SegmentRow(QFrame):
         )
         self._dur.setMinimumWidth(60)
         self._dur.setAlignment(Qt.AlignmentFlag.AlignVCenter)
-        lay.addWidget(self._dur, 1, 4, Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(self._dur, 2, 4, Qt.AlignmentFlag.AlignVCenter)
 
         spacer = QWidget()
         spacer.setStyleSheet("background: transparent; border: none;")
-        lay.addWidget(spacer, 1, 5)
+        lay.addWidget(spacer, 2, 5)
         lay.setColumnStretch(5, 1)
 
         self._arc_indicator_box = QWidget()
@@ -2620,12 +2624,12 @@ class SegmentRow(QFrame):
         self._arc_status_layout.setContentsMargins(0, 0, 0, 0)
         self._arc_status_layout.setSpacing(12)
         self._arc_statuses: list[ArcCutStatus] = []
-        lay.addWidget(self._arc_indicator_box, 1, 6, Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(self._arc_indicator_box, 2, 6, Qt.AlignmentFlag.AlignVCenter)
         self.set_arc_cut_warnings([], [])
 
         btn_del = QPushButton("✕")
         btn_del.setObjectName("btnDel")
-        lay.addWidget(btn_del, 1, 7, Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(btn_del, 2, 7, Qt.AlignmentFlag.AlignVCenter)
 
         self._update_dur()
         self._start.textChanged.connect(self._on_change)
@@ -2761,6 +2765,7 @@ class SonglistPanel(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._expanded = False
+        self._pack_expanded = False
         self.setStyleSheet("QFrame { background: transparent; border: none; }")
         self._setup_ui()
 
@@ -2769,27 +2774,63 @@ class SonglistPanel(QFrame):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(8)
 
-        # 折叠按钮（复用 btnAdd 样式）
-        self._toggle_btn = QPushButton("▶  Songlist 生成配置（可选，点击展开）")
-        self._toggle_btn.setObjectName("btnAdd")
-        self._toggle_btn.clicked.connect(self._toggle)
-        outer.addWidget(self._toggle_btn)
+        outer.addWidget(field_label("元数据导出"))
 
+        self._songlist_item = QFrame()
+        self._songlist_item.setStyleSheet(
+            f"QFrame {{ background: {C_CARD}; border: 1px solid {C_BORDER}; border-radius: 12px; }}"
+        )
+        songlist_lay = QVBoxLayout(self._songlist_item)
+        songlist_lay.setContentsMargins(14, 11, 14, 11)
+        songlist_lay.setSpacing(8)
+        songlist_head = QHBoxLayout()
+        songlist_head.setSpacing(10)
         self._enabled = QCheckBox("生成 songlist")
         self._enabled.setChecked(False)
         self._enabled.setStyleSheet(
             f"color: {C_TEXT2}; font-size: 13px; background: transparent; border: none;"
         )
-        self._enabled.clicked.connect(self._refresh_packlist_state)
-        self._enabled.clicked.connect(lambda: self.enabled_changed.emit())
-        outer.addWidget(self._enabled)
+        self._enabled.clicked.connect(self._on_songlist_enabled_changed)
+        songlist_head.addWidget(self._enabled)
+        songlist_head.addStretch()
+        self._toggle_btn = QPushButton("▸")
+        self._toggle_btn.clicked.connect(self._toggle)
+        songlist_head.addWidget(self._toggle_btn)
+        songlist_lay.addLayout(songlist_head)
+        self._songlist_hint = QLabel("勾选后可填写 songlist 元数据")
+        self._songlist_hint.setStyleSheet(
+            f"font-size: 12px; color: {C_LABEL}; background: transparent; border: none;"
+        )
+        songlist_lay.addWidget(self._songlist_hint)
+        outer.addWidget(self._songlist_item)
 
+        self._packlist_item = QFrame()
+        self._packlist_item.setStyleSheet(
+            f"QFrame {{ background: {C_CARD}; border: 1px solid {C_BORDER}; border-radius: 12px; }}"
+        )
+        pack_item_lay = QVBoxLayout(self._packlist_item)
+        pack_item_lay.setContentsMargins(14, 11, 14, 11)
+        pack_item_lay.setSpacing(8)
+        pack_head = QHBoxLayout()
+        pack_head.setSpacing(10)
         self._packlist_enabled = QCheckBox("生成 packlist 与曲包资源")
         self._packlist_enabled.setChecked(False)
         self._packlist_enabled.setStyleSheet(
-            f"color: {C_TEXT2}; font-size: 13px; background: transparent; border: none; margin-left: 18px;"
+            f"color: {C_TEXT2}; font-size: 13px; background: transparent; border: none;"
         )
-        outer.addWidget(self._packlist_enabled)
+        self._packlist_enabled.clicked.connect(self._on_packlist_enabled_changed)
+        pack_head.addWidget(self._packlist_enabled)
+        pack_head.addStretch()
+        self._pack_toggle_btn = QPushButton("▸")
+        self._pack_toggle_btn.clicked.connect(self._toggle_pack)
+        pack_head.addWidget(self._pack_toggle_btn)
+        pack_item_lay.addLayout(pack_head)
+        self._packlist_hint = QLabel("勾选后可填写曲包信息")
+        self._packlist_hint.setStyleSheet(
+            f"font-size: 12px; color: {C_LABEL}; background: transparent; border: none;"
+        )
+        pack_item_lay.addWidget(self._packlist_hint)
+        outer.addWidget(self._packlist_item)
 
         # 面板主体
         self._body = QFrame()
@@ -2799,7 +2840,7 @@ class SonglistPanel(QFrame):
             f" border-radius: 14px; }}"
         )
         self._body.hide()
-        outer.addWidget(self._body)
+        songlist_lay.addWidget(self._body)
 
         body_lay = QVBoxLayout(self._body)
         body_lay.setContentsMargins(22, 18, 22, 18)
@@ -2850,6 +2891,18 @@ class SonglistPanel(QFrame):
         rp_row.addStretch()
         body_lay.addLayout(rp_row)
 
+        self._pack_body = QFrame()
+        self._pack_body.setObjectName("packlistBody")
+        self._pack_body.setStyleSheet(
+            f"QFrame#packlistBody {{ background: {C_CARD}; border: 1px solid {C_BORDER};"
+            f" border-radius: 14px; }}"
+        )
+        self._pack_body.hide()
+        pack_item_lay.addWidget(self._pack_body)
+        pack_body_lay = QVBoxLayout(self._pack_body)
+        pack_body_lay.setContentsMargins(0, 0, 0, 0)
+        pack_body_lay.setSpacing(0)
+
         pack_frame = QFrame()
         pack_frame.setStyleSheet(
             f"QFrame {{ background: {C_CARD2}; border: 1px solid {C_BORDER2}; border-radius: 12px; }}"
@@ -2897,17 +2950,42 @@ class SonglistPanel(QFrame):
         pack_lay.addLayout(cover_row)
         self._pack_controls = [pack_frame, *self._pack_inputs.values(), self._pack_upload_check, self._pack_cover_path, btn_cover]
         self._last_pack_default_source = ""
-        body_lay.addWidget(pack_frame)
+        pack_body_lay.addWidget(pack_frame)
         self._refresh_packlist_state()
 
     # ── 折叠 / 展开 ───────────────────────────────────────────────────────────
 
     def _toggle(self):
+        if not self._enabled.isChecked():
+            return
         self._expanded = not self._expanded
-        self._body.setVisible(self._expanded)
-        self._toggle_btn.setText(
-            "▼  Songlist 生成配置（点击收起）" if self._expanded
-            else "▶  Songlist 生成配置（可选，点击展开）"
+        self._refresh_packlist_state()
+
+    def _toggle_pack(self):
+        if not (self._enabled.isChecked() and self._packlist_enabled.isChecked()):
+            return
+        self._pack_expanded = not self._pack_expanded
+        self._refresh_packlist_state()
+
+    def _on_songlist_enabled_changed(self):
+        if not self._enabled.isChecked():
+            self._expanded = False
+            self._pack_expanded = False
+        self._refresh_packlist_state()
+        self.enabled_changed.emit()
+
+    def _on_packlist_enabled_changed(self):
+        if not self._packlist_enabled.isChecked():
+            self._pack_expanded = False
+        self._refresh_packlist_state()
+
+    def _set_section_button_state(self, button: QPushButton, active: bool, expanded: bool):
+        button.setEnabled(bool(active))
+        button.setText("▾" if expanded and active else "▸")
+        color = C_TEXT2 if active else C_LABEL
+        button.setStyleSheet(
+            f"background: transparent; border: none; color: {color}; "
+            f"font-size: 16px; font-weight: 700; padding: 2px 6px;"
         )
 
     # ── 读 / 写 ───────────────────────────────────────────────────────────────
@@ -2917,6 +2995,9 @@ class SonglistPanel(QFrame):
 
     def set_songlist_enabled(self, enabled: bool):
         self._enabled.setChecked(bool(enabled))
+        if not enabled:
+            self._expanded = False
+            self._pack_expanded = False
         self._refresh_packlist_state()
 
     def is_packlist_enabled(self) -> bool:
@@ -2924,11 +3005,30 @@ class SonglistPanel(QFrame):
 
     def set_packlist_enabled(self, enabled: bool):
         self._packlist_enabled.setChecked(bool(enabled))
+        if not enabled:
+            self._pack_expanded = False
         self._refresh_packlist_state()
 
     def _refresh_packlist_state(self):
         songlist_enabled = self._enabled.isChecked()
-        packlist_enabled = self._packlist_enabled.isChecked() and songlist_enabled
+        packlist_checked = self._packlist_enabled.isChecked()
+        packlist_enabled = packlist_checked and songlist_enabled
+        self._expanded = bool(self._expanded and songlist_enabled)
+        self._pack_expanded = bool(self._pack_expanded and packlist_enabled)
+        if hasattr(self, "_body"):
+            self._body.setVisible(self._expanded)
+        if hasattr(self, "_pack_body"):
+            self._pack_body.setVisible(self._pack_expanded)
+        if hasattr(self, "_packlist_item"):
+            self._packlist_item.setVisible(songlist_enabled)
+        if hasattr(self, "_songlist_hint"):
+            self._songlist_hint.setVisible(not songlist_enabled)
+        if hasattr(self, "_packlist_hint"):
+            self._packlist_hint.setVisible(songlist_enabled and not packlist_checked)
+        if hasattr(self, "_toggle_btn"):
+            self._set_section_button_state(self._toggle_btn, songlist_enabled, self._expanded)
+        if hasattr(self, "_pack_toggle_btn"):
+            self._set_section_button_state(self._pack_toggle_btn, packlist_enabled, self._pack_expanded)
         self._packlist_enabled.setEnabled(songlist_enabled)
         for widget in getattr(self, "_pack_controls", []):
             widget.setEnabled(packlist_enabled)
@@ -3026,10 +3126,6 @@ class SonglistPanel(QFrame):
         if "rating_plus" in meta:
             self._rating_plus.setChecked(bool(meta["rating_plus"]))
         self._refresh_packlist_state()
-        # 有保存数据时自动展开
-        if any(meta.get(k) for k in ("title_base", "artist")):
-            if not self._expanded:
-                self._toggle()
 
 
 # ─── 主窗口 ───────────────────────────────────────────────────────────────────
