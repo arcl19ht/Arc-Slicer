@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import json
@@ -102,7 +102,7 @@ def build_external_merge_plan(current_songs_dir: Path, target_songs_dir: Path) -
     if _same_path(current_songs_dir, target_songs_dir):
         _block(plan, "target_equals_current_input", "target songs directory must not equal current input.", target_songs_dir)
     if _is_tool_export_songs_dir(target_songs_dir):
-        _block(plan, "target_is_tool_export", "目标目录不能是工具自己的 current_export 或 library_export。", target_songs_dir)
+        _block(plan, "target_is_tool_export", "target directory must not be the tool current_export or library_export.", target_songs_dir)
 
     input_songlist = _read_songlist(plan, current_songs_dir / "songlist", "input")
     target_songlist = _read_songlist(plan, target_songs_dir / "songlist", "target")
@@ -322,21 +322,21 @@ def _compute_snapshot_fingerprint(plan: ExternalMergePlan) -> str:
             _fingerprint_path(h, f"song/source/{action.identifier}", Path(action.source_path))
         if action.target_path:
             _fingerprint_path(h, f"song/target/{action.identifier}", Path(action.target_path))
-    for action in sorted(plan.pack_image_actions, key=lambda a: (a.kind, a.operation, a.identifier, a.details.get("pack_id", ""))):
+    for action in sorted(plan.pack_image_actions, key=lambda a: (a.kind, a.operation, a.identifier)):
         if action.source_path:
-            _fingerprint_path(h, f"pack_image/source/{action.identifier}/{action.details.get('pack_id','')}", Path(action.source_path))
+            _fingerprint_path(h, f"pack_image/source/{action.identifier}", Path(action.source_path))
         if action.target_path:
-            _fingerprint_path(h, f"pack_image/target/{action.identifier}/{action.details.get('pack_id','')}", Path(action.target_path))
+            _fingerprint_path(h, f"pack_image/target/{action.identifier}", Path(action.target_path))
     return h.hexdigest()
 
 
 def _fingerprint_path(h: "hashlib._Hash", label: str, path: Path) -> None:
     h.update(f"LABEL\0{label}\0".encode())
-    if not path.exists():
-        h.update(b"MISSING\0")
-        return
     if is_link_or_junction(path):
         h.update(b"LINK\0")
+        return
+    if not path_exists_lexically(path):
+        h.update(b"MISSING\0")
         return
     if path.is_file():
         h.update(b"FILE\0")
@@ -367,29 +367,32 @@ def _execution_safety_issues(plan: ExternalMergePlan, backup_root: Path) -> list
     backup_root = Path(backup_root)
 
     if _path_contains_or_equals(target, backup_root):
-        issues.append(MergeIssue(BLOCKER, "backup_root_inside_target", "备份目录不能位于目标 songs 内。", (str(backup_root), str(target))))
+        issues.append(MergeIssue(BLOCKER, "backup_root_inside_target", "backup root must not be inside target songs.", (str(backup_root), str(target))))
     if _path_contains_or_equals(current, backup_root) or _same_path(current, backup_root):
-        issues.append(MergeIssue(BLOCKER, "backup_root_inside_current", "备份目录不能位于 current_export 内。", (str(backup_root), str(current))))
+        issues.append(MergeIssue(BLOCKER, "backup_root_inside_current", "backup root must not be inside current export.", (str(backup_root), str(current))))
     if _same_path(current, target):
         issues.append(MergeIssue(BLOCKER, "target_equals_current_input", "target songs directory must not equal current input.", (str(target),)))
     for parent in _existing_parents(backup_root):
         if is_link_or_junction(parent):
-            issues.append(MergeIssue(BLOCKER, "backup_parent_is_link", "备份目录父路径不能是链接或 Junction。", (str(parent),)))
+            issues.append(MergeIssue(BLOCKER, "backup_parent_is_link", "backup parent must not be a link or Junction.", (str(parent),)))
             break
     for path in _write_candidate_paths(plan):
         if not _path_contains_or_equals(target, path):
-            issues.append(MergeIssue(BLOCKER, "write_path_escape", "候选写入路径逃出目标 songs 根。", (str(path), str(target))))
+            issues.append(MergeIssue(BLOCKER, "write_path_escape", "candidate write path escapes target songs root.", (str(path), str(target))))
     for action in plan.pack_image_actions:
         if not _is_safe_file_name(action.identifier):
-            issues.append(MergeIssue(BLOCKER, "pack_image_name_unsafe_at_execute", "pack 图片文件名不安全。", (action.identifier,)))
+            issues.append(MergeIssue(BLOCKER, "pack_image_name_unsafe_at_execute", "pack image filename is unsafe.", (action.identifier,)))
     if is_link_or_junction(target):
-        issues.append(MergeIssue(BLOCKER, "target_songs_dir_is_link_at_execute", "目标 songs 目录不能是链接或 Junction。", (str(target),)))
+        issues.append(MergeIssue(BLOCKER, "target_songs_dir_is_link_at_execute", "target songs directory must not be a link or Junction.", (str(target),)))
     pack_dir = target / "pack"
     if any(action.operation != "reuse" for action in plan.pack_image_actions) and is_link_or_junction(pack_dir):
-        issues.append(MergeIssue(BLOCKER, "target_pack_dir_is_link_at_execute", "目标 pack 目录不能是链接或 Junction。", (str(pack_dir),)))
+        issues.append(MergeIssue(BLOCKER, "target_pack_dir_is_link_at_execute", "target pack directory must not be a link or Junction.", (str(pack_dir),)))
     for action in plan.song_actions:
-        if action.operation == "update" and action.target_path and is_link_or_junction(Path(action.target_path)):
-            issues.append(MergeIssue(BLOCKER, "target_song_dir_is_link_at_execute", "受影响歌曲目录不能是链接或 Junction。", (action.target_path,)))
+        if action.target_path and is_link_or_junction(Path(action.target_path)):
+            issues.append(MergeIssue(BLOCKER, "target_song_dir_is_link_at_execute", "affected song directory must not be a link or Junction.", (action.target_path,)))
+    for action in plan.pack_image_actions:
+        if action.operation != "reuse" and action.target_path and is_link_or_junction(Path(action.target_path)):
+            issues.append(MergeIssue(BLOCKER, "target_pack_image_is_link_at_execute", "affected pack image must not be a link or Junction.", (action.target_path,)))
     return issues
 
 
@@ -417,7 +420,7 @@ def _create_backup_dir(backup_root: Path) -> Path:
             return candidate
         except FileExistsError:
             continue
-    raise RuntimeError("无法创建唯一备份目录")
+    raise RuntimeError("鏃犳硶鍒涘缓鍞竴澶囦唤鐩綍")
 
 
 def _base_manifest(plan: ExternalMergePlan, backup_dir: Path, status: str) -> dict[str, Any]:
@@ -522,7 +525,7 @@ def _backup_dir(source: Path, dest: Path, rel: str, ctx: dict[str, Any]) -> None
     if nested is not None:
         raise RuntimeError(f"refusing to back up directory containing link or Junction: {nested}")
     if dest.exists():
-        raise RuntimeError(f"备份路径已存在：{dest}")
+        raise RuntimeError(f"澶囦唤璺緞宸插瓨鍦細{dest}")
     shutil.copytree(source, dest, symlinks=False)
     ctx["backed_up_items"].append(rel)
 
@@ -530,7 +533,7 @@ def _backup_dir(source: Path, dest: Path, rel: str, ctx: dict[str, Any]) -> None
 def _create_staging_dir(target_songs_dir: Path) -> Path:
     parent = target_songs_dir.parent
     if is_link_or_junction(parent):
-        raise RuntimeError("目标 songs 父目录不能是链接或 Junction")
+        raise RuntimeError("鐩爣 songs 鐖剁洰褰曚笉鑳芥槸閾炬帴鎴?Junction")
     for _ in range(100):
         candidate = parent / f".arc_slicer_merge_stage_{uuid.uuid4().hex[:8]}"
         try:
@@ -538,7 +541,7 @@ def _create_staging_dir(target_songs_dir: Path) -> Path:
             return candidate
         except FileExistsError:
             continue
-    raise RuntimeError("无法创建 staging 目录")
+    raise RuntimeError("鏃犳硶鍒涘缓 staging 鐩綍")
 
 
 def _stage_inputs(plan: ExternalMergePlan, stage_dir: Path) -> None:
@@ -552,11 +555,13 @@ def _stage_inputs(plan: ExternalMergePlan, stage_dir: Path) -> None:
         if action.operation == "reuse" or not action.source_path:
             continue
         source = Path(action.source_path)
+        if is_link_or_junction(source):
+            raise RuntimeError(f"input pack image is link or Junction: {source}")
         dest = stage_dir / "pack" / action.identifier
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, dest)
         if _sha256(source) != _sha256(dest):
-            raise RuntimeError(f"staging pack 图片校验失败：{action.identifier}")
+            raise RuntimeError(f"staging pack image verification failed: {action.identifier}")
 
 
 def _copy_dir_and_verify(source: Path, dest: Path) -> None:
@@ -590,7 +595,7 @@ def _install_song_directories(plan: ExternalMergePlan, stage_dir: Path, ctx: dic
 
 
 def _install_song_directory(staged_source: Path, target: Path, swap: Path | None, ctx: dict[str, Any] | None = None) -> None:
-    if swap is None and target.exists():
+    if swap is None and path_exists_lexically(target):
         raise RuntimeError(f"target song directory appeared before add install: {target}")
     if swap is not None:
         if swap.exists():
@@ -632,9 +637,11 @@ def _install_pack_image(staged_source: Path, target: Path, *, replace: bool) -> 
     try:
         shutil.copy2(staged_source, tmp)
         if replace:
+            if is_link_or_junction(target):
+                raise RuntimeError(f"target pack image is link or Junction: {target}")
             os.replace(tmp, target)
         else:
-            if target.exists():
+            if path_exists_lexically(target):
                 raise FileExistsError(f"target pack image appeared before add install: {target}")
             with tmp.open("rb") as src, target.open("xb") as dst:
                 created_target = True
@@ -811,6 +818,16 @@ def _norm_abs(path: Path) -> str:
     return os.path.normcase(os.path.normpath(os.path.abspath(os.fspath(path))))
 
 
+def path_exists_lexically(path: Path) -> bool:
+    try:
+        os.lstat(path)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return Path(path).exists()
+
+
 def _existing_parents(path: Path) -> list[Path]:
     out = []
     cur = Path(path)
@@ -859,14 +876,17 @@ def is_link_or_junction(path: Path) -> bool:
 
 
 def _validate_root(plan: ExternalMergePlan, path: Path, role: str, code_prefix: str) -> None:
-    if not path.exists():
-        _block(plan, f"{code_prefix}_missing", f"{role} songs 目录不存在。", path)
+    if is_link_or_junction(path):
+        _block(plan, f"{code_prefix}_is_link", f"{role} songs directory must not be a link or Junction.", path)
+        return
+    if not path_exists_lexically(path):
+        _block(plan, f"{code_prefix}_missing", f"{role} songs directory is missing.", path)
         return
     if not path.is_dir():
-        _block(plan, f"{code_prefix}_not_dir", f"{role} songs 路径不是目录。", path)
+        _block(plan, f"{code_prefix}_not_dir", f"{role} songs path is not a directory.", path)
         return
     if is_link_or_junction(path):
-        _block(plan, f"{code_prefix}_is_link", f"{role} songs 目录不能是链接或 Junction。", path)
+        _block(plan, f"{code_prefix}_is_link", f"{role} songs directory must not be a link or Junction.", path)
 
 
 def _read_songlist(plan: ExternalMergePlan, path: Path, role: str) -> dict[str, Any] | None:
@@ -885,23 +905,26 @@ def _read_json_document(
     array_key: str,
     required: bool,
 ) -> dict[str, Any] | None:
-    if not path.exists():
+    if is_link_or_junction(path):
+        _block(plan, f"{role}_{doc_name}_is_link", f"{role} {doc_name} must not be a link or Junction.", path)
+        return None
+    if not path_exists_lexically(path):
         if required:
-            _block(plan, f"{role}_{doc_name}_missing", f"{role} {doc_name} 不存在。", path)
+            _block(plan, f"{role}_{doc_name}_missing", f"{role} {doc_name} is missing.", path)
         return None
     if not path.is_file():
-        _block(plan, f"{role}_{doc_name}_not_file", f"{role} {doc_name} 不是文件。", path)
+        _block(plan, f"{role}_{doc_name}_not_file", f"{role} {doc_name} is not a file.", path)
         return None
     if is_link_or_junction(path):
-        _block(plan, f"{role}_{doc_name}_is_link", f"{role} {doc_name} 不能是链接或 Junction。", path)
+        _block(plan, f"{role}_{doc_name}_is_link", f"{role} {doc_name} must not be a link or Junction.", path)
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as ex:
-        _block(plan, f"{role}_{doc_name}_invalid_json", f"{role} {doc_name} 无法解析：{ex}", path)
+        _block(plan, f"{role}_{doc_name}_invalid_json", f"{role} {doc_name} cannot be parsed: {ex}", path)
         return None
     if not isinstance(data, dict) or not isinstance(data.get(array_key), list):
-        _block(plan, f"{role}_{doc_name}_invalid_shape", f"{role} {doc_name} 顶层必须包含 {array_key} 数组。", path)
+        _block(plan, f"{role}_{doc_name}_invalid_shape", f"{role} {doc_name} must contain a top-level {array_key} array.", path)
         return None
     return data
 
@@ -916,16 +939,16 @@ def _index_entries(
     ok = True
     for idx, entry in enumerate(entries):
         if not isinstance(entry, dict):
-            _block(plan, f"{role}_{entry_kind}_entry_invalid", f"{role} {entry_kind} 条目不是对象。", str(idx))
+            _block(plan, f"{role}_{entry_kind}_entry_invalid", f"{role} {entry_kind} entry is not an object.", str(idx))
             ok = False
             continue
         ident = entry.get("id")
         if not isinstance(ident, str) or not ident.strip():
-            _block(plan, f"{role}_{entry_kind}_id_missing", f"{role} {entry_kind} 条目缺少 id。", str(idx))
+            _block(plan, f"{role}_{entry_kind}_id_missing", f"{role} {entry_kind} entry is missing id.", str(idx))
             ok = False
             continue
         if ident in indexed:
-            _block(plan, f"{role}_{entry_kind}_id_duplicate", f"{role} {entry_kind} 存在重复 id：{ident}", ident)
+            _block(plan, f"{role}_{entry_kind}_id_duplicate", f"{role} {entry_kind} has duplicate id: {ident}", ident)
             ok = False
             continue
         indexed[ident] = entry
@@ -962,12 +985,12 @@ def _validate_current_song_dirs(plan: ExternalMergePlan, current_songs_dir: Path
         if not is_safe_song_id(song_id):
             continue
         song_dir = current_songs_dir / song_id
-        if not song_dir.exists():
+        if is_link_or_junction(song_dir):
+            _block(plan, "input_song_dir_is_link", f"input song directory must not be a link or Junction: {song_id}", song_dir)
+        elif not path_exists_lexically(song_dir):
             _block(plan, "input_song_dir_missing", f"input song directory is missing: {song_id}", song_dir)
         elif not song_dir.is_dir():
             _block(plan, "input_song_dir_not_dir", f"input song path is not a directory: {song_id}", song_dir)
-        elif is_link_or_junction(song_dir):
-            _block(plan, "input_song_dir_is_link", f"input song directory must not be a link or Junction: {song_id}", song_dir)
         else:
             nested = find_nested_link_or_junction(song_dir)
             if nested is not None:
@@ -980,7 +1003,7 @@ def _validate_current_song_dirs(plan: ExternalMergePlan, current_songs_dir: Path
             _block(plan, "input_unlisted_song_dir", f"input songs root contains a directory not listed in songlist: {item.name}", item)
 
     pack_dir = current_songs_dir / "pack"
-    if pack_dir.exists() and is_link_or_junction(pack_dir):
+    if is_link_or_junction(pack_dir):
         _block(plan, "input_pack_dir_is_link", "input pack directory must not be a link or Junction.", pack_dir)
 
 def _plan_song_actions(
@@ -1001,8 +1024,8 @@ def _plan_song_actions(
         source_dir = current_songs_dir / song_id
         target_dir = target_songs_dir / song_id
         target_has_meta = song_id in target_id_set
-        target_has_dir = target_dir.exists()
-        if target_has_dir and is_link_or_junction(target_dir):
+        target_has_dir = path_exists_lexically(target_dir)
+        if is_link_or_junction(target_dir):
             _block(plan, "target_song_dir_is_link", f"target song directory must not be a link or Junction: {song_id}", target_dir)
             continue
         if target_has_dir and target_dir.is_dir():
@@ -1032,9 +1055,9 @@ def _validate_input_song_sets(
         song_id = str(song.get("id", ""))
         set_id = song.get("set")
         if not isinstance(set_id, str) or not set_id.strip():
-            _block(plan, "input_song_set_missing", f"输入歌曲缺少 set：{song_id}", song_id)
+            _block(plan, "input_song_set_missing", f"input song is missing set: {song_id}", song_id)
         elif set_id not in available:
-            _block(plan, "input_song_set_missing_pack", f"输入歌曲 set 没有对应 pack：{song_id} -> {set_id}", song_id, set_id)
+            _block(plan, "input_song_set_missing_pack", f"input song set has no matching pack: {song_id} -> {set_id}", song_id, set_id)
 
 
 def _plan_pack_actions(
@@ -1056,15 +1079,15 @@ def _validate_input_pack_images(plan: ExternalMergePlan, current_songs_dir: Path
         pack_id = str(pack.get("id", ""))
         img = pack.get("img")
         if not _is_safe_file_name(img):
-            _block(plan, "input_pack_img_invalid", f"pack.img 必须是安全文件名：{pack_id}", pack_id, str(img))
+            _block(plan, "input_pack_img_invalid", f"pack.img must be a safe filename: {pack_id}", pack_id, str(img))
             continue
         source = current_songs_dir / "pack" / img
-        if not source.exists():
-            _block(plan, "input_pack_image_missing", f"输入 pack 图片缺失：{img}", source)
+        if is_link_or_junction(source):
+            _block(plan, "input_pack_image_is_link", f"input pack image must not be a link or Junction: {img}", source)
+        elif not path_exists_lexically(source):
+            _block(plan, "input_pack_image_missing", f"input pack image is missing: {img}", source)
         elif not source.is_file():
-            _block(plan, "input_pack_image_not_file", f"输入 pack 图片不是文件：{img}", source)
-        elif is_link_or_junction(source):
-            _block(plan, "input_pack_image_is_link", f"输入 pack 图片不能是链接或 Junction：{img}", source)
+            _block(plan, "input_pack_image_not_file", f"input pack image is not a file: {img}", source)
 
 
 def _plan_pack_image_actions(
@@ -1076,14 +1099,14 @@ def _plan_pack_image_actions(
     target_pack_ids: dict[str, dict[str, Any]],
 ) -> None:
     target_pack_dir = target_songs_dir / "pack"
-    if not target_pack_dir.exists():
-        _block(plan, "target_pack_dir_missing", "目标 pack 目录不存在。", target_pack_dir)
+    if is_link_or_junction(target_pack_dir):
+        _block(plan, "target_pack_dir_is_link", "target pack directory must not be a link or Junction.", target_pack_dir)
+        return
+    if not path_exists_lexically(target_pack_dir):
+        _block(plan, "target_pack_dir_missing", "target pack directory is missing.", target_pack_dir)
         return
     if not target_pack_dir.is_dir():
-        _block(plan, "target_pack_dir_not_dir", "目标 pack 路径不是目录。", target_pack_dir)
-        return
-    if is_link_or_junction(target_pack_dir):
-        _block(plan, "target_pack_dir_is_link", "目标 pack 目录不能是链接或 Junction。", target_pack_dir)
+        _block(plan, "target_pack_dir_not_dir", "target pack path is not a directory.", target_pack_dir)
         return
 
     img_to_pack_ids: dict[str, set[str]] = {}
@@ -1093,34 +1116,90 @@ def _plan_pack_image_actions(
         if isinstance(img, str) and isinstance(pack_id, str):
             img_to_pack_ids.setdefault(img, set()).add(pack_id)
 
+    input_by_img: dict[str, list[dict[str, Any]]] = {}
     for pack in input_packs:
-        pack_id = pack["id"]
         img = pack.get("img")
         if not _is_safe_file_name(img):
             continue
+        input_by_img.setdefault(img, []).append(pack)
+
+    for img in sorted(input_by_img):
+        packs = input_by_img[img]
+        referenced_pack_ids = sorted({pack["id"] for pack in packs})
         source = current_songs_dir / "pack" / img
         target = target_pack_dir / img
-        if not source.is_file():
+        if not source.is_file() or is_link_or_junction(source):
             continue
         if is_link_or_junction(target):
-            _block(plan, "target_pack_image_is_link", f"目标 pack 图片不能是链接或 Junction：{img}", target)
+            _block(plan, "target_pack_image_is_link", f"target pack image must not be a link or Junction: {img}", target)
             continue
-        target_pack = target_pack_ids.get(pack_id)
-        if target_pack is None:
-            _plan_new_pack_image(plan, pack_id, img, source, target)
+        target_referenced_pack_ids = sorted(img_to_pack_ids.get(img, set()))
+        source_hash = _sha256(source)
+        target_hash = _sha256(target) if path_exists_lexically(target) and target.is_file() else None
+        details: dict[str, Any] = {
+            "referenced_pack_ids": referenced_pack_ids,
+            "target_referenced_pack_ids": target_referenced_pack_ids,
+            "source_hash": source_hash,
+        }
+        if len(referenced_pack_ids) == 1:
+            details["pack_id"] = referenced_pack_ids[0]
+        if target_hash is not None:
+            details["target_hash"] = target_hash
+
+        same_img_existing_ids = sorted(
+            pack["id"]
+            for pack in packs
+            if pack["id"] in target_pack_ids and target_pack_ids[pack["id"]].get("img") == img
+        )
+        old_imgs = {
+            pack["id"]: target_pack_ids[pack["id"]].get("img")
+            for pack in packs
+            if pack["id"] in target_pack_ids and target_pack_ids[pack["id"]].get("img") != img
+        }
+        if old_imgs:
+            details["old_imgs"] = old_imgs
+            if len(old_imgs) == 1:
+                details["old_img"] = next(iter(old_imgs.values()))
+        if same_img_existing_ids:
+            details["same_img_existing_pack_ids"] = same_img_existing_ids
+
+        if not path_exists_lexically(target):
+            if same_img_existing_ids:
+                _block(plan, "target_pack_image_missing_for_update", f"target pack image is missing for existing pack update: {img}", target)
+            else:
+                plan.pack_image_actions.append(_action("pack_image", "add", img, source, target, details))
+            continue
+        if not target.is_file():
+            _block(plan, "target_pack_image_not_file", f"target pack image path is not a file: {img}", target)
+            continue
+        if source_hash == target_hash:
+            plan.pack_image_actions.append(_action("pack_image", "reuse", img, source, target, details))
+            continue
+
+        other_refs = sorted(set(target_referenced_pack_ids) - set(same_img_existing_ids))
+        if same_img_existing_ids and not other_refs:
+            plan.pack_image_actions.append(_action("pack_image", "replace", img, source, target, details))
+        elif same_img_existing_ids:
+            _block(
+                plan,
+                "pack_image_shared_update_conflict",
+                f"鏇存柊 pack 浼氭敼鍙樺叾浠?pack 鍏辩敤鐨勫浘鐗囷細{img}",
+                img,
+                *other_refs,
+            )
         else:
-            _plan_update_pack_image(plan, pack_id, img, source, target, target_pack, img_to_pack_ids)
+            _block(plan, "pack_image_name_conflict", f"pack image filename is already occupied by different content: {img}", source, target)
 
 
 def _plan_new_pack_image(plan: ExternalMergePlan, pack_id: str, img: str, source: Path, target: Path) -> None:
     if not target.exists():
         plan.pack_image_actions.append(_action("pack_image", "add", img, source, target, {"pack_id": pack_id}))
     elif not target.is_file():
-        _block(plan, "target_pack_image_not_file", f"目标 pack 图片路径不是文件：{img}", target)
+        _block(plan, "target_pack_image_not_file", f"target pack image path is not a file: {img}", target)
     elif _same_file_content(source, target):
         plan.pack_image_actions.append(_action("pack_image", "reuse", img, source, target, {"pack_id": pack_id}))
     else:
-        _block(plan, "pack_image_name_conflict", f"新 pack 的图片文件名已被不同内容占用：{img}", source, target)
+        _block(plan, "pack_image_name_conflict", f"new pack image filename is already occupied by different content: {img}", source, target)
 
 
 def _plan_update_pack_image(
@@ -1137,7 +1216,7 @@ def _plan_update_pack_image(
         if not target.exists():
             _block(plan, "target_pack_image_missing_for_update", f"target pack image is missing for existing pack update: {img}", target)
         elif not target.is_file():
-            _block(plan, "target_pack_image_not_file", f"目标 pack 图片路径不是文件：{img}", target)
+            _block(plan, "target_pack_image_not_file", f"target pack image path is not a file: {img}", target)
         elif _same_file_content(source, target):
             plan.pack_image_actions.append(_action("pack_image", "reuse", img, source, target, {"pack_id": pack_id}))
         else:
@@ -1146,7 +1225,7 @@ def _plan_update_pack_image(
                 _block(
                     plan,
                     "pack_image_shared_update_conflict",
-                    f"更新 pack 会改变其他 pack 共用的图片：{img}",
+                    f"鏇存柊 pack 浼氭敼鍙樺叾浠?pack 鍏辩敤鐨勫浘鐗囷細{img}",
                     img,
                     *other_refs,
                 )
@@ -1159,13 +1238,13 @@ def _plan_update_pack_image(
             _action("pack_image", "add", img, source, target, {"pack_id": pack_id, "old_img": old_img})
         )
     elif not target.is_file():
-        _block(plan, "target_pack_image_not_file", f"目标 pack 图片路径不是文件：{img}", target)
+        _block(plan, "target_pack_image_not_file", f"target pack image path is not a file: {img}", target)
     elif _same_file_content(source, target):
         plan.pack_image_actions.append(
             _action("pack_image", "reuse", img, source, target, {"pack_id": pack_id, "old_img": old_img})
         )
     else:
-        _block(plan, "pack_image_name_conflict", f"更新 pack 的新图片文件名已被不同内容占用：{img}", source, target)
+        _block(plan, "pack_image_name_conflict", f"鏇存柊 pack 鐨勬柊鍥剧墖鏂囦欢鍚嶅凡琚笉鍚屽唴瀹瑰崰鐢細{img}", source, target)
 
 
 def _merge_entries(target_entries: list[dict[str, Any]], input_entries: list[dict[str, Any]]) -> list[dict[str, Any]]:

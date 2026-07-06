@@ -233,6 +233,68 @@ class ExternalMergePlanTests(unittest.TestCase):
             block_plan = external_merge.build_external_merge_plan(current, target)
             self.assertIn("pack_image_name_conflict", _codes(block_plan))
 
+    def test_new_packs_sharing_new_pack_image_are_aggregated(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current = base / "current"
+            target = base / "target"
+            _setup_current(
+                current,
+                [_song("song_a", "pack_a"), _song("song_b", "pack_b")],
+                [_pack("pack_a", "shared.png"), _pack("pack_b", "shared.png")],
+            )
+            _make_pack_image(current, "shared.png", b"shared")
+            _setup_target(target, [_song("old_song", "pack_old")], [_pack("pack_old", "old.png")])
+
+            plan = external_merge.build_external_merge_plan(current, target)
+
+            self.assertTrue(plan.is_ready, plan.blockers)
+            actions = _actions(plan, "pack_image")
+            self.assertEqual(len(actions), 1)
+            action = actions[0]
+            self.assertEqual(action.identifier, "shared.png")
+            self.assertEqual(action.operation, "add")
+            self.assertEqual(action.details["referenced_pack_ids"], ["pack_a", "pack_b"])
+            self.assertEqual(action.details["target_referenced_pack_ids"], [])
+            self.assertIn("source_hash", action.details)
+
+    def test_shared_pack_image_update_and_add_are_aggregated(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current = base / "current"
+            target = base / "target"
+            _setup_current(
+                current,
+                [_song("song_a", "pack_a"), _song("song_b", "pack_b")],
+                [_pack("pack_a", "shared.png"), _pack("pack_b", "shared.png")],
+            )
+            _make_pack_image(current, "shared.png", b"same")
+            _setup_target(target, [_song("song_a", "pack_a")], [_pack("pack_a", "shared.png")])
+            _make_pack_image(target, "shared.png", b"same")
+
+            reuse_plan = external_merge.build_external_merge_plan(current, target)
+
+            self.assertTrue(reuse_plan.is_ready, reuse_plan.blockers)
+            actions = _actions(reuse_plan, "pack_image")
+            self.assertEqual(len(actions), 1)
+            self.assertEqual(actions[0].operation, "reuse")
+            self.assertEqual(actions[0].details["referenced_pack_ids"], ["pack_a", "pack_b"])
+            self.assertEqual(actions[0].details["target_referenced_pack_ids"], ["pack_a"])
+
+            _make_pack_image(current, "shared.png", b"different")
+            replace_plan = external_merge.build_external_merge_plan(current, target)
+
+            self.assertTrue(replace_plan.is_ready, replace_plan.blockers)
+            actions = _actions(replace_plan, "pack_image")
+            self.assertEqual(len(actions), 1)
+            self.assertEqual(actions[0].operation, "replace")
+            self.assertEqual(actions[0].details["same_img_existing_pack_ids"], ["pack_a"])
+
+            _write_json(target / "packlist", {"packs": [_pack("pack_a", "shared.png"), _pack("pack_c", "shared.png")]})
+            shared_block = external_merge.build_external_merge_plan(current, target)
+            self.assertIn("pack_image_shared_update_conflict", _codes(shared_block))
+            self.assertEqual(_actions(shared_block, "pack_image"), [])
+
     def test_update_same_pack_same_img_replace_or_block_when_shared(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
@@ -437,6 +499,40 @@ class ExternalMergePlanTests(unittest.TestCase):
             plan = external_merge.build_external_merge_plan(current, target)
 
             self.assertIn("target_pack_image_is_link", _codes(plan))
+
+    def test_broken_target_song_symlink_is_blocked_as_link(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current = base / "current"
+            target = base / "target"
+            _setup_current(current, [_song("song_a")], None)
+            _setup_target(target, [_song("old_song", "pack_a")], [_pack("pack_a")])
+            try:
+                os.symlink(base / "missing_song_target", target / "song_a", target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink creation is unavailable")
+
+            plan = external_merge.build_external_merge_plan(current, target)
+
+            self.assertIn("target_song_dir_is_link", _codes(plan))
+            self.assertEqual(_actions(plan, "song", "add"), [])
+
+    def test_broken_target_pack_image_symlink_is_blocked_as_link(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current = base / "current"
+            target = base / "target"
+            _setup_current(current, [_song("song_a")], [_pack("pack_a", "shared.png")])
+            _setup_target(target, [_song("old_song", "pack_old")], [_pack("pack_old", "old.png")])
+            try:
+                os.symlink(base / "missing_image_target", target / "pack" / "shared.png")
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink creation is unavailable")
+
+            plan = external_merge.build_external_merge_plan(current, target)
+
+            self.assertIn("target_pack_image_is_link", _codes(plan))
+            self.assertEqual(_actions(plan, "pack_image", "add"), [])
 
 
 if __name__ == "__main__":

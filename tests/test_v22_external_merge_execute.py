@@ -113,6 +113,28 @@ class ExternalMergeExecuteTests(unittest.TestCase):
             self.assertIn("new_song", manifest["created_target_items"])
             self.assertNotIn("old_song", "".join(manifest["backed_up_items"]))
 
+    def test_execute_adds_shared_pack_image_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current, target, backup_root = base / "current", base / "target", base / "backups"
+            _setup_current(
+                current,
+                [_song("song_a", "pack_a"), _song("song_b", "pack_b")],
+                [_pack("pack_a", "shared.png"), _pack("pack_b", "shared.png")],
+            )
+            _make_pack_image(current, "shared.png", b"shared")
+            _setup_target(target, [_song("old_song", "pack_old")], [_pack("pack_old", "old.png")])
+
+            result = external_merge.execute_external_merge(_plan(current, target), backup_root=backup_root)
+
+            self.assertTrue(result.success, result)
+            self.assertEqual((target / "pack" / "shared.png").read_bytes(), b"shared")
+            self.assertEqual(result.changed_paths.count("pack/shared.png"), 1)
+            manifest = _read_json(result.backup_dir / "manifest.json")
+            self.assertEqual(manifest["created_target_items"].count("pack/shared.png"), 1)
+            packs = _read_json(target / "packlist")["packs"]
+            self.assertEqual([pack["id"] for pack in packs], ["pack_old", "pack_a", "pack_b"])
+
     def test_execute_updates_song_in_place_and_backs_up_old_directory(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
@@ -240,6 +262,34 @@ class ExternalMergeExecuteTests(unittest.TestCase):
                 (result.backup_dir / "before" / "songs" / "song_b" / "base.ogg").read_bytes(),
                 old_snapshot[str(Path("song_b") / "base.ogg")],
             )
+
+    def test_shared_pack_image_rollback_deletes_created_image_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current, target, backup_root = base / "current", base / "target", base / "backups"
+            _setup_current(
+                current,
+                [_song("song_a", "pack_a"), _song("song_b", "pack_b")],
+                [_pack("pack_a", "shared.png"), _pack("pack_b", "shared.png")],
+            )
+            _make_pack_image(current, "shared.png", b"shared")
+            _setup_target(target, [_song("old_song", "pack_old")], [_pack("pack_old", "old.png")])
+            before = _snapshot(target)
+            original_write_json = external_merge._write_json_atomic
+
+            def fail_songlist_write(path, data):
+                if Path(path).name == "songlist":
+                    raise RuntimeError("json fail")
+                return original_write_json(path, data)
+
+            with mock.patch("external_merge._write_json_atomic", side_effect=fail_songlist_write):
+                result = external_merge.execute_external_merge(_plan(current, target), backup_root=backup_root)
+
+            self.assertFalse(result.success)
+            self.assertEqual(_snapshot(target), before)
+            self.assertFalse((target / "pack" / "shared.png").exists())
+            manifest = _read_json(result.backup_dir / "manifest.json")
+            self.assertEqual(manifest["created_target_items"].count("pack/shared.png"), 1)
 
     def test_rollback_failure_reports_incomplete(self):
         with tempfile.TemporaryDirectory() as td:
@@ -404,6 +454,42 @@ class ExternalMergeExecuteTests(unittest.TestCase):
             self.assertEqual((target / "pack" / "select_pack_a.png").read_bytes(), b"external image")
             manifest = _read_json(result.backup_dir / "manifest.json")
             self.assertNotIn("pack/select_pack_a.png", manifest["created_target_items"])
+
+    def test_add_pack_image_race_broken_symlink_is_not_overwritten_or_registered(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current, target, backup_root = base / "current", base / "target", base / "backups"
+            _setup_current(current, [_song("song_a")], [_pack("pack_a")])
+            _setup_target(target, [], [_pack("pack_old", "old.png")])
+            plan = _plan(current, target)
+            original_install = external_merge._install_pack_image
+            original_path_exists = external_merge.path_exists_lexically
+            original_is_link = external_merge.is_link_or_junction
+            occupied = {"active": False}
+            raced_target = target / "pack" / "select_pack_a.png"
+
+            def racing_install(source, target_path, *, replace):
+                self.assertEqual(Path(target_path), raced_target)
+                occupied["active"] = True
+                original_install(source, target_path, replace=replace)
+
+            def lexical_exists(path):
+                return occupied["active"] if Path(path) == raced_target else original_path_exists(path)
+
+            def link_or_junction(path):
+                return occupied["active"] if Path(path) == raced_target else original_is_link(path)
+
+            with mock.patch("external_merge._install_pack_image", side_effect=racing_install), \
+                    mock.patch("external_merge.path_exists_lexically", side_effect=lexical_exists), \
+                    mock.patch("external_merge.is_link_or_junction", side_effect=link_or_junction):
+                result = external_merge.execute_external_merge(plan, backup_root=backup_root)
+
+            self.assertFalse(result.success)
+            self.assertTrue(occupied["active"])
+            self.assertFalse(raced_target.exists())
+            manifest = _read_json(result.backup_dir / "manifest.json")
+            self.assertNotIn("pack/select_pack_a.png", manifest["created_target_items"])
+            self.assertTrue(occupied["active"])
 
     def test_temp_files_are_cleaned_after_json_replace_failure(self):
         with tempfile.TemporaryDirectory() as td:
