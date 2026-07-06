@@ -34,6 +34,8 @@ from PyQt6.QtWidgets import (
     QCheckBox, QGridLayout, QGraphicsDropShadowEffect,
 )
 
+import external_merge
+
 # ─── 路径 ─────────────────────────────────────────────────────────────────────
 
 APP_DATA_DIRNAME = "ArcSlicerData"
@@ -90,6 +92,7 @@ CURRENT_EXPORT_ROOT = OUT_DIR / "current_export"
 CURRENT_EXPORT_SONGS_DIR = CURRENT_EXPORT_ROOT / "songs"
 LIBRARY_EXPORT_ROOT = OUT_DIR / "library_export"
 LIBRARY_EXPORT_SONGS_DIR = LIBRARY_EXPORT_ROOT / "songs"
+EXTERNAL_MERGE_BACKUP_ROOT = DATA_ROOT / "backups" / "external_merge"
 CONFIG_PATH = DATA_ROOT / "config.json"
 SLIDES_PATH = DATA_ROOT / "slides.json"
 SONGLIST_EXAMPLE_PATH = APP_DIR / "songlist_example.json"
@@ -2036,6 +2039,184 @@ def import_song_folder(src: Path, songs_dir: Path) -> tuple[bool, str, str | Non
 
 # ─── Worker 线程 ──────────────────────────────────────────────────────────────
 
+def external_merge_action_count(plan: external_merge.ExternalMergePlan | None) -> int:
+    if plan is None:
+        return 0
+    return int(plan.summary.get("actions", 0))
+
+
+def external_merge_backup_count(plan: external_merge.ExternalMergePlan | None) -> int:
+    if plan is None or not plan.is_ready or external_merge_action_count(plan) <= 0:
+        return 0
+    count = 1
+    if plan.pack_actions:
+        count += 1
+    count += sum(1 for action in plan.song_actions if action.operation == "update")
+    count += sum(1 for action in plan.pack_image_actions if action.operation == "replace")
+    return count
+
+
+def external_merge_can_check(
+    target_songs_dir: Path | str | None,
+    *,
+    busy: bool = False,
+    slicing: bool = False,
+) -> bool:
+    return bool(target_songs_dir) and not busy and not slicing
+
+
+def external_merge_can_confirm(
+    plan: external_merge.ExternalMergePlan | None,
+    *,
+    busy: bool = False,
+) -> bool:
+    return bool(plan and plan.is_ready and external_merge_action_count(plan) > 0 and not busy)
+
+
+def _external_merge_issue_lines(label: str, issues: list[external_merge.MergeIssue]) -> list[str]:
+    if not issues:
+        return []
+    lines = [f"{label}:"]
+    for issue in issues:
+        path_text = f" ({'; '.join(issue.paths)})" if issue.paths else ""
+        lines.append(f"- {issue.code}: {issue.message}{path_text}")
+    return lines
+
+
+def external_merge_plan_view_model(
+    plan: external_merge.ExternalMergePlan | None,
+    *,
+    target_songs_dir: Path | str | None = None,
+    backup_root: Path = EXTERNAL_MERGE_BACKUP_ROOT,
+) -> dict:
+    if plan is None:
+        target_text = str(target_songs_dir) if target_songs_dir else "未选择"
+        return {
+            "state": "unchecked" if target_songs_dir else "no_target",
+            "ready": False,
+            "can_confirm": False,
+            "title": "外部目标壳合并：未检查",
+            "detail": f"目标壳 songs 目录: {target_text}\n请先选择目标并检查合并计划。",
+        }
+
+    summary = plan.summary
+    lines = [
+        f"来源: {plan.current_songs_dir}",
+        f"目标: {plan.target_songs_dir}",
+        f"备份根目录: {backup_root}",
+        (
+            "变更: "
+            f"歌曲新增 {summary.get('song_add', 0)} / 更新 {summary.get('song_update', 0)}; "
+            f"曲包新增 {summary.get('pack_add', 0)} / 更新 {summary.get('pack_update', 0)}; "
+            f"曲包图新增 {summary.get('pack_image_add', 0)} / 复用 {summary.get('pack_image_reuse', 0)} / 替换 {summary.get('pack_image_replace', 0)}"
+        ),
+        f"预计备份项: {external_merge_backup_count(plan)}",
+    ]
+    lines.extend(_external_merge_issue_lines("阻止项", plan.blockers))
+    lines.extend(_external_merge_issue_lines("警告", plan.warnings))
+
+    actions = external_merge_action_count(plan)
+    if plan.blockers:
+        title = "外部目标壳合并：不可执行"
+        state = "blocked"
+    elif actions <= 0:
+        title = "外部目标壳合并：无差异"
+        state = "empty"
+        lines.append("当前导出包与目标壳没有需要写入的差异。")
+    else:
+        title = "外部目标壳合并：计划就绪"
+        state = "ready"
+    return {
+        "state": state,
+        "ready": plan.is_ready,
+        "can_confirm": external_merge_can_confirm(plan),
+        "title": title,
+        "detail": "\n".join(lines),
+        "summary": dict(summary),
+        "backup_count": external_merge_backup_count(plan),
+    }
+
+
+def external_merge_result_view_model(result: external_merge.ExternalMergeResult) -> dict:
+    backup_text = str(result.backup_dir) if result.backup_dir else "未创建"
+    lines = [
+        f"状态: {result.status}",
+        f"变更路径数: {len(result.changed_paths)}",
+        f"备份目录: {backup_text}",
+    ]
+    if result.message:
+        lines.append(result.message)
+    if result.execution_issues:
+        lines.extend(_external_merge_issue_lines("执行问题", result.execution_issues))
+    if result.rollback_errors:
+        lines.append("回滚问题:")
+        lines.extend(f"- {item}" for item in result.rollback_errors)
+
+    titles = {
+        "completed": "外部目标壳合并：合并完成",
+        "stale_plan": "外部目标壳合并：计划已过期",
+        "rejected": "外部目标壳合并：已拒绝",
+        "failed_rolled_back": "外部目标壳合并：失败，已恢复",
+        "failed_rollback_incomplete": "外部目标壳合并：失败，回滚不完整",
+    }
+    return {
+        "state": result.status,
+        "title": titles.get(result.status, "外部目标壳合并：执行结束"),
+        "detail": "\n".join(lines),
+        "can_confirm": False,
+    }
+
+
+def external_merge_confirmation_text(
+    plan: external_merge.ExternalMergePlan,
+    backup_root: Path = EXTERNAL_MERGE_BACKUP_ROOT,
+) -> str:
+    summary = plan.summary
+    return (
+        "即将把 current_export/songs 合并到外部目标壳 songs 目录。\n\n"
+        f"目标: {plan.target_songs_dir}\n"
+        f"歌曲新增 {summary.get('song_add', 0)} / 更新 {summary.get('song_update', 0)}\n"
+        f"曲包新增 {summary.get('pack_add', 0)} / 更新 {summary.get('pack_update', 0)}\n"
+        f"曲包图新增 {summary.get('pack_image_add', 0)} / 复用 {summary.get('pack_image_reuse', 0)} / 替换 {summary.get('pack_image_replace', 0)}\n"
+        f"预计备份项: {external_merge_backup_count(plan)}\n"
+        f"备份根目录: {backup_root}\n\n"
+        "此操作会写入外部目标壳。请确认目标是测试壳副本。"
+    )
+
+
+class ExternalMergeWorker(QThread):
+    done_signal = pyqtSignal(str, object, str)
+
+    def __init__(
+        self,
+        mode: str,
+        current_songs_dir: Path,
+        target_songs_dir: Path,
+        backup_root: Path | None = None,
+        plan: external_merge.ExternalMergePlan | None = None,
+    ):
+        super().__init__()
+        self.mode = mode
+        self.current_songs_dir = Path(current_songs_dir)
+        self.target_songs_dir = Path(target_songs_dir)
+        self.backup_root = Path(backup_root or EXTERNAL_MERGE_BACKUP_ROOT)
+        self.plan = plan
+
+    def run(self):
+        try:
+            if self.mode == "check":
+                payload = external_merge.build_external_merge_plan(self.current_songs_dir, self.target_songs_dir)
+            elif self.mode == "execute":
+                if self.plan is None:
+                    raise RuntimeError("missing external merge plan")
+                payload = external_merge.execute_external_merge(self.plan, backup_root=self.backup_root)
+            else:
+                raise RuntimeError(f"unknown external merge worker mode: {self.mode}")
+            self.done_signal.emit(self.mode, payload, "")
+        except Exception as ex:
+            self.done_signal.emit(self.mode, None, str(ex))
+
+
 class SlicerWorker(QThread):
     log_signal  = pyqtSignal(str, str)  # text, kind
     done_signal = pyqtSignal(int)       # return code
@@ -3188,6 +3369,9 @@ class MainWindow(QMainWindow):
         self._cfg    = load_config()
         self._rows: list[SegmentRow] = []
         self._worker: SlicerWorker | None = None
+        self._external_merge_worker: ExternalMergeWorker | None = None
+        self._external_merge_target: Path | None = None
+        self._external_merge_plan: external_merge.ExternalMergePlan | None = None
         self._uid    = 0
         self._arc_warning_timer = QTimer(self)
         self._arc_warning_timer.setSingleShot(True)
@@ -3399,6 +3583,57 @@ class MainWindow(QMainWindow):
         lay.addWidget(target_frame)
         lay.addSpacing(16)
 
+        # ── 外部目标壳合并
+        external_frame = QFrame()
+        external_frame.setStyleSheet(
+            f"QFrame {{ background: {C_CARD2}; border: 1px solid {C_BORDER2}; border-radius: 12px; }}"
+        )
+        external_lay = QVBoxLayout(external_frame)
+        external_lay.setContentsMargins(14, 12, 14, 12)
+        external_lay.setSpacing(8)
+        external_lay.addWidget(field_label("外部目标壳合并 EXTERNAL MERGE"))
+
+        external_target_row = QHBoxLayout()
+        external_target_row.setSpacing(10)
+        external_target_row.addWidget(make_label("目标壳 songs 目录", size=12, color=C_LABEL))
+        self._external_merge_target_label = QLabel("未选择")
+        self._external_merge_target_label.setStyleSheet(
+            f"font-family: 'Consolas','Courier New',monospace; font-size: 12px; "
+            f"color: {C_TEXT2}; background: transparent; border: none;"
+        )
+        self._external_merge_target_label.setMinimumWidth(80)
+        external_target_row.addWidget(self._external_merge_target_label, 1)
+        self._btn_external_choose = QPushButton("选择")
+        self._btn_external_choose.setObjectName("btnDir")
+        self._btn_external_choose.clicked.connect(self._browse_external_merge_target)
+        external_target_row.addWidget(self._btn_external_choose)
+        external_lay.addLayout(external_target_row)
+
+        external_actions = QHBoxLayout()
+        external_actions.setSpacing(10)
+        self._btn_external_check = QPushButton("检查合并计划")
+        self._btn_external_check.setObjectName("btnSec")
+        self._btn_external_check.clicked.connect(self._check_external_merge_plan)
+        external_actions.addWidget(self._btn_external_check)
+        self._btn_external_confirm = QPushButton("确认合并")
+        self._btn_external_confirm.setObjectName("btnSec")
+        self._btn_external_confirm.clicked.connect(self._confirm_external_merge)
+        external_actions.addWidget(self._btn_external_confirm)
+        external_actions.addStretch()
+        external_lay.addLayout(external_actions)
+
+        self._external_merge_status_label = make_label("外部目标壳合并：未检查", size=13, weight=700, color=C_TEXT2)
+        external_lay.addWidget(self._external_merge_status_label)
+        self._external_merge_detail_label = QLabel()
+        self._external_merge_detail_label.setWordWrap(True)
+        self._external_merge_detail_label.setStyleSheet(
+            f"font-size: 12px; color: {C_MUTED}; background: transparent; border: none; line-height: 1.35;"
+        )
+        external_lay.addWidget(self._external_merge_detail_label)
+
+        lay.addWidget(external_frame)
+        lay.addSpacing(16)
+
         # ── 日志
         self._log_widget = QTextEdit()
         self._log_widget.setObjectName("log")
@@ -3413,6 +3648,7 @@ class MainWindow(QMainWindow):
         # 更新目录显示
         self._refresh_dir_label()
         self._refresh_export_target_state()
+        self._update_external_merge_controls()
 
     # ── 初始数据 ──────────────────────────────────────────────────────────────
 
@@ -3502,6 +3738,133 @@ class MainWindow(QMainWindow):
         self._library_export_note.setVisible(not songlist_enabled)
         if hasattr(self._songlist_panel, "_refresh_packlist_state"):
             self._songlist_panel._refresh_packlist_state()
+
+    def _slicer_is_running(self) -> bool:
+        worker = self.__dict__.get("_worker")
+        return bool(worker and worker.isRunning())
+
+    def _external_merge_is_busy(self) -> bool:
+        worker = self.__dict__.get("_external_merge_worker")
+        return bool(worker and worker.isRunning())
+
+    def _set_external_merge_view(self, view: dict) -> None:
+        if hasattr(self, "_external_merge_status_label"):
+            self._external_merge_status_label.setText(view.get("title", "外部目标壳合并"))
+        if hasattr(self, "_external_merge_detail_label"):
+            self._external_merge_detail_label.setText(view.get("detail", ""))
+            self._external_merge_detail_label.setVisible(bool(view.get("detail")))
+        self._update_external_merge_controls()
+
+    def _update_external_merge_controls(self) -> None:
+        if not hasattr(self, "_btn_external_check"):
+            return
+        busy = self._external_merge_is_busy()
+        slicing = self._slicer_is_running()
+        if hasattr(self, "_btn_run"):
+            self._btn_run.setEnabled(not busy and not slicing)
+        self._btn_external_choose.setEnabled(not busy and not slicing)
+        self._btn_external_check.setEnabled(
+            external_merge_can_check(self._external_merge_target, busy=busy, slicing=slicing)
+        )
+        self._btn_external_confirm.setEnabled(
+            external_merge_can_confirm(self._external_merge_plan, busy=busy) and not slicing
+        )
+
+    def _invalidate_external_merge_plan(self, message: str = "") -> None:
+        self._external_merge_plan = None
+        view = external_merge_plan_view_model(
+            None,
+            target_songs_dir=self._external_merge_target,
+            backup_root=EXTERNAL_MERGE_BACKUP_ROOT,
+        )
+        if message:
+            view["detail"] = view["detail"] + "\n" + message
+        self._set_external_merge_view(view)
+
+    def _browse_external_merge_target(self) -> None:
+        start = str(self._external_merge_target or DATA_ROOT)
+        path = QFileDialog.getExistingDirectory(self, "选择目标壳 songs 目录", start)
+        if not path:
+            return
+        self._external_merge_target = Path(path)
+        self._external_merge_target_label.setText(path)
+        self._external_merge_target_label.setToolTip(path)
+        self._invalidate_external_merge_plan("目标路径已变更，请重新检查合并计划。")
+
+    def _check_external_merge_plan(self) -> None:
+        if not external_merge_can_check(
+            self._external_merge_target,
+            busy=self._external_merge_is_busy(),
+            slicing=self._slicer_is_running(),
+        ):
+            return
+        self._external_merge_plan = None
+        self._external_merge_status_label.setText("外部目标壳合并：检查中")
+        self._external_merge_detail_label.setText("正在读取 current_export/songs 与目标壳 songs 目录；此步骤不会写入目标。")
+        self._external_merge_detail_label.show()
+        self._external_merge_worker = ExternalMergeWorker(
+            "check",
+            CURRENT_EXPORT_SONGS_DIR,
+            self._external_merge_target,
+            EXTERNAL_MERGE_BACKUP_ROOT,
+        )
+        self._external_merge_worker.done_signal.connect(self._on_external_merge_done)
+        self._update_external_merge_controls()
+        self._external_merge_worker.start()
+
+    def _confirm_external_merge(self) -> None:
+        if not external_merge_can_confirm(self._external_merge_plan, busy=self._external_merge_is_busy()):
+            return
+        from PyQt6.QtWidgets import QMessageBox
+
+        text = external_merge_confirmation_text(self._external_merge_plan, EXTERNAL_MERGE_BACKUP_ROOT)
+        answer = QMessageBox.question(
+            self,
+            "确认合并到外部目标壳",
+            text,
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Ok:
+            return
+        self._external_merge_status_label.setText("外部目标壳合并：执行中")
+        self._external_merge_detail_label.setText("正在备份受影响项目并执行合并。")
+        self._external_merge_detail_label.show()
+        self._external_merge_worker = ExternalMergeWorker(
+            "execute",
+            CURRENT_EXPORT_SONGS_DIR,
+            self._external_merge_target or Path(),
+            EXTERNAL_MERGE_BACKUP_ROOT,
+            self._external_merge_plan,
+        )
+        self._external_merge_worker.done_signal.connect(self._on_external_merge_done)
+        self._update_external_merge_controls()
+        self._external_merge_worker.start()
+
+    def _on_external_merge_done(self, mode: str, payload: object, error: str) -> None:
+        self._external_merge_worker = None
+        if error:
+            self._external_merge_plan = None
+            self._set_external_merge_view({
+                "title": "外部目标壳合并：失败",
+                "detail": f"{mode} 失败: {error}",
+                "can_confirm": False,
+            })
+            return
+
+        if mode == "check":
+            self._external_merge_plan = payload
+            self._set_external_merge_view(
+                external_merge_plan_view_model(
+                    self._external_merge_plan,
+                    backup_root=EXTERNAL_MERGE_BACKUP_ROOT,
+                )
+            )
+            return
+
+        result = payload
+        self._external_merge_plan = None
+        self._set_external_merge_view(external_merge_result_view_model(result))
 
     def _browse_songs_dir(self):
         d = self._cfg.get("songs_dir", str(DEFAULT_SONGS_DIR))
@@ -3759,6 +4122,8 @@ class MainWindow(QMainWindow):
     def _run_slicer(self):
         if self._worker and self._worker.isRunning():
             return
+        if self._external_merge_is_busy():
+            return
         try:
             speed = parse_speed_text(self._speed_input.text())
         except ValueError as ex:
@@ -3825,10 +4190,13 @@ class MainWindow(QMainWindow):
 
     def _on_done(self, code: int):
         self._set_running(False)
+        if code == 0:
+            self._invalidate_external_merge_plan("current_export 已更新，请重新检查外部合并计划。")
 
     def _set_running(self, on: bool):
         self._btn_run.setEnabled(not on)
         self._btn_run.setText("▶  运行中…" if on else "▶  运行切片")
+        self._update_external_merge_controls()
 
     def _open_out(self):
         OUT_DIR.mkdir(parents=True, exist_ok=True)

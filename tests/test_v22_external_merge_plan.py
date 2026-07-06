@@ -87,6 +87,26 @@ def _actions(plan, kind: str, operation: str | None = None):
 
 
 class ExternalMergePlanTests(unittest.TestCase):
+    def test_root_link_blocker_short_circuits_document_reads(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            current = root / "current" / "songs"
+            target = root / "target" / "songs"
+            current.mkdir(parents=True)
+            target.mkdir(parents=True)
+
+            def fake_link(path):
+                return Path(path) == current
+
+            with mock.patch("external_merge.is_link_or_junction", side_effect=fake_link), \
+                 mock.patch("external_merge._read_songlist") as read_songlist, \
+                 mock.patch("external_merge._read_packlist") as read_packlist:
+                plan = external_merge.build_external_merge_plan(current, target)
+
+            self.assertIn("current_songs_dir_is_link", _codes(plan))
+            read_songlist.assert_not_called()
+            read_packlist.assert_not_called()
+
     def test_new_song_and_pack_plan_does_not_write_target(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)

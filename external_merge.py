@@ -90,6 +90,20 @@ def _count(actions: list[MergeAction], operation: str) -> int:
     return sum(1 for action in actions if action.operation == operation)
 
 
+def _has_root_blocker(plan: ExternalMergePlan) -> bool:
+    unsafe_root_codes = {
+        "current_songs_dir_is_link",
+        "target_songs_dir_is_link",
+        "current_songs_dir_missing",
+        "target_songs_dir_missing",
+        "current_songs_dir_not_dir",
+        "target_songs_dir_not_dir",
+        "current_songs_dir_not_directory",
+        "target_songs_dir_not_directory",
+    }
+    return any(issue.code in unsafe_root_codes for issue in plan.blockers)
+
+
 def build_external_merge_plan(current_songs_dir: Path, target_songs_dir: Path) -> ExternalMergePlan:
     current_songs_dir = Path(current_songs_dir)
     target_songs_dir = Path(target_songs_dir)
@@ -97,6 +111,8 @@ def build_external_merge_plan(current_songs_dir: Path, target_songs_dir: Path) -
 
     _validate_root(plan, current_songs_dir, "current", "current_songs_dir")
     _validate_root(plan, target_songs_dir, "target", "target_songs_dir")
+    if _has_root_blocker(plan):
+        return _finalize_plan(plan)
     if _is_library_export_songs_dir(current_songs_dir):
         _block(plan, "current_is_library_export", "library_export/songs must not be used as external merge input.", current_songs_dir)
     if _same_path(current_songs_dir, target_songs_dir):
@@ -1189,62 +1205,6 @@ def _plan_pack_image_actions(
             )
         else:
             _block(plan, "pack_image_name_conflict", f"pack image filename is already occupied by different content: {img}", source, target)
-
-
-def _plan_new_pack_image(plan: ExternalMergePlan, pack_id: str, img: str, source: Path, target: Path) -> None:
-    if not target.exists():
-        plan.pack_image_actions.append(_action("pack_image", "add", img, source, target, {"pack_id": pack_id}))
-    elif not target.is_file():
-        _block(plan, "target_pack_image_not_file", f"target pack image path is not a file: {img}", target)
-    elif _same_file_content(source, target):
-        plan.pack_image_actions.append(_action("pack_image", "reuse", img, source, target, {"pack_id": pack_id}))
-    else:
-        _block(plan, "pack_image_name_conflict", f"new pack image filename is already occupied by different content: {img}", source, target)
-
-
-def _plan_update_pack_image(
-    plan: ExternalMergePlan,
-    pack_id: str,
-    img: str,
-    source: Path,
-    target: Path,
-    target_pack: dict[str, Any],
-    img_to_pack_ids: dict[str, set[str]],
-) -> None:
-    old_img = target_pack.get("img")
-    if old_img == img:
-        if not target.exists():
-            _block(plan, "target_pack_image_missing_for_update", f"target pack image is missing for existing pack update: {img}", target)
-        elif not target.is_file():
-            _block(plan, "target_pack_image_not_file", f"target pack image path is not a file: {img}", target)
-        elif _same_file_content(source, target):
-            plan.pack_image_actions.append(_action("pack_image", "reuse", img, source, target, {"pack_id": pack_id}))
-        else:
-            other_refs = sorted(img_to_pack_ids.get(img, set()) - {pack_id})
-            if other_refs:
-                _block(
-                    plan,
-                    "pack_image_shared_update_conflict",
-                    f"鏇存柊 pack 浼氭敼鍙樺叾浠?pack 鍏辩敤鐨勫浘鐗囷細{img}",
-                    img,
-                    *other_refs,
-                )
-            else:
-                plan.pack_image_actions.append(_action("pack_image", "replace", img, source, target, {"pack_id": pack_id}))
-        return
-
-    if not target.exists():
-        plan.pack_image_actions.append(
-            _action("pack_image", "add", img, source, target, {"pack_id": pack_id, "old_img": old_img})
-        )
-    elif not target.is_file():
-        _block(plan, "target_pack_image_not_file", f"target pack image path is not a file: {img}", target)
-    elif _same_file_content(source, target):
-        plan.pack_image_actions.append(
-            _action("pack_image", "reuse", img, source, target, {"pack_id": pack_id, "old_img": old_img})
-        )
-    else:
-        _block(plan, "pack_image_name_conflict", f"鏇存柊 pack 鐨勬柊鍥剧墖鏂囦欢鍚嶅凡琚笉鍚屽唴瀹瑰崰鐢細{img}", source, target)
 
 
 def _merge_entries(target_entries: list[dict[str, Any]], input_entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
