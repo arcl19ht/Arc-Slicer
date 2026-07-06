@@ -2190,6 +2190,7 @@ def external_merge_confirmation_text(
         f"预计备份项: {external_merge_backup_count(plan)}\n"
         f"备份根目录: {backup_root}\n\n"
         "此操作会修改目标 songs 目录。\n"
+        "执行时会在备份根目录下创建一个时间戳子目录。\n"
         "工具会先备份受影响项目；无关资源不会被主动清理。\n"
         "请确认目标是测试壳副本。"
     )
@@ -3812,6 +3813,8 @@ class MainWindow(QMainWindow):
         self._set_external_merge_view(view)
 
     def _browse_external_merge_target(self) -> None:
+        if self._external_merge_is_busy() or self._slicer_is_running():
+            return
         start = str(self._external_merge_target or DATA_ROOT)
         path = QFileDialog.getExistingDirectory(self, "选择目标壳 songs 目录", start)
         if not path:
@@ -3822,6 +3825,8 @@ class MainWindow(QMainWindow):
         self._invalidate_external_merge_plan("目标路径已变更，请重新检查合并计划。")
 
     def _check_external_merge_plan(self) -> None:
+        if self._external_merge_is_busy() or self._slicer_is_running():
+            return
         if not external_merge_can_check(
             self._external_merge_target,
             busy=self._external_merge_is_busy(),
@@ -3847,6 +3852,8 @@ class MainWindow(QMainWindow):
         self._external_merge_worker.start()
 
     def _confirm_external_merge(self) -> None:
+        if self._external_merge_is_busy() or self._slicer_is_running():
+            return
         if not external_merge_can_confirm(self._external_merge_plan, busy=self._external_merge_is_busy()):
             return
         from PyQt6.QtWidgets import QMessageBox
@@ -3891,6 +3898,8 @@ class MainWindow(QMainWindow):
                 "detail": f"{mode} 失败: {error}",
                 "can_confirm": False,
             })
+            label = "检查失败" if mode == "check" else "执行失败"
+            self._push_log(f"[外部合并] {label}：{error}", "err")
             return
 
         if mode == "check":

@@ -229,6 +229,12 @@ class _MessageBoxOk:
         return _MessageBoxOk.StandardButton.Ok
 
 
+class _RaisingFileDialog:
+    @staticmethod
+    def getExistingDirectory(*_args, **_kwargs):
+        raise AssertionError("file dialog should not open")
+
+
 class ExternalMergeUiStateTests(unittest.TestCase):
     def test_no_target_or_unchecked_plan_cannot_confirm(self):
         self.assertFalse(app.external_merge_can_check(None))
@@ -289,9 +295,48 @@ class ExternalMergeUiStateTests(unittest.TestCase):
     def test_confirmation_text_mentions_backup_and_unrelated_resources(self):
         text = app.external_merge_confirmation_text(_plan(), Path("backup/root"))
         self.assertIn("此操作会修改目标 songs 目录", text)
+        self.assertIn("执行时会在备份根目录下创建一个时间戳子目录", text)
         self.assertIn("工具会先备份受影响项目", text)
         self.assertIn("无关资源不会被主动清理", text)
         self.assertIn("backup", text)
+
+    def test_external_merge_actions_return_immediately_when_busy_or_slicing(self):
+        panel = _Panel()
+        _FakeWorker.created = []
+        old_dialog = app.QFileDialog
+        old_worker = app.ExternalMergeWorker
+        widgets = sys.modules["PyQt6.QtWidgets"]
+        had_msg = hasattr(widgets, "QMessageBox")
+        old_msg = getattr(widgets, "QMessageBox", None)
+        try:
+            app.QFileDialog = _RaisingFileDialog
+            app.ExternalMergeWorker = _FakeWorker
+            widgets.QMessageBox = _MessageBoxOk
+
+            panel._external_merge_phase = "checking"
+            old_target = panel._external_merge_target
+            app.MainWindow._browse_external_merge_target(panel)
+            app.MainWindow._check_external_merge_plan(panel)
+            app.MainWindow._confirm_external_merge(panel)
+            self.assertEqual(panel._external_merge_target, old_target)
+            self.assertEqual(panel._external_merge_generation, 0)
+            self.assertEqual(_FakeWorker.created, [])
+
+            panel._external_merge_phase = "idle"
+            panel._slicer_running = True
+            app.MainWindow._browse_external_merge_target(panel)
+            app.MainWindow._check_external_merge_plan(panel)
+            app.MainWindow._confirm_external_merge(panel)
+            self.assertEqual(panel._external_merge_target, old_target)
+            self.assertEqual(panel._external_merge_generation, 0)
+            self.assertEqual(_FakeWorker.created, [])
+        finally:
+            app.QFileDialog = old_dialog
+            app.ExternalMergeWorker = old_worker
+            if had_msg:
+                widgets.QMessageBox = old_msg
+            else:
+                delattr(widgets, "QMessageBox")
 
     def test_check_phase_disables_controls_before_worker_running(self):
         panel = _Panel()
@@ -444,6 +489,28 @@ class ExternalMergeUiStateTests(unittest.TestCase):
         self.assertEqual(panel._external_merge_phase, "idle")
         self.assertEqual(len(panel.logs), 1)
         self.assertIn("[外部合并] 完成", panel.logs[0][0])
+
+    def test_external_merge_worker_errors_log_only_for_current_generation(self):
+        panel = _Panel()
+        panel._external_merge_generation = 2
+        panel._external_merge_phase = "checking"
+
+        app.MainWindow._on_external_merge_done(panel, "check", 1, None, "old boom")
+        self.assertEqual(panel.logs, [])
+        self.assertEqual(panel._external_merge_phase, "checking")
+
+        app.MainWindow._on_external_merge_done(panel, "check", 2, None, "read boom")
+        self.assertEqual(panel._external_merge_phase, "idle")
+        self.assertEqual(len(panel.logs), 1)
+        self.assertIn("[外部合并] 检查失败", panel.logs[0][0])
+        self.assertIn("read boom", panel.logs[0][0])
+
+        panel._external_merge_generation = 3
+        panel._external_merge_phase = "executing"
+        app.MainWindow._on_external_merge_done(panel, "execute", 3, None, "write boom")
+        self.assertEqual(len(panel.logs), 2)
+        self.assertIn("[外部合并] 执行失败", panel.logs[1][0])
+        self.assertIn("write boom", panel.logs[1][0])
 
     def test_slicing_and_external_merge_mutual_exclusion(self):
         panel = _Panel()
