@@ -97,7 +97,7 @@ def _install_fake_pyqt():
         "QApplication", "QMainWindow", "QWidget", "QVBoxLayout", "QHBoxLayout",
         "QLabel", "QPushButton", "QComboBox", "QLineEdit", "QTextEdit",
         "QScrollArea", "QFrame", "QFileDialog", "QSizePolicy", "QSpacerItem",
-        "QCheckBox", "QGridLayout", "QGraphicsDropShadowEffect", "QMessageBox", "QMessageBox",
+        "QCheckBox", "QGridLayout", "QGraphicsDropShadowEffect", "QMessageBox",
     ):
         setattr(qtwidgets, name, _Fake)
     qtwidgets.QMessageBox.StandardButton = _Fake()
@@ -152,7 +152,11 @@ class _Panel:
         self._external_merge_plan = _plan()
         self._external_merge_target = Path("target/songs")
         self._external_merge_worker = None
+        self._external_merge_phase = "idle"
+        self._external_merge_generation = 0
         self._worker = None
+        self._slicer_running = False
+        self.logs = []
         self._btn_external_choose = _Fake()
         self._btn_external_check = _Fake()
         self._btn_external_confirm = _Fake()
@@ -161,10 +165,10 @@ class _Panel:
         self._external_merge_detail_label = _Fake()
 
     def _external_merge_is_busy(self):
-        return False
+        return app.MainWindow._external_merge_is_busy(self)
 
     def _slicer_is_running(self):
-        return False
+        return app.MainWindow._slicer_is_running(self)
 
     def _update_external_merge_controls(self):
         return app.MainWindow._update_external_merge_controls(self)
@@ -177,6 +181,52 @@ class _Panel:
 
     def _set_running(self, on):
         return app.MainWindow._set_running(self, on)
+
+    def _on_external_merge_done(self, mode, generation, payload, error):
+        return app.MainWindow._on_external_merge_done(self, mode, generation, payload, error)
+
+    def _push_log(self, text, kind="normal"):
+        self.logs.append((text, kind))
+
+
+class _WorkerSignal:
+    def __init__(self, worker):
+        self.worker = worker
+
+    def connect(self, callback):
+        self.worker.callback = callback
+
+
+class _FakeWorker:
+    created = []
+
+    def __init__(self, mode, generation, current_songs_dir, target_songs_dir, backup_root=None, plan=None):
+        self.mode = mode
+        self.generation = generation
+        self.current_songs_dir = current_songs_dir
+        self.target_songs_dir = target_songs_dir
+        self.backup_root = backup_root
+        self.plan = plan
+        self.started = False
+        self.callback = None
+        self.done_signal = _WorkerSignal(self)
+        _FakeWorker.created.append(self)
+
+    def isRunning(self):
+        return False
+
+    def start(self):
+        self.started = True
+
+
+class _MessageBoxOk:
+    class StandardButton:
+        Ok = 1
+        Cancel = 2
+
+    @staticmethod
+    def question(*_args, **_kwargs):
+        return _MessageBoxOk.StandardButton.Ok
 
 
 class ExternalMergeUiStateTests(unittest.TestCase):
@@ -225,6 +275,87 @@ class ExternalMergeUiStateTests(unittest.TestCase):
         self.assertEqual(view["backup_count"], 4)
         self.assertIn(str(Path("backup/root")), view["detail"])
 
+    def test_external_merge_card_is_before_run_and_log_sections(self):
+        source = Path("app.py").read_text(encoding="utf-8")
+        self.assertLess(
+            source.index("外部目标壳合并 EXTERNAL MERGE"),
+            source.index("self._btn_run = QPushButton"),
+        )
+        self.assertLess(
+            source.index("外部目标壳合并 EXTERNAL MERGE"),
+            source.index("self._log_widget = QTextEdit"),
+        )
+
+    def test_confirmation_text_mentions_backup_and_unrelated_resources(self):
+        text = app.external_merge_confirmation_text(_plan(), Path("backup/root"))
+        self.assertIn("此操作会修改目标 songs 目录", text)
+        self.assertIn("工具会先备份受影响项目", text)
+        self.assertIn("无关资源不会被主动清理", text)
+        self.assertIn("backup", text)
+
+    def test_check_phase_disables_controls_before_worker_running(self):
+        panel = _Panel()
+        _FakeWorker.created = []
+        old_worker = app.ExternalMergeWorker
+        try:
+            app.ExternalMergeWorker = _FakeWorker
+            app.MainWindow._check_external_merge_plan(panel)
+        finally:
+            app.ExternalMergeWorker = old_worker
+
+        self.assertEqual(panel._external_merge_phase, "checking")
+        self.assertEqual(panel._external_merge_generation, 1)
+        self.assertTrue(_FakeWorker.created[0].started)
+        self.assertFalse(panel._btn_external_choose.isEnabled())
+        self.assertFalse(panel._btn_external_check.isEnabled())
+        self.assertFalse(panel._btn_external_confirm.isEnabled())
+        self.assertFalse(panel._btn_run.isEnabled())
+
+    def test_execute_phase_disables_controls_before_worker_running(self):
+        panel = _Panel()
+        _FakeWorker.created = []
+        old_worker = app.ExternalMergeWorker
+        widgets = sys.modules["PyQt6.QtWidgets"]
+        had_msg = hasattr(widgets, "QMessageBox")
+        old_msg = getattr(widgets, "QMessageBox", None)
+        try:
+            app.ExternalMergeWorker = _FakeWorker
+            widgets.QMessageBox = _MessageBoxOk
+            app.MainWindow._confirm_external_merge(panel)
+        finally:
+            app.ExternalMergeWorker = old_worker
+            if had_msg:
+                widgets.QMessageBox = old_msg
+            else:
+                delattr(widgets, "QMessageBox")
+
+        self.assertEqual(panel._external_merge_phase, "executing")
+        self.assertEqual(panel._external_merge_generation, 1)
+        self.assertTrue(_FakeWorker.created[0].started)
+        self.assertFalse(panel._btn_external_choose.isEnabled())
+        self.assertFalse(panel._btn_external_check.isEnabled())
+        self.assertFalse(panel._btn_external_confirm.isEnabled())
+        self.assertFalse(panel._btn_run.isEnabled())
+
+    def test_stale_worker_callback_does_not_overwrite_new_state_or_log(self):
+        panel = _Panel()
+        newer = _plan()
+        panel._external_merge_generation = 2
+        panel._external_merge_phase = "checking"
+        panel._external_merge_plan = newer
+        panel._external_merge_status_label.setText("newer")
+
+        app.MainWindow._on_external_merge_done(panel, "check", 1, _plan(actions=False), "")
+
+        self.assertIs(panel._external_merge_plan, newer)
+        self.assertEqual(panel._external_merge_phase, "checking")
+        self.assertEqual(panel._external_merge_status_label.text(), "newer")
+        self.assertEqual(panel.logs, [])
+
+        app.MainWindow._on_external_merge_done(panel, "check", 2, _plan(actions=False), "")
+        self.assertEqual(panel._external_merge_phase, "idle")
+        self.assertEqual(panel._external_merge_plan.summary["actions"], 0)
+
     def test_path_change_clears_plan_and_disables_confirm(self):
         panel = _Panel()
         panel._external_merge_target = Path("new/target/songs")
@@ -263,6 +394,71 @@ class ExternalMergeUiStateTests(unittest.TestCase):
                 self.assertFalse(view["can_confirm"])
                 self.assertIn(status, view["detail"])
                 self.assertIn(str(Path("backup/dir")), view["detail"])
+
+    def test_result_view_models_for_warning_and_incomplete_rollback(self):
+        plan = _plan()
+        issue = external_merge.MergeIssue(external_merge.WARNING, "manifest_warning", "manifest warning")
+        completed = external_merge.ExternalMergeResult(
+            success=True,
+            status="completed",
+            plan=plan,
+            backup_dir=Path("backup/dir"),
+            changed_paths=["songlist"],
+            execution_issues=[issue],
+        )
+        completed_view = app.external_merge_result_view_model(completed)
+        self.assertIn("备份记录存在提示", completed_view["title"])
+        self.assertIn("manifest_warning", completed_view["detail"])
+
+        failed = external_merge.ExternalMergeResult(
+            success=False,
+            status="failed_rollback_incomplete",
+            plan=plan,
+            backup_dir=Path("backup/dir"),
+            rollback_errors=["rollback broke"],
+            execution_issues=[external_merge.MergeIssue(external_merge.BLOCKER, "execution_failed", "boom")],
+        )
+        failed_view = app.external_merge_result_view_model(failed)
+        self.assertIn("立即停止继续操作目标壳", failed_view["title"])
+        self.assertIn("合并失败，且自动恢复不完整", failed_view["detail"])
+        self.assertIn("rollback broke", failed_view["detail"])
+        self.assertIn("execution_failed", failed_view["detail"])
+
+    def test_external_merge_result_logs_are_written_for_current_generation_only(self):
+        panel = _Panel()
+        result = external_merge.ExternalMergeResult(
+            success=True,
+            status="completed",
+            plan=_plan(),
+            backup_dir=Path("backup/dir"),
+            changed_paths=["songlist", "packlist"],
+        )
+
+        panel._external_merge_generation = 2
+        panel._external_merge_phase = "executing"
+        app.MainWindow._on_external_merge_done(panel, "execute", 1, result, "")
+        self.assertEqual(panel.logs, [])
+        self.assertEqual(panel._external_merge_phase, "executing")
+
+        app.MainWindow._on_external_merge_done(panel, "execute", 2, result, "")
+        self.assertEqual(panel._external_merge_phase, "idle")
+        self.assertEqual(len(panel.logs), 1)
+        self.assertIn("[外部合并] 完成", panel.logs[0][0])
+
+    def test_slicing_and_external_merge_mutual_exclusion(self):
+        panel = _Panel()
+        panel._external_merge_phase = "checking"
+        app.MainWindow._update_external_merge_controls(panel)
+        self.assertFalse(panel._btn_run.isEnabled())
+
+        panel._external_merge_phase = "idle"
+        app.MainWindow._set_running(panel, True)
+        self.assertFalse(panel._btn_external_choose.isEnabled())
+        self.assertFalse(panel._btn_external_check.isEnabled())
+        self.assertFalse(panel._btn_external_confirm.isEnabled())
+
+        app.MainWindow._set_running(panel, False)
+        self.assertTrue(panel._btn_external_choose.isEnabled())
 
 
 if __name__ == "__main__":

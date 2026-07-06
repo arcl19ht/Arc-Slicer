@@ -100,12 +100,17 @@ class ExternalMergePlanTests(unittest.TestCase):
 
             with mock.patch("external_merge.is_link_or_junction", side_effect=fake_link), \
                  mock.patch("external_merge._read_songlist") as read_songlist, \
-                 mock.patch("external_merge._read_packlist") as read_packlist:
+                 mock.patch("external_merge._read_packlist") as read_packlist, \
+                 mock.patch("external_merge._compute_snapshot_fingerprint") as compute_fingerprint, \
+                 mock.patch("external_merge._fingerprint_path") as fingerprint_path:
                 plan = external_merge.build_external_merge_plan(current, target)
 
             self.assertIn("current_songs_dir_is_link", _codes(plan))
             read_songlist.assert_not_called()
             read_packlist.assert_not_called()
+            compute_fingerprint.assert_not_called()
+            fingerprint_path.assert_not_called()
+            self.assertTrue(plan.snapshot_fingerprint)
 
     def test_new_song_and_pack_plan_does_not_write_target(self):
         with tempfile.TemporaryDirectory() as td:
@@ -397,6 +402,29 @@ class ExternalMergePlanTests(unittest.TestCase):
             plan = external_merge.build_external_merge_plan(current, target)
 
             self.assertIn("target_is_tool_export", _codes(plan))
+
+    def test_library_export_alias_with_dotdot_is_blocked_before_reads(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            library = base / "ArcSlicerData" / "out" / "library_export" / "songs"
+            target = base / "target"
+            library.mkdir(parents=True)
+            _setup_target(target, [], [_pack("pack_a")])
+            alias = base / "ArcSlicerData" / "out" / "current_export" / ".." / "library_export" / "songs"
+
+            with mock.patch("external_merge._read_songlist") as read_songlist, \
+                 mock.patch("external_merge._read_packlist") as read_packlist:
+                plan = external_merge.build_external_merge_plan(alias, target)
+
+            self.assertIn("current_is_library_export", _codes(plan))
+            self.assertNotIn("current_songs_dir_missing", _codes(plan))
+            read_songlist.assert_not_called()
+            read_packlist.assert_not_called()
+
+            backup_root = base / "backup"
+            result = external_merge.execute_external_merge(plan, backup_root=backup_root)
+            self.assertEqual(result.status, "rejected")
+            self.assertFalse(backup_root.exists())
 
     def test_invalid_json_and_shapes_return_blockers_not_exceptions(self):
         with tempfile.TemporaryDirectory() as td:

@@ -105,20 +105,22 @@ def _has_root_blocker(plan: ExternalMergePlan) -> bool:
 
 
 def build_external_merge_plan(current_songs_dir: Path, target_songs_dir: Path) -> ExternalMergePlan:
-    current_songs_dir = Path(current_songs_dir)
-    target_songs_dir = Path(target_songs_dir)
+    current_songs_dir = Path(_norm_abs(current_songs_dir))
+    target_songs_dir = Path(_norm_abs(target_songs_dir))
     plan = ExternalMergePlan(current_songs_dir=current_songs_dir, target_songs_dir=target_songs_dir)
 
     _validate_root(plan, current_songs_dir, "current", "current_songs_dir")
     _validate_root(plan, target_songs_dir, "target", "target_songs_dir")
     if _has_root_blocker(plan):
-        return _finalize_plan(plan)
+        return _finalize_root_blocked_plan(plan)
     if _is_library_export_songs_dir(current_songs_dir):
         _block(plan, "current_is_library_export", "library_export/songs must not be used as external merge input.", current_songs_dir)
     if _same_path(current_songs_dir, target_songs_dir):
         _block(plan, "target_equals_current_input", "target songs directory must not equal current input.", target_songs_dir)
     if _is_tool_export_songs_dir(target_songs_dir):
         _block(plan, "target_is_tool_export", "target directory must not be the tool current_export or library_export.", target_songs_dir)
+    if plan.blockers:
+        return _finalize_root_blocked_plan(plan)
 
     input_songlist = _read_songlist(plan, current_songs_dir / "songlist", "input")
     target_songlist = _read_songlist(plan, target_songs_dir / "songlist", "target")
@@ -324,6 +326,25 @@ def execute_external_merge(plan: ExternalMergePlan, *, backup_root: Path) -> Ext
 
 def _finalize_plan(plan: ExternalMergePlan) -> ExternalMergePlan:
     plan.snapshot_fingerprint = _compute_snapshot_fingerprint(plan)
+    return plan
+
+
+def _finalize_root_blocked_plan(plan: ExternalMergePlan) -> ExternalMergePlan:
+    h = hashlib.sha256()
+    h.update(b"ROOT_BLOCKED\0")
+    h.update(os.fspath(plan.current_songs_dir).encode("utf-8", errors="surrogateescape"))
+    h.update(b"\0")
+    h.update(os.fspath(plan.target_songs_dir).encode("utf-8", errors="surrogateescape"))
+    h.update(b"\0")
+    for issue in sorted(plan.blockers, key=lambda item: (item.code, item.message, item.paths)):
+        h.update(issue.code.encode("utf-8", errors="surrogateescape"))
+        h.update(b"\0")
+        h.update(issue.message.encode("utf-8", errors="surrogateescape"))
+        h.update(b"\0")
+        for path in issue.paths:
+            h.update(str(path).encode("utf-8", errors="surrogateescape"))
+            h.update(b"\0")
+    plan.snapshot_fingerprint = h.hexdigest()
     return plan
 
 
