@@ -2845,52 +2845,113 @@ class SegmentRow(QFrame):
         self._setup_ui(index, s, e)
 
     def _setup_ui(self, index: int, s: int | None, e: int | None):
-        lay = QGridLayout(self)
-        lay.setContentsMargins(16, 12, 16, 12)
-        lay.setHorizontalSpacing(12)
-        lay.setVerticalSpacing(5)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(14, 10, 14, 10)
+        lay.setSpacing(8)
 
         badge = QLabel(str(index))
-        badge.setFixedSize(28, 28)
+        badge.setFixedSize(26, 26)
         badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         badge.setStyleSheet(
             f"background: {C_BADGE_BG}; color: {C_ACCENT}; "
             f"font-weight: 700; font-size: 13px; border-radius: 8px; border: none;"
         )
-        lay.addWidget(badge, 2, 0, Qt.AlignmentFlag.AlignVCenter)
         self._badge = badge
 
-        self._interval_label = field_label("片段区间（ms）")
-        lay.addWidget(self._interval_label, 0, 1, 1, 3)
-        self._start_sub_label = field_label("起点")
-        lay.addWidget(self._start_sub_label, 1, 1)
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(9)
+        title_row.addWidget(badge, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        title_box = QWidget()
+        title_box.setStyleSheet("background: transparent; border: none;")
+        title_lay = QHBoxLayout(title_box)
+        title_lay.setContentsMargins(0, 0, 0, 0)
+        title_lay.setSpacing(6)
+        self._interval_label = QLabel("片段区间（ms）")
+        self._interval_label.setStyleSheet(
+            f"font-size: 13px; font-weight: 700; color: {C_TEXT2}; background: transparent; border: none;"
+        )
+        self._interval_unit_label = QLabel("AFF 整数毫秒")
+        self._interval_unit_label.setStyleSheet(
+            f"font-size: 11px; font-weight: 500; color: {C_LABEL}; background: transparent; border: none;"
+        )
+        title_lay.addWidget(self._interval_label)
+        title_lay.addWidget(self._interval_unit_label)
+        title_lay.addStretch()
+        title_row.addWidget(title_box, 1)
+
+        self._dur = QLabel()
+        self._dur.setStyleSheet(
+            f"font-family: 'Consolas','Courier New',monospace; font-size: 13px; "
+            f"font-weight: 500; color: {C_LABEL}; background: transparent; border: none;"
+        )
+        self._dur.setMinimumWidth(72)
+        self._dur.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        title_row.addWidget(self._dur, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        btn_del = QPushButton("✕")
+        btn_del.setObjectName("btnDel")
+        title_row.addWidget(btn_del, 0, Qt.AlignmentFlag.AlignVCenter)
+        lay.addLayout(title_row)
+
+        input_row = QHBoxLayout()
+        input_row.setContentsMargins(36, 0, 0, 0)
+        input_row.setSpacing(10)
+
+        start_col = QWidget()
+        start_col.setStyleSheet("background: transparent; border: none;")
+        start_lay = QVBoxLayout(start_col)
+        start_lay.setContentsMargins(0, 0, 0, 0)
+        start_lay.setSpacing(5)
+        start_label_row = QHBoxLayout()
+        start_label_row.setContentsMargins(0, 0, 0, 0)
+        start_label_row.setSpacing(4)
+        self._start_sub_label = self._make_segment_field_label("起点")
+        self._start_unit_label = self._make_segment_unit_label("ms")
+        start_label_row.addWidget(self._start_sub_label)
+        start_label_row.addWidget(self._start_unit_label)
+        start_label_row.addStretch()
+        start_lay.addLayout(start_label_row)
         self._start = QLineEdit("" if s is None else str(s))
-        self._start.setFixedWidth(110)
+        self._start.setPlaceholderText("输入起点")
+        self._start.setMinimumWidth(132)
+        self._start.setStyleSheet(self._segment_time_input_qss())
         self._install_time_validator(self._start)
-        lay.addWidget(self._start, 2, 1, Qt.AlignmentFlag.AlignVCenter)
+        start_lay.addWidget(self._start)
+        input_row.addWidget(start_col, 1)
 
         arrow = QLabel("→")
         arrow.setStyleSheet(f"color: #C9C4B8; font-size: 15px; background: transparent; border: none;")
         arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(arrow, 2, 2, Qt.AlignmentFlag.AlignVCenter)
+        input_row.addWidget(arrow, 0, Qt.AlignmentFlag.AlignBottom)
 
-        self._end_sub_label = field_label("终点")
-        lay.addWidget(self._end_sub_label, 1, 3)
+        end_col = QWidget()
+        end_col.setStyleSheet("background: transparent; border: none;")
+        end_lay = QVBoxLayout(end_col)
+        end_lay.setContentsMargins(0, 0, 0, 0)
+        end_lay.setSpacing(5)
+        end_label_row = QHBoxLayout()
+        end_label_row.setContentsMargins(0, 0, 0, 0)
+        end_label_row.setSpacing(4)
+        self._end_sub_label = self._make_segment_field_label("终点")
+        self._end_unit_label = self._make_segment_unit_label("ms")
+        end_label_row.addWidget(self._end_sub_label)
+        end_label_row.addWidget(self._end_unit_label)
+        end_label_row.addStretch()
+        end_lay.addLayout(end_label_row)
         self._end = QLineEdit("" if e is None else str(e))
-        self._end.setFixedWidth(110)
+        self._end.setPlaceholderText("输入终点")
+        self._end.setMinimumWidth(132)
+        self._end.setStyleSheet(self._segment_time_input_qss())
         self._install_time_validator(self._end)
-        lay.addWidget(self._end, 2, 3, Qt.AlignmentFlag.AlignVCenter)
+        end_lay.addWidget(self._end)
+        input_row.addWidget(end_col, 1)
+        input_row.addStretch(1)
+        lay.addLayout(input_row)
 
         self._start_error = self._make_time_error_label()
         self._end_error = self._make_time_error_label()
-        lay.addWidget(self._start_error, 3, 1)
-
-        end_error_box = QWidget()
-        end_error_box.setStyleSheet("background: transparent; border: none;")
-        end_error_lay = QHBoxLayout(end_error_box)
-        end_error_lay.setContentsMargins(0, 0, 0, 0)
-        end_error_lay.setSpacing(8)
-        end_error_lay.addWidget(self._end_error)
         self._end_cap_btn = QPushButton("")
         self._end_cap_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._end_cap_btn.setFixedHeight(20)
@@ -2912,23 +2973,13 @@ class SegmentRow(QFrame):
         )
         self._end_cap_btn.hide()
         self._end_cap_btn.clicked.connect(lambda: self.end_cap_requested.emit(self))
-        end_error_lay.addWidget(self._end_cap_btn)
-        end_error_lay.addStretch()
-        lay.addWidget(end_error_box, 3, 3)
 
-        self._dur = QLabel()
-        self._dur.setStyleSheet(
-            f"font-family: 'Consolas','Courier New',monospace; font-size: 13px; "
-            f"font-weight: 500; color: {C_LABEL}; background: transparent; border: none;"
-        )
-        self._dur.setMinimumWidth(60)
-        self._dur.setAlignment(Qt.AlignmentFlag.AlignVCenter)
-        lay.addWidget(self._dur, 2, 4, Qt.AlignmentFlag.AlignVCenter)
-
-        spacer = QWidget()
-        spacer.setStyleSheet("background: transparent; border: none;")
-        lay.addWidget(spacer, 2, 5)
-        lay.setColumnStretch(5, 1)
+        status_row = QHBoxLayout()
+        status_row.setContentsMargins(36, 0, 0, 0)
+        status_row.setSpacing(10)
+        status_row.addWidget(self._start_error)
+        status_row.addWidget(self._end_error)
+        status_row.addWidget(self._end_cap_btn)
 
         self._arc_indicator_box = QWidget()
         self._arc_indicator_box.setStyleSheet("background: transparent; border: none;")
@@ -2936,17 +2987,47 @@ class SegmentRow(QFrame):
         self._arc_status_layout.setContentsMargins(0, 0, 0, 0)
         self._arc_status_layout.setSpacing(12)
         self._arc_statuses: list[ArcCutStatus] = []
-        lay.addWidget(self._arc_indicator_box, 2, 6, Qt.AlignmentFlag.AlignVCenter)
+        status_row.addWidget(self._arc_indicator_box)
+        status_row.addStretch()
+        lay.addLayout(status_row)
         self.set_arc_cut_warnings([], [])
-
-        btn_del = QPushButton("✕")
-        btn_del.setObjectName("btnDel")
-        lay.addWidget(btn_del, 2, 7, Qt.AlignmentFlag.AlignVCenter)
 
         self._update_dur()
         self._start.textChanged.connect(self._on_change)
         self._end.textChanged.connect(self._on_change)
         btn_del.clicked.connect(lambda: self.deleted.emit(self))
+
+    def _make_segment_field_label(self, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setStyleSheet(
+            f"font-size: 11px; font-weight: 650; letter-spacing: 0.3px; "
+            f"color: {C_MUTED}; background: transparent; border: none; padding: 0;"
+        )
+        return label
+
+    def _make_segment_unit_label(self, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setStyleSheet(
+            f"font-size: 10px; font-weight: 500; color: {C_LABEL}; "
+            f"background: transparent; border: none; padding: 0;"
+        )
+        return label
+
+    def _segment_time_input_qss(self) -> str:
+        return (
+            "QLineEdit {"
+            f"background: {C_INPUT_BG}; "
+            f"border: 1px solid {C_INPUT_BD}; "
+            "border-radius: 8px; "
+            f"color: {C_TEXT}; "
+            "font-size: 13px; "
+            "padding: 7px 9px;"
+            "}"
+            "QLineEdit:focus {"
+            f"border-color: {C_ACCENT}; "
+            "background: #FFFDF8;"
+            "}"
+        )
 
     def _install_time_validator(self, field: QLineEdit) -> None:
         try:
