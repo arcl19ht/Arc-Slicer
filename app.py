@@ -1741,7 +1741,7 @@ def do_slice(
 
             copy_song_jackets(in_dir, out_dir)
 
-            log_fn(f"  ♪ 音频 {s}ms – {e}ms  speed={speed}…", "normal")
+            log_fn(f"  ♪ 音频 {s}ms – {e}ms  speed={speed}…", "stage")
             try:
                 slice_ogg(in_ogg, out_dir / "base.ogg", s, e, speed)
             except subprocess.CalledProcessError as ex:
@@ -1749,7 +1749,7 @@ def do_slice(
                 cleanup_current_export_stage(stage_root)
                 return 1
 
-            log_fn(f"  ✎ 谱面 {s}ms – {e}ms…", "normal")
+            log_fn(f"  ✎ 谱面 {s}ms – {e}ms…", "stage")
             aff_warnings: list[str] = []
             new_aff = slice_aff(in_aff.read_text(encoding="utf-8", errors="replace"), s, e, speed, aff_warnings)
             for warning in aff_warnings:
@@ -1760,7 +1760,7 @@ def do_slice(
                 display_title = build_segment_display_title(song_template.title_base or song_id, s, e, speed)
                 entry = build_songlist_entry(song_template, new_id, display_title, s, e, speed)
                 all_song_entries.append(entry)
-                log_fn(f"  ✎ songlist → {new_id}", "muted")
+                log_fn(f"  ✎ songlist → {new_id}", "stage")
 
             log_fn(f"✓ 输出 → out/current_export/songs/{new_id}/", "ok")
 
@@ -2406,27 +2406,36 @@ QPushButton {{
 }}
 QPushButton#btnRun {{
     background: {C_ACCENT};
-    color: #FFFFFF;
-    border: none;
+    color: #211A16;
+    border: 1px solid {C_ACCENT_H};
     padding: 12px 22px;
     font-size: 14px;
+    font-weight: 750;
 }}
 QPushButton#btnRun:hover {{
     background: {C_ACCENT_H};
+    color: #FFFFFF;
 }}
 QPushButton#btnRun:disabled {{
-    opacity: 0.8;
-    background: {C_ACCENT};
+    background: #D8CEC1;
+    color: #5D554B;
+    border: 1px solid #BFB4A6;
 }}
 QPushButton#btnSec {{
-    background: {C_CARD2};
+    background: #EEE9DE;
     color: {C_TEXT2};
-    border: 1px solid {C_INPUT_BD};
+    border: 1px solid #D8D0C2;
     padding: 11px 16px;
     font-size: 14px;
 }}
 QPushButton#btnSec:hover {{
-    background: #EAE6DB;
+    background: #E3DED2;
+    border-color: #C9BFAF;
+}}
+QPushButton#btnSec:disabled {{
+    background: #E1DBD0;
+    color: #7F776B;
+    border: 1px solid #C9C0B2;
 }}
 QPushButton#btnAdd {{
     background: #FBFAF6;
@@ -2475,7 +2484,7 @@ QPushButton#btnDel:hover {{
 }}
 QTextEdit#log {{
     background: #1F1E1B;
-    color: #CDC8BC;
+    color: #E0D8C9;
     border: none;
     border-radius: 12px;
     padding: 14px 16px;
@@ -2516,6 +2525,16 @@ def metadata_field_label(text: str) -> QLabel:
     return lbl
 
 
+def section_title(text: str, subtitle: str = "") -> QLabel:
+    full_text = text if not subtitle else f"{text}  {subtitle}"
+    lbl = QLabel(full_text)
+    lbl.setStyleSheet(
+        f"font-size: 13px; font-weight: 750; letter-spacing: 0.2px; "
+        f"color: {C_TEXT2}; background: transparent; border: none; padding: 2px 0 4px 0;"
+    )
+    return lbl
+
+
 def card_frame(bg: str = C_CARD, border: str = C_BORDER) -> QFrame:
     f = QFrame()
     f.setStyleSheet(
@@ -2537,8 +2556,8 @@ class CollapsibleHeader(QFrame):
         self._refresh_style()
 
     def _refresh_style(self):
-        bg = "#EFEAE0" if self._hover else "#F4F0E7"
-        border = "#DDD5C6" if self._hover else C_BORDER2
+        bg = "#EFE6D9" if self._hover else "#F2EBDF"
+        border = "#D3C7B7" if self._hover else "#DDD3C3"
         self.setStyleSheet(
             f"QFrame {{ background: {bg}; border: 1px solid {border}; border-radius: 9px; }}"
         )
@@ -3189,11 +3208,11 @@ class SonglistPanel(QFrame):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(8)
 
-        outer.addWidget(field_label("元数据导出"))
+        outer.addWidget(section_title("元数据导出"))
 
         self._songlist_item = QFrame()
         self._songlist_item.setStyleSheet(
-            f"QFrame {{ background: {C_CARD}; border: 1px solid {C_BORDER}; border-radius: 12px; }}"
+            f"QFrame {{ background: #F6F1E8; border: 1px solid #DED4C5; border-radius: 12px; }}"
         )
         songlist_lay = QVBoxLayout(self._songlist_item)
         songlist_lay.setContentsMargins(14, 11, 14, 11)
@@ -3206,7 +3225,7 @@ class SonglistPanel(QFrame):
         self._enabled = QCheckBox("生成 songlist")
         self._enabled.setChecked(False)
         self._enabled.setStyleSheet(
-            f"color: {C_TEXT2}; font-size: 13px; background: transparent; border: none;"
+            f"color: {C_TEXT2}; font-size: 13px; font-weight: 650; background: transparent; border: none;"
         )
         self._enabled.clicked.connect(self._on_songlist_enabled_changed)
         songlist_head.addWidget(self._enabled)
@@ -3224,7 +3243,7 @@ class SonglistPanel(QFrame):
 
         self._packlist_item = QFrame()
         self._packlist_item.setStyleSheet(
-            f"QFrame {{ background: {C_CARD}; border: 1px solid {C_BORDER}; border-radius: 12px; }}"
+            f"QFrame {{ background: #F6F1E8; border: 1px solid #DED4C5; border-radius: 12px; }}"
         )
         pack_item_lay = QVBoxLayout(self._packlist_item)
         pack_item_lay.setContentsMargins(14, 11, 14, 11)
@@ -3237,7 +3256,7 @@ class SonglistPanel(QFrame):
         self._packlist_enabled = QCheckBox("生成 packlist 与曲包资源")
         self._packlist_enabled.setChecked(False)
         self._packlist_enabled.setStyleSheet(
-            f"color: {C_TEXT2}; font-size: 13px; background: transparent; border: none;"
+            f"color: {C_TEXT2}; font-size: 13px; font-weight: 650; background: transparent; border: none;"
         )
         self._packlist_enabled.clicked.connect(self._on_packlist_enabled_changed)
         pack_head.addWidget(self._packlist_enabled)
@@ -3844,14 +3863,14 @@ class MainWindow(QMainWindow):
         lay.addSpacing(16)
 
         # ── 导出目标
+        lay.addWidget(section_title("导出目标", "EXPORT TARGETS"))
         target_frame = QFrame()
         target_frame.setStyleSheet(
-            f"QFrame {{ background: {C_CARD2}; border: 1px solid {C_BORDER2}; border-radius: 12px; }}"
+            f"QFrame {{ background: #F4EEE3; border: 1px solid #DED4C5; border-radius: 12px; }}"
         )
         target_lay = QVBoxLayout(target_frame)
-        target_lay.setContentsMargins(14, 12, 14, 12)
-        target_lay.setSpacing(8)
-        target_lay.addWidget(field_label("导出目标 EXPORT TARGETS"))
+        target_lay.setContentsMargins(14, 10, 14, 10)
+        target_lay.setSpacing(7)
         target_row = QHBoxLayout()
         target_row.setSpacing(18)
         self._current_export_check = QCheckBox("生成本次导出包")
@@ -3874,14 +3893,15 @@ class MainWindow(QMainWindow):
         lay.addSpacing(16)
 
         # ── 外部目标壳合并
+        # 外部目标壳合并 EXTERNAL MERGE
+        lay.addWidget(section_title("外部目标壳合并", "EXTERNAL MERGE"))
         external_frame = QFrame()
         external_frame.setStyleSheet(
-            f"QFrame {{ background: {C_CARD2}; border: 1px solid {C_BORDER2}; border-radius: 12px; }}"
+            f"QFrame {{ background: #F4EEE3; border: 1px solid #DED4C5; border-radius: 12px; }}"
         )
         external_lay = QVBoxLayout(external_frame)
-        external_lay.setContentsMargins(14, 12, 14, 12)
+        external_lay.setContentsMargins(14, 11, 14, 11)
         external_lay.setSpacing(8)
-        external_lay.addWidget(field_label("外部目标壳合并 EXTERNAL MERGE"))
 
         external_target_row = QHBoxLayout()
         external_target_row.setSpacing(10)
@@ -3925,7 +3945,12 @@ class MainWindow(QMainWindow):
         lay.addSpacing(16)
 
         # ── 操作行
-        actions = QHBoxLayout()
+        action_frame = QFrame()
+        action_frame.setStyleSheet(
+            f"QFrame {{ background: #F4EEE3; border: 1px solid #DED4C5; border-radius: 12px; }}"
+        )
+        actions = QHBoxLayout(action_frame)
+        actions.setContentsMargins(12, 10, 12, 10)
         actions.setSpacing(10)
         self._btn_run = QPushButton("▶  运行切片")
         self._btn_run.setObjectName("btnRun")
@@ -3946,7 +3971,7 @@ class MainWindow(QMainWindow):
         self._saved_lbl.hide()
         actions.addWidget(self._saved_lbl)
         actions.addStretch()
-        lay.addLayout(actions)
+        lay.addWidget(action_frame)
         lay.addSpacing(16)
 
         # ── 日志
@@ -4554,7 +4579,7 @@ class MainWindow(QMainWindow):
         self._log_widget.clear()
         self._log_widget.show()
         self._set_running(True)
-        self._push_log("▶ 开始切片…", "muted")
+        self._push_log("▶ 开始切片…", "stage")
 
         songs_dir     = Path(self._cfg.get("songs_dir", str(DEFAULT_SONGS_DIR)))
         songlist_meta = data.get("songlist") or {}
@@ -4600,12 +4625,12 @@ class MainWindow(QMainWindow):
     # ── 日志输出 ──────────────────────────────────────────────────────────────
 
     LOG_COLORS = {
-        "ok":     C_OK,
-        "err":    C_ERR,
-        "warn":   "#B06A3C",
-        "stage":  C_TEXT2,
-        "muted":  "#8A857A",
-        "normal": C_TEXT2,
+        "ok":     "#BDE0A8",
+        "err":    "#F0A08D",
+        "warn":   "#E6B36A",
+        "stage":  "#F0E7D8",
+        "muted":  "#B9B0A2",
+        "normal": "#DED5C7",
     }
     LOG_WEIGHTS = {
         "ok": "700",
