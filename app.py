@@ -161,6 +161,22 @@ def validate_speed_value(speed: float) -> float:
     return speed
 
 
+def normalize_speed_override_value(value) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if not value.strip():
+            return None
+        return parse_speed_text(value)
+    return validate_speed_value(float(value))
+
+
+def effective_segment_speed(default_speed: float, speed_override=None) -> float:
+    default_speed = validate_speed_value(float(default_speed))
+    override = normalize_speed_override_value(speed_override)
+    return override if override is not None else default_speed
+
+
 def is_sliceable_song_dir(path: Path) -> bool:
     return path.is_dir() and (path / "base.ogg").is_file() and (path / "2.aff").is_file()
 
@@ -874,6 +890,38 @@ def build_segment_id(source_id: str, start_ms: int, end_ms: int, speed: float) -
 def build_segment_display_title(source_title: str, start_ms: int, end_ms: int, speed: float) -> str:
     title = str(source_title or "").strip() or "Untitled"
     return f"{title} [{int(start_ms)}–{int(end_ms)}ms · {_speed_text(speed)}×]"
+
+
+def build_segment_export_plan(source_id: str, segments: list[dict], default_speed: float) -> list[dict]:
+    default_speed = validate_speed_value(float(default_speed))
+    plan: list[dict] = []
+    seen: dict[str, int] = {}
+    for index, seg in enumerate(segments):
+        try:
+            start_ms = int(seg["s"])
+            end_ms = int(seg["e"])
+        except (KeyError, TypeError, ValueError) as ex:
+            raise ValueError(f"第 {index + 1} 个时间段无效") from ex
+        if end_ms <= start_ms:
+            raise ValueError(f"第 {index + 1} 个时间段无效: s={start_ms} e={end_ms}")
+        try:
+            speed = effective_segment_speed(default_speed, seg.get("speed_override"))
+        except (TypeError, ValueError) as ex:
+            raise ValueError(f"第 {index + 1} 个时间段倍速无效: {ex}") from ex
+        segment_id = build_segment_id(source_id, start_ms, end_ms, speed)
+        if segment_id in seen:
+            raise ValueError(
+                f"第 {seen[segment_id] + 1} 与第 {index + 1} 个时间段输出 ID 重复: {segment_id}"
+            )
+        seen[segment_id] = index
+        plan.append({
+            "index": index,
+            "s": start_ms,
+            "e": end_ms,
+            "speed": speed,
+            "id": segment_id,
+        })
+    return plan
 
 
 def copy_song_jackets(source_dir: Path, out_dir: Path) -> list[Path]:
@@ -1709,6 +1757,12 @@ def do_slice(
             log_fn(f"✗ 找不到文件: {p}", "err")
             return 1
 
+    try:
+        segment_plan = build_segment_export_plan(song_id, segments, speed)
+    except ValueError as ex:
+        log_fn(f"✗ {ex}", "err")
+        return 1
+
     if effective_packlist:
         try:
             if pack_template is None:
@@ -1729,22 +1783,18 @@ def do_slice(
     all_song_entries: list[dict] = []
 
     try:
-        for i, seg in enumerate(segments):
-            s, e = int(seg["s"]), int(seg["e"])
-            if e <= s:
-                log_fn(f"✗ 无效时间段 s={s} e={e}", "err")
-                cleanup_current_export_stage(stage_root)
-                return 1
-
-            new_id   = build_segment_id(song_id, s, e, speed)
+        for item in segment_plan:
+            s, e = item["s"], item["e"]
+            segment_speed = item["speed"]
+            new_id = item["id"]
             out_dir  = out_root / new_id
             out_dir.mkdir(parents=True, exist_ok=True)
 
             copy_song_jackets(in_dir, out_dir)
 
-            log_fn(f"  ♪ 音频 {s}ms – {e}ms  speed={speed}…", "stage")
+            log_fn(f"  ♪ 音频 {s}ms – {e}ms  speed={segment_speed}…", "stage")
             try:
-                slice_ogg(in_ogg, out_dir / "base.ogg", s, e, speed)
+                slice_ogg(in_ogg, out_dir / "base.ogg", s, e, segment_speed)
             except subprocess.CalledProcessError as ex:
                 log_fn(f"✗ ffmpeg 失败: {ex}", "err")
                 cleanup_current_export_stage(stage_root)
@@ -1752,14 +1802,14 @@ def do_slice(
 
             log_fn(f"  ✎ 谱面 {s}ms – {e}ms…", "stage")
             aff_warnings: list[str] = []
-            new_aff = slice_aff(in_aff.read_text(encoding="utf-8", errors="replace"), s, e, speed, aff_warnings)
+            new_aff = slice_aff(in_aff.read_text(encoding="utf-8", errors="replace"), s, e, segment_speed, aff_warnings)
             for warning in aff_warnings:
                 log_fn(f"  ⚠ {warning}", "warn")
             (out_dir / "2.aff").write_text(new_aff, encoding="utf-8")
 
             if songlist_enabled and song_template:
-                display_title = build_segment_display_title(song_template.title_base or song_id, s, e, speed)
-                entry = build_songlist_entry(song_template, new_id, display_title, s, e, speed)
+                display_title = build_segment_display_title(song_template.title_base or song_id, s, e, segment_speed)
+                entry = build_songlist_entry(song_template, new_id, display_title, s, e, segment_speed)
                 all_song_entries.append(entry)
                 log_fn(f"  ✎ songlist → {new_id}", "stage")
 
@@ -2331,7 +2381,7 @@ class SlicerWorker(QThread):
             self.log_signal.emit(text, kind)
 
         log(f"  songs 目录: {self.songs_dir}", "muted")
-        log(f"  曲目: {self.song_id}  速度: {self.speed}  段数: {len(self.segments)}", "muted")
+        log(f"  曲目: {self.song_id}  默认速度: {self.speed}  段数: {len(self.segments)}", "muted")
         if self.songlist_enabled:
             log("  songlist 生成: 开启", "muted")
         if effective_packlist_export_enabled(self.packlist_enabled, self.songlist_enabled):
@@ -2878,11 +2928,22 @@ class SegmentRow(QFrame):
     deleted = pyqtSignal(object)   # emits self
     changed = pyqtSignal()
     end_cap_requested = pyqtSignal(object)
+    copy_requested = pyqtSignal(object)
 
-    def __init__(self, index: int, s: int | None, e: int | None, parent=None):
+    def __init__(
+        self,
+        index: int,
+        s: int | None,
+        e: int | None,
+        parent=None,
+        speed_override: float | None = None,
+        default_speed: float = 1.0,
+    ):
         super().__init__(parent)
         self.s_val = s
         self.e_val = e
+        self._default_speed = validate_speed_value(float(default_speed))
+        self._initial_speed_override = normalize_speed_override_value(speed_override)
         self.setStyleSheet(
             "QFrame { background: #FFFFFF; border: 1px solid #EAE6DC; border-radius: 12px; }"
         )
@@ -2933,6 +2994,18 @@ class SegmentRow(QFrame):
         self._dur.setMinimumWidth(72)
         self._dur.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         title_row.addWidget(self._dur, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        btn_copy = QPushButton("复制此片段")
+        btn_copy.setObjectName("btnSegCopy")
+        btn_copy.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_copy.setStyleSheet(
+            "QPushButton {"
+            "background: #F7F1E7; border: 1px solid #E1D6C5; border-radius: 7px; "
+            f"color: {C_TEXT2}; font-size: 11px; font-weight: 650; padding: 4px 8px;"
+            "}"
+            "QPushButton:hover { background: #F1E6D7; border-color: #D0BDA5; }"
+        )
+        title_row.addWidget(btn_copy, 0, Qt.AlignmentFlag.AlignVCenter)
 
         btn_del = QPushButton("✕")
         btn_del.setObjectName("btnDel")
@@ -2991,11 +3064,33 @@ class SegmentRow(QFrame):
         self._install_time_validator(self._end)
         end_lay.addWidget(self._end)
         input_row.addWidget(end_col, 1)
+
+        speed_col = QWidget()
+        speed_col.setStyleSheet("background: transparent; border: none;")
+        speed_lay = QVBoxLayout(speed_col)
+        speed_lay.setContentsMargins(0, 0, 0, 0)
+        speed_lay.setSpacing(5)
+        speed_label_row = QHBoxLayout()
+        speed_label_row.setContentsMargins(0, 0, 0, 0)
+        speed_label_row.setSpacing(4)
+        self._speed_sub_label = self._make_segment_field_label("倍速")
+        self._speed_unit_label = self._make_segment_unit_label("override")
+        speed_label_row.addWidget(self._speed_sub_label)
+        speed_label_row.addWidget(self._speed_unit_label)
+        speed_label_row.addStretch()
+        speed_lay.addLayout(speed_label_row)
+        self._speed_override = QLineEdit("" if self._initial_speed_override is None else _speed_text(self._initial_speed_override))
+        self._speed_override.setPlaceholderText(self._speed_placeholder())
+        self._speed_override.setMinimumWidth(132)
+        self._speed_override.setStyleSheet(self._segment_time_input_qss())
+        speed_lay.addWidget(self._speed_override)
+        input_row.addWidget(speed_col, 1)
         input_row.addStretch(1)
         lay.addLayout(input_row)
 
         self._start_error = self._make_time_error_label()
         self._end_error = self._make_time_error_label()
+        self._speed_error = self._make_time_error_label()
         self._end_cap_btn = QPushButton("")
         self._end_cap_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._end_cap_btn.setFixedHeight(20)
@@ -3024,6 +3119,7 @@ class SegmentRow(QFrame):
         status_row.addWidget(self._start_error)
         status_row.addWidget(self._end_error)
         status_row.addWidget(self._end_cap_btn)
+        status_row.addWidget(self._speed_error)
 
         self._arc_indicator_box = QWidget()
         self._arc_indicator_box.setStyleSheet("background: transparent; border: none;")
@@ -3039,6 +3135,8 @@ class SegmentRow(QFrame):
         self._update_dur()
         self._start.textChanged.connect(self._on_change)
         self._end.textChanged.connect(self._on_change)
+        self._speed_override.textChanged.connect(self._on_change)
+        btn_copy.clicked.connect(lambda: self.copy_requested.emit(self))
         btn_del.clicked.connect(lambda: self.deleted.emit(self))
 
     def _make_segment_field_label(self, text: str) -> QLabel:
@@ -3073,6 +3171,9 @@ class SegmentRow(QFrame):
             "}"
         )
 
+    def _speed_placeholder(self) -> str:
+        return f"留空继承默认 {_speed_text(self._default_speed)}×"
+
     def _install_time_validator(self, field: QLineEdit) -> None:
         try:
             from PyQt6.QtCore import QRegularExpression
@@ -3100,6 +3201,7 @@ class SegmentRow(QFrame):
             self.e_val = int(self._end.text())
         except ValueError:
             self.e_val = None
+        self._speed_override.setPlaceholderText(self._speed_placeholder())
         self._update_dur()
         self.changed.emit()
 
@@ -3120,7 +3222,11 @@ class SegmentRow(QFrame):
             )
             self.setStyleSheet("QFrame { background: #FFFFFF; border: 1px solid #E6B5A8; border-radius: 12px; }")
         else:
-            self._dur.setText(f"{d/1000:.2f}s")
+            try:
+                speed = self.effective_speed()
+                self._dur.setText(f"{d / speed / 1000:.2f}s")
+            except ValueError:
+                self._dur.setText(f"{d/1000:.2f}s")
             self._dur.setStyleSheet(
                 f"font-family: 'Consolas','Courier New',monospace; font-size: 13px; "
                 f"color: {C_LABEL}; background: transparent; border: none;"
@@ -3135,6 +3241,28 @@ class SegmentRow(QFrame):
 
     def end_text(self) -> str:
         return self._end.text()
+
+    def speed_override_text(self) -> str:
+        return self._speed_override.text()
+
+    def speed_override_value(self) -> float | None:
+        return normalize_speed_override_value(self._speed_override.text())
+
+    def effective_speed(self) -> float:
+        return effective_segment_speed(self._default_speed, self.speed_override_value())
+
+    def set_default_speed(self, default_speed: float) -> None:
+        self._default_speed = validate_speed_value(float(default_speed))
+        self._speed_override.setPlaceholderText(self._speed_placeholder())
+        self._update_dur()
+
+    def set_speed_error(self, message: str = "") -> None:
+        self._speed_error.setText(message)
+        self._speed_error.setToolTip(message)
+        self._speed_error.setVisible(bool(message))
+
+    def clear_speed_error(self) -> None:
+        self.set_speed_error("")
 
     def set_time_errors(
         self,
@@ -3160,7 +3288,10 @@ class SegmentRow(QFrame):
         self.set_time_errors("", "")
 
     def focus_time_field(self, field: str | None) -> None:
-        widget = self._start if field == "start" else self._end
+        if field == "speed":
+            widget = self._speed_override
+        else:
+            widget = self._start if field == "start" else self._end
         widget.setFocus()
         widget.selectAll()
 
@@ -3191,7 +3322,8 @@ class SegmentRow(QFrame):
     def to_dict(self) -> dict | None:
         if self.s_val is None or self.e_val is None:
             return None
-        return {"s": self.s_val, "e": self.e_val}
+        override = self.speed_override_value()
+        return {"s": self.s_val, "e": self.e_val, "speed_override": override}
 
 
 # ─── Songlist 配置面板 ────────────────────────────────────────────────────────
@@ -3844,10 +3976,10 @@ class MainWindow(QMainWindow):
 
         speed_col = QVBoxLayout()
         speed_col.setSpacing(7)
-        speed_col.addWidget(field_label("速度 SPEED"))
+        speed_col.addWidget(field_label("默认速度 DEFAULT SPEED"))
         self._speed_input = QLineEdit("1.0")
         self._speed_input.setFixedWidth(124)
-        self._speed_input.textChanged.connect(self._mark_current_export_dirty)
+        self._speed_input.textChanged.connect(self._on_default_speed_changed)
         speed_col.addWidget(self._speed_input)
         tb_lay.addLayout(speed_col)
 
@@ -4069,7 +4201,11 @@ class MainWindow(QMainWindow):
                 s, e = int(seg["s"]), int(seg["e"])
             except (KeyError, TypeError, ValueError):
                 continue
-            self._add_segment(s, e)
+            try:
+                speed_override = normalize_speed_override_value(seg.get("speed_override"))
+            except (TypeError, ValueError):
+                speed_override = None
+            self._add_segment(s, e, speed_override)
             added_segment = True
         if not added_segment:
             self._add_segment(None, None)
@@ -4122,6 +4258,23 @@ class MainWindow(QMainWindow):
         self._add_segment(None, None)
         self._refresh_current_audio_duration()
         self._schedule_arc_cut_warning_refresh()
+        self._mark_current_export_dirty()
+
+    def _current_default_speed(self, fallback: float = 1.0) -> float:
+        try:
+            return parse_speed_text(self._speed_input.text())
+        except Exception:
+            return fallback
+
+    def _on_default_speed_changed(self, *_args):
+        default_speed = self._current_default_speed()
+        for row in getattr(self, "_rows", []):
+            try:
+                row.set_default_speed(default_speed)
+            except Exception:
+                pass
+        if hasattr(self, "_refresh_seg_header"):
+            self._refresh_seg_header()
         self._mark_current_export_dirty()
 
     def _mark_current_export_dirty(self, *_args):
@@ -4376,25 +4529,36 @@ class MainWindow(QMainWindow):
             self._segs_layout.removeWidget(row)
             row.deleteLater()
 
-    def _add_segment(self, s=_AUTO_SEGMENT, e=_AUTO_SEGMENT):
+    def _add_segment(self, s=_AUTO_SEGMENT, e=_AUTO_SEGMENT, speed_override=None):
         if s is _AUTO_SEGMENT and e is _AUTO_SEGMENT:
             s = None
             e = None
         elif s is _AUTO_SEGMENT or e is _AUTO_SEGMENT:
             raise ValueError("s and e must be provided together")
 
-        row = SegmentRow(len(self._rows) + 1, s, e)
+        row = SegmentRow(
+            len(self._rows) + 1,
+            s,
+            e,
+            speed_override=speed_override,
+            default_speed=self._current_default_speed() if hasattr(self, "_speed_input") else 1.0,
+        )
         row.deleted.connect(self._remove_segment)
         row.changed.connect(self._refresh_seg_header)
         row.changed.connect(self._schedule_arc_cut_warning_refresh)
-        row.changed.connect(self._schedule_segment_time_validation)
+        if hasattr(self, "_schedule_segment_time_validation"):
+            row.changed.connect(self._schedule_segment_time_validation)
         row.changed.connect(self._mark_current_export_dirty)
         row.end_cap_requested.connect(self._set_row_end_to_audio_duration)
+        row.copy_requested.connect(self._copy_segment)
         self._rows.append(row)
         self._segs_layout.addWidget(row)
-        self._refresh_seg_header()
-        self._schedule_segment_time_validation()
-        self._schedule_arc_cut_warning_refresh()
+        if hasattr(self, "_refresh_seg_header"):
+            self._refresh_seg_header()
+        if hasattr(self, "_schedule_segment_time_validation"):
+            self._schedule_segment_time_validation()
+        if hasattr(self, "_schedule_arc_cut_warning_refresh"):
+            self._schedule_arc_cut_warning_refresh()
 
     def _remove_segment(self, row: SegmentRow):
         self._rows.remove(row)
@@ -4406,8 +4570,43 @@ class MainWindow(QMainWindow):
             self._add_segment(None, None)
             return
         self._refresh_seg_header()
-        self._schedule_segment_time_validation()
-        self._schedule_arc_cut_warning_refresh()
+        if hasattr(self, "_schedule_segment_time_validation"):
+            self._schedule_segment_time_validation()
+        if hasattr(self, "_schedule_arc_cut_warning_refresh"):
+            self._schedule_arc_cut_warning_refresh()
+        self._mark_current_export_dirty()
+
+    def _copy_segment(self, row: SegmentRow):
+        if row not in self._rows:
+            return
+        new_row = SegmentRow(
+            self._rows.index(row) + 2,
+            row.s_val,
+            row.e_val,
+            speed_override=None,
+            default_speed=self._current_default_speed() if hasattr(self, "_speed_input") else 1.0,
+        )
+        new_row.deleted.connect(self._remove_segment)
+        new_row.changed.connect(self._refresh_seg_header)
+        new_row.changed.connect(self._schedule_arc_cut_warning_refresh)
+        if hasattr(self, "_schedule_segment_time_validation"):
+            new_row.changed.connect(self._schedule_segment_time_validation)
+        new_row.changed.connect(self._mark_current_export_dirty)
+        new_row.end_cap_requested.connect(self._set_row_end_to_audio_duration)
+        new_row.copy_requested.connect(self._copy_segment)
+        insert_at = self._rows.index(row) + 1
+        self._rows.insert(insert_at, new_row)
+        if hasattr(self._segs_layout, "insertWidget"):
+            self._segs_layout.insertWidget(insert_at, new_row)
+        else:
+            self._segs_layout.addWidget(new_row)
+        for i, r in enumerate(self._rows):
+            r.update_index(i + 1)
+        self._refresh_seg_header()
+        if hasattr(self, "_schedule_segment_time_validation"):
+            self._schedule_segment_time_validation()
+        if hasattr(self, "_schedule_arc_cut_warning_refresh"):
+            self._schedule_arc_cut_warning_refresh()
         self._mark_current_export_dirty()
 
     def _refresh_seg_header(self):
@@ -4416,7 +4615,10 @@ class MainWindow(QMainWindow):
             if r.s_val is not None and r.e_val is not None:
                 d = r.e_val - r.s_val
                 if d > 0:
-                    total += d
+                    try:
+                        total += d / r.effective_speed()
+                    except ValueError:
+                        total += d
         self._seg_header.setText(
             f"时间段 · {len(self._rows)} 段 · 共 {total/1000:.1f}s"
         )
@@ -4468,9 +4670,14 @@ class MainWindow(QMainWindow):
         for row in self._rows:
             if not row.start_text() and not row.end_text():
                 row.clear_time_errors()
+                if hasattr(row, "clear_speed_error"):
+                    row.clear_speed_error()
                 continue
             result = validate_segment_bounds(row.start_text(), row.end_text(), duration_ms)
             row.set_time_errors(result.start_error, result.end_error, result.end_cap_ms)
+            if hasattr(row, "set_speed_error"):
+                speed_error = self._segment_speed_error(row)
+                row.set_speed_error(speed_error)
 
     def _first_segment_validation_error(self) -> tuple[int, SegmentRow, SegmentValidationResult] | None:
         duration_ms = self._audio_duration_ms
@@ -4480,6 +4687,59 @@ class MainWindow(QMainWindow):
             if not result.ok:
                 return index, row, result
         return None
+
+    def _segment_speed_error(self, row: SegmentRow) -> str:
+        if not hasattr(row, "speed_override_text"):
+            return ""
+        if not row.speed_override_text().strip():
+            return ""
+        try:
+            row.speed_override_value()
+        except ValueError as ex:
+            return f"倍速无效：{ex}"
+        return ""
+
+    def _first_segment_speed_error(self) -> tuple[int, SegmentRow, str] | None:
+        for index, row in enumerate(self._rows):
+            message = self._segment_speed_error(row)
+            row.set_speed_error(message)
+            if message:
+                return index, row, message
+        return None
+
+    def _first_duplicate_segment_id_error(self, song_id: str, default_speed: float) -> tuple[str, str] | None:
+        segments = [row.to_dict() for row in self._rows if row.to_dict()]
+        try:
+            build_segment_export_plan(song_id, segments, default_speed)
+        except ValueError as ex:
+            message = str(ex)
+            if "输出 ID 重复" in message:
+                return "输出 ID 重复", message
+            return "时间段无效", message
+        return None
+
+    def _show_segment_speed_error(self, index: int, row: SegmentRow, message: str):
+        title = "片段倍速无效"
+        full = f"第 {index + 1} 个时间段：{message}"
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+
+            QMessageBox.warning(self, title, full)
+        except Exception:
+            self._push_log(f"✗ {full}", "err")
+        try:
+            self._scroll.ensureWidgetVisible(row)
+        except Exception:
+            pass
+        row.focus_time_field("speed")
+
+    def _show_duplicate_segment_id_error(self, title: str, message: str):
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+
+            QMessageBox.warning(self, title, message)
+        except Exception:
+            self._push_log(f"✗ {message}", "err")
 
     def _set_row_end_to_audio_duration(self, row: SegmentRow):
         if self._audio_duration_ms is None:
@@ -4563,10 +4823,15 @@ class MainWindow(QMainWindow):
             if hasattr(self, "_library_export_check")
             else True
         )
+        segments = []
+        for row in self._rows:
+            item = row.to_dict()
+            if item:
+                segments.append(item)
         data: dict = {
             "song_id":  self._song_box.currentText(),
             "speed":    parse_speed_text(self._speed_input.text()) if speed is None else speed,
-            "segments": [r.to_dict() for r in self._rows if r.to_dict()],
+            "segments": segments,
             "songlist_enabled": songlist_enabled,
             "packlist_enabled": packlist_enabled,
             "current_export_enabled": current_export_enabled,
@@ -4607,6 +4872,14 @@ class MainWindow(QMainWindow):
         segment_error = self._first_segment_validation_error()
         if segment_error:
             self._show_segment_validation_error(*segment_error)
+            return
+        speed_error = self._first_segment_speed_error()
+        if speed_error:
+            self._show_segment_speed_error(*speed_error)
+            return
+        duplicate_error = self._first_duplicate_segment_id_error(song_id, speed)
+        if duplicate_error:
+            self._show_duplicate_segment_id_error(*duplicate_error)
             return
         data = self._collect(speed)
         self._last_run_current_export_enabled = bool(data.get("current_export_enabled", True))

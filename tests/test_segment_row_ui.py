@@ -31,6 +31,10 @@ class SegmentRowUiTests(unittest.TestCase):
         self.assertEqual(row._dur.text(), "—")
         self.assertIsNone(row.to_dict())
         self.assertFalse(row._arc_indicator_box.isVisible())
+        self.assertEqual(row._speed_override.text(), "")
+        speed_placeholder = row._speed_override.placeholderText()
+        if isinstance(speed_placeholder, str):
+            self.assertIn("留空继承默认", speed_placeholder)
 
     def test_validation_cap_and_arc_state_survive_segment_layout(self):
         row = app.SegmentRow(1, 0, 2000)
@@ -49,7 +53,63 @@ class SegmentRowUiTests(unittest.TestCase):
         row.set_end_text(1000)
         self.assertEqual(row.end_text(), "1000")
         self.assertEqual(row.e_val, 1000)
-        self.assertEqual(row.to_dict(), {"s": 0, "e": 1000})
+        self.assertEqual(row.to_dict(), {"s": 0, "e": 1000, "speed_override": None})
+
+    def test_speed_override_blank_inherits_default_and_updates_duration(self):
+        row = app.SegmentRow(1, 0, 2000, default_speed=1.0)
+
+        self.assertEqual(row.effective_speed(), 1.0)
+        self.assertEqual(row._dur.text(), "2.00s")
+
+        row.set_default_speed(0.5)
+        self.assertEqual(row.effective_speed(), 0.5)
+        speed_placeholder = row._speed_override.placeholderText()
+        if isinstance(speed_placeholder, str):
+            self.assertIn("0.5×", speed_placeholder)
+        self.assertEqual(row._dur.text(), "4.00s")
+
+        row._speed_override.setText("2")
+        row._on_change()
+        self.assertEqual(row.effective_speed(), 2.0)
+        self.assertEqual(row._dur.text(), "1.00s")
+        self.assertEqual(row.to_dict()["speed_override"], 2.0)
+
+        row.set_default_speed(0.25)
+        self.assertEqual(row.effective_speed(), 2.0)
+        self.assertEqual(row._dur.text(), "1.00s")
+
+    def test_copy_segment_request_signal_exists_and_copy_does_not_copy_override(self):
+        class _Layout:
+            def __init__(self):
+                self.widgets = []
+
+            def addWidget(self, widget):
+                self.widgets.append(widget)
+
+            def insertWidget(self, index, widget):
+                self.widgets.insert(index, widget)
+
+            def removeWidget(self, widget):
+                self.widgets.remove(widget)
+
+        win = app.MainWindow.__new__(app.MainWindow)
+        win._rows = []
+        win._segs_layout = _Layout()
+        win._speed_input = type("Speed", (), {"text": lambda self: "0.75"})()
+        win._refresh_seg_header = lambda: None
+        win._schedule_segment_time_validation = lambda: None
+        win._schedule_arc_cut_warning_refresh = lambda: None
+        win._mark_current_export_dirty = lambda *args: setattr(win, "_dirty_marked", True)
+        win._dirty_marked = False
+
+        app.MainWindow._add_segment(win, 1000, 2000, 2.0)
+        app.MainWindow._copy_segment(win, win._rows[0])
+
+        self.assertEqual(len(win._rows), 2)
+        self.assertEqual(win._rows[0].to_dict(), {"s": 1000, "e": 2000, "speed_override": 2.0})
+        self.assertEqual(win._rows[1].to_dict(), {"s": 1000, "e": 2000, "speed_override": None})
+        self.assertEqual(win._rows[1]._badge.text(), "2")
+        self.assertTrue(win._dirty_marked)
 
 
 if __name__ == "__main__":

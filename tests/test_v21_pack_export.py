@@ -161,12 +161,16 @@ class _PackExportCase(unittest.TestCase):
         app.OUT_DIR = self.root / "out"
         app._get_ffmpeg = lambda: "ffmpeg"
         self.cover_sources = []
+        self.slice_ogg_calls = []
+        self.slice_aff_calls = []
         self.logs = []
 
         def fake_slice_ogg(_in_path, out_path, start, end, speed):
+            self.slice_ogg_calls.append((start, end, speed, Path(out_path).parent.name))
             Path(out_path).write_bytes(f"ogg-{start}-{end}-{speed}".encode())
 
         def fake_slice_aff(_text, _start, _end, speed, warnings=None):
+            self.slice_aff_calls.append((_start, _end, speed))
             return f"AudioOffset:0\n-\ntiming(0,{100 * speed:.2f},4.00);\n"
 
         def fake_cover_renderer(src, dest, log_fn=None):
@@ -351,6 +355,42 @@ class V21PackDoSliceTests(_PackExportCase):
         self.assertEqual(_read_json(songs / "songlist")["songs"][0]["set"], "single")
         self.assertFalse((songs / "packlist").exists())
 
+    def test_each_segment_uses_its_effective_speed_for_outputs_and_songlist(self):
+        (self.song_dir / "1080_base.jpg").write_bytes(b"jacket")
+        code = app.do_slice(
+            self.songs_dir,
+            "prelude_heavensdoor",
+            [
+                {"s": 21000, "e": 23000, "speed_override": 0.5},
+                {"s": 21000, "e": 23000, "speed_override": 0.75},
+                {"s": 60000, "e": 90000, "speed_override": None},
+            ],
+            0.9,
+            self.log,
+            _form(),
+            songlist_enabled=True,
+            current_export_enabled=True,
+            library_export_enabled=False,
+            packlist_enabled=True,
+        )
+
+        self.assertEqual(code, 0, self.logs)
+        songs = app.current_export_songs_dir(app.OUT_DIR)
+        expected_ids = [
+            "prelude_heavensdoor_21000_23000_x0p5",
+            "prelude_heavensdoor_21000_23000_x0p75",
+            "prelude_heavensdoor_60000_90000_x0p9",
+        ]
+        for segment_id in expected_ids:
+            self.assertTrue((songs / segment_id).is_dir(), segment_id)
+        doc = _read_json(songs / "songlist")
+        self.assertEqual([item["id"] for item in doc["songs"]], expected_ids)
+        self.assertIn("0.5×", doc["songs"][0]["title_localized"]["en"])
+        self.assertIn("0.75×", doc["songs"][1]["title_localized"]["en"])
+        self.assertIn("0.9×", doc["songs"][2]["title_localized"]["en"])
+        self.assertEqual([call[2] for call in self.slice_ogg_calls], [0.5, 0.75, 0.9])
+        self.assertEqual([call[2] for call in self.slice_aff_calls], [0.5, 0.75, 0.9])
+
     def test_auto_cover_source_priority_and_fallback(self):
         for present, expected in (
             (("1080_base.jpg", "base.jpg", "1080_base_256.jpg"), "1080_base.jpg"),
@@ -519,6 +559,15 @@ class V21PackUiTests(unittest.TestCase):
         def setEnabled(self, enabled):
             self._enabled = bool(enabled)
 
+        def setVisible(self, visible):
+            self._visible = bool(visible)
+
+        def isVisible(self):
+            return getattr(self, "_visible", True)
+
+        def setStyleSheet(self, _style):
+            pass
+
         def isEnabled(self):
             return self._enabled
 
@@ -536,10 +585,21 @@ class V21PackUiTests(unittest.TestCase):
         def setEnabled(self, enabled):
             self._enabled = bool(enabled)
 
+        def setVisible(self, visible):
+            self._visible = bool(visible)
+
+        def isVisible(self):
+            return getattr(self, "_visible", True)
+
+        def setStyleSheet(self, _style):
+            pass
+
     def _panel(self):
-        panel = object.__new__(app.SonglistPanel)
+        panel = app.SonglistPanel.__new__(app.SonglistPanel)
         panel._enabled = self._Check(False)
         panel._packlist_enabled = self._Check(False)
+        panel.metadata_changed = _FakeSignal()
+        panel.enabled_changed = _FakeSignal()
         panel._pack_inputs = {
             "pack_id": self._Line(),
             "pack_name": self._Line(),
@@ -553,6 +613,15 @@ class V21PackUiTests(unittest.TestCase):
         panel._syncing_shared_pack_id = False
         panel._resetting_source = False
         panel._last_shared_pack_id = ""
+        panel._expanded = False
+        panel._pack_expanded = False
+        panel._body = self._Line()
+        panel._pack_body = self._Line()
+        panel._packlist_item = self._Line()
+        panel._songlist_hint = self._Line()
+        panel._packlist_hint = self._Line()
+        panel._toggle_btn = self._Line()
+        panel._pack_toggle_btn = self._Line()
         panel._inputs = {key: self._Line() for _label, key, _placeholder in app.SonglistPanel._FIELDS}
         panel._rating_plus = self._Check(False)
         panel._refresh_packlist_state()
