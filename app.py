@@ -850,7 +850,15 @@ PACK_COVER_SIZE = (374, 750)
 PACK_COVER_UPLOAD_SUFFIXES = {".png", ".jpg", ".jpeg"}
 PACK_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 PACK_DEFAULT_SECTION = "collab"
-PACK_SECTION_OPTIONS = ("collab", "archive", "free")
+PACK_SECTION_OPTIONS = (
+    "collab",
+    "arcaea",
+    "mainstory",
+    "mainstory2",
+    "sidestory",
+    "archive",
+    "free",
+)
 
 
 def current_export_root(out_dir: Path | None = None) -> Path:

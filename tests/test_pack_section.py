@@ -4,6 +4,17 @@ import unittest
 import app
 
 
+EXPECTED_PACK_SECTION_OPTIONS = (
+    "collab",
+    "arcaea",
+    "mainstory",
+    "mainstory2",
+    "sidestory",
+    "archive",
+    "free",
+)
+
+
 class PackSectionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -16,10 +27,7 @@ class PackSectionTests(unittest.TestCase):
                 cls._qapp = None
 
     def test_pack_section_options_are_stable_and_defaulted(self):
-        self.assertEqual(app.PACK_SECTION_OPTIONS[0], "collab")
-        self.assertIn("collab", app.PACK_SECTION_OPTIONS)
-        self.assertEqual(len(app.PACK_SECTION_OPTIONS), len(set(app.PACK_SECTION_OPTIONS)))
-        self.assertTrue(app.PACK_SECTION_OPTIONS)
+        self.assertEqual(app.PACK_SECTION_OPTIONS, EXPECTED_PACK_SECTION_OPTIONS)
         self.assertEqual(app.default_pack_form_for_song("song")["pack_section"], "collab")
 
     def test_pack_template_section_fallbacks_are_safe(self):
@@ -38,15 +46,17 @@ class PackSectionTests(unittest.TestCase):
                 self.assertNotEqual(entry["section"], "unknown_value")
 
     def test_pack_template_section_flows_to_packlist_json(self):
-        data = app.default_pack_form_for_song("song")
-        data["pack_section"] = "archive"
+        for section in EXPECTED_PACK_SECTION_OPTIONS:
+            with self.subTest(section=section):
+                data = app.default_pack_form_for_song("song")
+                data["pack_section"] = section
 
-        template = app.pack_template_from_form(data, "song")
-        document = app.build_packlist_document([app.build_packlist_entry(template)])
+                template = app.pack_template_from_form(data, "song")
+                document = app.build_packlist_document([app.build_packlist_entry(template)])
 
-        encoded = json.loads(json.dumps(document, ensure_ascii=False))
-        self.assertEqual(template.section, "archive")
-        self.assertEqual(encoded["packs"][0]["section"], "archive")
+                encoded = json.loads(json.dumps(document, ensure_ascii=False))
+                self.assertEqual(template.section, section)
+                self.assertEqual(encoded["packs"][0]["section"], section)
 
     def test_section_combo_is_not_editable_and_emits_metadata_changed(self):
         panel = app.SonglistPanel()
