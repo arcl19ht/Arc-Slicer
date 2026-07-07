@@ -1,4 +1,6 @@
 ﻿import sys
+import json
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -176,10 +178,12 @@ class _Panel:
         self._external_merge_worker = None
         self._external_merge_phase = "idle"
         self._external_merge_generation = 0
+        self._external_merge_restore_message = ""
         self._current_export_dirty = False
         self._last_run_current_export_enabled = True
         self._worker = None
         self._slicer_running = False
+        self._cfg = {"existing": "kept"}
         self.logs = []
         self._btn_external_choose = _Fake()
         self._btn_external_check = _Fake()
@@ -199,6 +203,9 @@ class _Panel:
 
     def _set_external_merge_view(self, view):
         return app.MainWindow._set_external_merge_view(self, view)
+
+    def _set_external_merge_target_path(self, path):
+        return app.MainWindow._set_external_merge_target_path(self, path)
 
     def _invalidate_external_merge_plan(self, message=""):
         return app.MainWindow._invalidate_external_merge_plan(self, message)
@@ -260,6 +267,14 @@ class _RaisingFileDialog:
     @staticmethod
     def getExistingDirectory(*_args, **_kwargs):
         raise AssertionError("file dialog should not open")
+
+
+class _FileDialogReturning:
+    path = ""
+
+    @staticmethod
+    def getExistingDirectory(*_args, **_kwargs):
+        return _FileDialogReturning.path
 
 
 class ExternalMergeUiStateTests(unittest.TestCase):
@@ -435,6 +450,150 @@ class ExternalMergeUiStateTests(unittest.TestCase):
         self.assertIsNone(panel._external_merge_plan)
         self.assertFalse(panel._btn_external_confirm.isEnabled())
         self.assertIn("changed", panel._external_merge_detail_label.text())
+
+    def test_browsing_external_merge_target_persists_config_and_clears_plan(self):
+        panel = _Panel()
+        old_dialog = app.QFileDialog
+        old_config_path = app.CONFIG_PATH
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            target = root / "target" / "songs"
+            target.mkdir(parents=True)
+            config_path = root / "config.json"
+            _FileDialogReturning.path = str(target)
+            try:
+                app.QFileDialog = _FileDialogReturning
+                app.CONFIG_PATH = config_path
+                app.MainWindow._browse_external_merge_target(panel)
+            finally:
+                app.QFileDialog = old_dialog
+                app.CONFIG_PATH = old_config_path
+
+            saved = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["existing"], "kept")
+            self.assertEqual(saved[app.EXTERNAL_MERGE_TARGET_CONFIG_KEY], str(target.absolute()))
+            self.assertEqual(panel._external_merge_target, target.absolute())
+            self.assertIsNone(panel._external_merge_plan)
+            self.assertFalse(panel._btn_external_confirm.isEnabled())
+
+    def test_browsing_invalid_external_merge_target_does_not_persist_or_replace_target(self):
+        panel = _Panel()
+        old_target = panel._external_merge_target
+        old_dialog = app.QFileDialog
+        old_config_path = app.CONFIG_PATH
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            invalid_file = root / "not_songs.txt"
+            invalid_file.write_text("nope", encoding="utf-8")
+            config_path = root / "config.json"
+            _FileDialogReturning.path = str(invalid_file)
+            try:
+                app.QFileDialog = _FileDialogReturning
+                app.CONFIG_PATH = config_path
+                app.MainWindow._browse_external_merge_target(panel)
+            finally:
+                app.QFileDialog = old_dialog
+                app.CONFIG_PATH = old_config_path
+
+            self.assertEqual(panel._external_merge_target, old_target)
+            self.assertFalse(config_path.exists())
+            self.assertIn("上次目标目录不可用，请重新选择", panel._external_merge_detail_label.text())
+
+    def test_restore_external_merge_target_keeps_plan_empty_and_does_not_start_worker(self):
+        panel = _Panel()
+        panel._external_merge_target = None
+        panel._external_merge_plan = _plan()
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "target" / "songs"
+            target.mkdir(parents=True)
+            panel._cfg = {app.EXTERNAL_MERGE_TARGET_CONFIG_KEY: str(target)}
+            _FakeWorker.created = []
+
+            app.MainWindow._restore_external_merge_target_from_config(panel)
+
+            self.assertEqual(panel._external_merge_target, target.absolute())
+            self.assertIsNone(panel._external_merge_plan)
+            self.assertEqual(_FakeWorker.created, [])
+            self.assertFalse(panel._btn_external_confirm.isEnabled())
+            self.assertIn("已恢复上次目标目录", panel._external_merge_detail_label.text())
+
+    def test_dirty_notice_has_priority_over_restored_external_merge_target(self):
+        panel = _Panel()
+        panel._external_merge_target = None
+        panel._current_export_dirty = True
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "target" / "songs"
+            target.mkdir(parents=True)
+            panel._cfg = {app.EXTERNAL_MERGE_TARGET_CONFIG_KEY: str(target)}
+
+            app.MainWindow._restore_external_merge_target_from_config(panel)
+
+            self.assertEqual(panel._external_merge_target, target.absolute())
+            self.assertIn("当前配置尚未导出", panel._external_merge_detail_label.text())
+            self.assertNotIn("已恢复上次目标目录", panel._external_merge_detail_label.text())
+            self.assertFalse(panel._btn_external_check.isEnabled())
+
+    def test_invalid_restored_external_merge_target_is_ignored_without_config_write(self):
+        cases = [
+            "",
+            123,
+            "missing",
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            file_path = root / "file.txt"
+            file_path.write_text("not a directory", encoding="utf-8")
+            cases.append(str(file_path))
+            for value in cases:
+                with self.subTest(value=value):
+                    panel = _Panel()
+                    panel._external_merge_target = None
+                    panel._external_merge_plan = _plan()
+                    panel._cfg = {app.EXTERNAL_MERGE_TARGET_CONFIG_KEY: value}
+                    _FakeWorker.created = []
+
+                    app.MainWindow._restore_external_merge_target_from_config(panel)
+
+                    self.assertIsNone(panel._external_merge_target)
+                    self.assertIsNone(panel._external_merge_plan)
+                    self.assertEqual(_FakeWorker.created, [])
+                    self.assertIn("上次目标目录不可用，请重新选择", panel._external_merge_detail_label.text())
+
+    def test_current_and_library_export_targets_are_not_restored(self):
+        for value in (app.CURRENT_EXPORT_SONGS_DIR, app.LIBRARY_EXPORT_SONGS_DIR):
+            with self.subTest(value=value):
+                panel = _Panel()
+                panel._external_merge_target = None
+                panel._cfg = {app.EXTERNAL_MERGE_TARGET_CONFIG_KEY: str(value)}
+                with tempfile.TemporaryDirectory() as td:
+                    root = Path(td)
+                    old_current = app.CURRENT_EXPORT_SONGS_DIR
+                    old_library = app.LIBRARY_EXPORT_SONGS_DIR
+                    try:
+                        app.CURRENT_EXPORT_SONGS_DIR = root / "current_export" / "songs"
+                        app.LIBRARY_EXPORT_SONGS_DIR = root / "library_export" / "songs"
+                        app.CURRENT_EXPORT_SONGS_DIR.mkdir(parents=True)
+                        app.LIBRARY_EXPORT_SONGS_DIR.mkdir(parents=True)
+                        panel._cfg[app.EXTERNAL_MERGE_TARGET_CONFIG_KEY] = str(
+                            app.CURRENT_EXPORT_SONGS_DIR if value == old_current else app.LIBRARY_EXPORT_SONGS_DIR
+                        )
+
+                        app.MainWindow._restore_external_merge_target_from_config(panel)
+                    finally:
+                        app.CURRENT_EXPORT_SONGS_DIR = old_current
+                        app.LIBRARY_EXPORT_SONGS_DIR = old_library
+
+                self.assertIsNone(panel._external_merge_target)
+                self.assertIn("上次目标目录不可用，请重新选择", panel._external_merge_detail_label.text())
+
+    def test_old_config_without_external_merge_target_loads_quietly(self):
+        panel = _Panel()
+        panel._external_merge_target = None
+        panel._cfg = {"songs_dir": "custom"}
+        app.MainWindow._restore_external_merge_target_from_config(panel)
+
+        self.assertIsNone(panel._external_merge_target)
+        self.assertEqual(panel._external_merge_detail_label.text(), "")
 
     def test_dirty_current_export_disables_external_merge_until_successful_slice(self):
         panel = _Panel()

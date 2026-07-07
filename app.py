@@ -93,6 +93,7 @@ CURRENT_EXPORT_SONGS_DIR = CURRENT_EXPORT_ROOT / "songs"
 LIBRARY_EXPORT_ROOT = OUT_DIR / "library_export"
 LIBRARY_EXPORT_SONGS_DIR = LIBRARY_EXPORT_ROOT / "songs"
 EXTERNAL_MERGE_BACKUP_ROOT = DATA_ROOT / "backups" / "external_merge"
+EXTERNAL_MERGE_TARGET_CONFIG_KEY = "external_merge_target_songs_dir"
 CONFIG_PATH = DATA_ROOT / "config.json"
 SLIDES_PATH = DATA_ROOT / "slides.json"
 SONGLIST_EXAMPLE_PATH = APP_DIR / "songlist_example.json"
@@ -2080,6 +2081,26 @@ def external_merge_can_confirm(
     return bool(plan and plan.is_ready and external_merge_action_count(plan) > 0 and not busy)
 
 
+def _external_merge_target_status(value: object) -> tuple[Path | None, str]:
+    if not isinstance(value, str) or not value.strip():
+        return None, "上次目标目录不可用，请重新选择。"
+    path = Path(value).expanduser()
+    try:
+        if not path.exists():
+            return None, "上次目标目录不可用，请重新选择。"
+        if not path.is_dir():
+            return None, "上次目标目录不可用，请重新选择。"
+        if _path_is_link_or_junction(path):
+            return None, "上次目标目录不可用，请重新选择。"
+    except OSError:
+        return None, "上次目标目录不可用，请重新选择。"
+
+    resolved = _resolved(path)
+    if resolved in {_resolved(CURRENT_EXPORT_SONGS_DIR), _resolved(LIBRARY_EXPORT_SONGS_DIR)}:
+        return None, "上次目标目录不可用，请重新选择。"
+    return path.absolute(), ""
+
+
 def external_merge_dirty_view_model(
     target_songs_dir: Path | str | None = None,
     *,
@@ -3691,6 +3712,7 @@ class MainWindow(QMainWindow):
         self._external_merge_plan: external_merge.ExternalMergePlan | None = None
         self._external_merge_phase = "idle"
         self._external_merge_generation = 0
+        self._external_merge_restore_message = ""
         self._slicer_running = False
         self._current_export_dirty = True
         self._last_run_current_export_enabled = True
@@ -3712,6 +3734,7 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         self._setup_ui()
+        self._restore_external_merge_target_from_config()
         if self._migration_report.has_activity():
             self._push_log(self._migration_report.message(), "muted")
         self._suppress_source_reset = True
@@ -4145,6 +4168,28 @@ class MainWindow(QMainWindow):
             external_merge_can_confirm(self._external_merge_plan, busy=busy) and not slicing and not dirty
         )
 
+    def _set_external_merge_target_path(self, path: Path | str) -> None:
+        path = Path(path)
+        self._external_merge_target = path
+        if hasattr(self, "_external_merge_target_label"):
+            text = str(path)
+            self._external_merge_target_label.setText(text)
+            self._external_merge_target_label.setToolTip(text)
+
+    def _restore_external_merge_target_from_config(self) -> None:
+        target, message = _external_merge_target_status(
+            self._cfg.get(EXTERNAL_MERGE_TARGET_CONFIG_KEY)
+        )
+        self._external_merge_plan = None
+        if target is not None:
+            self._set_external_merge_target_path(target)
+            self._external_merge_restore_message = "已恢复上次目标目录，请检查合并计划。"
+            self._invalidate_external_merge_plan(self._external_merge_restore_message)
+            return
+        if EXTERNAL_MERGE_TARGET_CONFIG_KEY in self._cfg:
+            self._external_merge_restore_message = message
+            self._invalidate_external_merge_plan(message)
+
     def _invalidate_external_merge_plan(self, message: str = "") -> None:
         self._external_merge_plan = None
         if bool(getattr(self, "_current_export_dirty", False)):
@@ -4160,6 +4205,8 @@ class MainWindow(QMainWindow):
             target_songs_dir=self._external_merge_target,
             backup_root=EXTERNAL_MERGE_BACKUP_ROOT,
         )
+        if not message and self._external_merge_restore_message:
+            message = self._external_merge_restore_message
         if message:
             view["detail"] = view["detail"] + "\n" + message
         self._set_external_merge_view(view)
@@ -4171,9 +4218,14 @@ class MainWindow(QMainWindow):
         path = QFileDialog.getExistingDirectory(self, "选择目标壳 songs 目录", start)
         if not path:
             return
-        self._external_merge_target = Path(path)
-        self._external_merge_target_label.setText(path)
-        self._external_merge_target_label.setToolTip(path)
+        target, message = _external_merge_target_status(path)
+        if target is None:
+            self._invalidate_external_merge_plan(message)
+            return
+        self._external_merge_restore_message = ""
+        self._set_external_merge_target_path(target)
+        self._cfg[EXTERNAL_MERGE_TARGET_CONFIG_KEY] = str(target)
+        save_config(self._cfg)
         self._invalidate_external_merge_plan("目标路径已变更，请重新检查合并计划。")
 
     def _check_external_merge_plan(self) -> None:
