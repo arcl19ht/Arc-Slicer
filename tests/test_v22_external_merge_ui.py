@@ -179,6 +179,7 @@ class _Panel:
         self._external_merge_phase = "idle"
         self._external_merge_generation = 0
         self._external_merge_restore_message = ""
+        self._external_merge_restore_invalid = False
         self._current_export_dirty = False
         self._last_run_current_export_enabled = True
         self._worker = None
@@ -533,6 +534,21 @@ class ExternalMergeUiStateTests(unittest.TestCase):
             self.assertNotIn("已恢复上次目标目录", panel._external_merge_detail_label.text())
             self.assertFalse(panel._btn_external_check.isEnabled())
 
+    def test_dirty_notice_keeps_invalid_restored_target_message(self):
+        panel = _Panel()
+        panel._external_merge_target = None
+        panel._current_export_dirty = True
+        panel._cfg = {app.EXTERNAL_MERGE_TARGET_CONFIG_KEY: "missing"}
+
+        app.MainWindow._restore_external_merge_target_from_config(panel)
+
+        self.assertIsNone(panel._external_merge_target)
+        self.assertIn("需要先运行切片", panel._external_merge_status_label.text())
+        self.assertIn("当前配置尚未导出，请先运行切片", panel._external_merge_detail_label.text())
+        self.assertIn("上次目标目录不可用，请重新选择", panel._external_merge_detail_label.text())
+        self.assertFalse(panel._btn_external_check.isEnabled())
+        self.assertFalse(panel._btn_external_confirm.isEnabled())
+
     def test_invalid_restored_external_merge_target_is_ignored_without_config_write(self):
         cases = [
             "",
@@ -608,6 +624,7 @@ class ExternalMergeUiStateTests(unittest.TestCase):
         self.assertFalse(panel._btn_external_confirm.isEnabled())
         self.assertIn("需要先运行切片", panel._external_merge_status_label.text())
         self.assertIn("当前配置尚未导出", panel._external_merge_detail_label.text())
+        self.assertNotIn("上次目标目录不可用", panel._external_merge_detail_label.text())
         self.assertIn("#FFF4E6", panel._external_merge_detail_label._stylesheet)
 
         app.MainWindow._invalidate_external_merge_plan(panel, "目标路径已变更")

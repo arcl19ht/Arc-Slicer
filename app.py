@@ -2105,19 +2105,23 @@ def external_merge_dirty_view_model(
     target_songs_dir: Path | str | None = None,
     *,
     backup_root: Path = EXTERNAL_MERGE_BACKUP_ROOT,
+    extra_message: str = "",
 ) -> dict:
     target_text = str(target_songs_dir) if target_songs_dir else "未选择"
+    detail = (
+        "⚠ 当前配置尚未导出，请先运行切片。\n"
+        "导出成功后可检查合并计划。\n"
+        f"目标壳 songs 目录: {target_text}\n"
+        f"备份根目录: {backup_root}"
+    )
+    if extra_message:
+        detail += f"\n{extra_message}"
     return {
         "state": "dirty",
         "ready": False,
         "can_confirm": False,
         "title": "外部目标壳合并：需要先运行切片",
-        "detail": (
-            "⚠ 当前配置尚未导出，请先运行切片。\n"
-            "导出成功后可检查合并计划。\n"
-            f"目标壳 songs 目录: {target_text}\n"
-            f"备份根目录: {backup_root}"
-        ),
+        "detail": detail,
     }
 
 
@@ -3713,6 +3717,7 @@ class MainWindow(QMainWindow):
         self._external_merge_phase = "idle"
         self._external_merge_generation = 0
         self._external_merge_restore_message = ""
+        self._external_merge_restore_invalid = False
         self._slicer_running = False
         self._current_export_dirty = True
         self._last_run_current_export_enabled = True
@@ -4184,10 +4189,12 @@ class MainWindow(QMainWindow):
         if target is not None:
             self._set_external_merge_target_path(target)
             self._external_merge_restore_message = "已恢复上次目标目录，请检查合并计划。"
+            self._external_merge_restore_invalid = False
             self._invalidate_external_merge_plan(self._external_merge_restore_message)
             return
         if EXTERNAL_MERGE_TARGET_CONFIG_KEY in self._cfg:
             self._external_merge_restore_message = message
+            self._external_merge_restore_invalid = bool(message)
             self._invalidate_external_merge_plan(message)
 
     def _invalidate_external_merge_plan(self, message: str = "") -> None:
@@ -4197,6 +4204,11 @@ class MainWindow(QMainWindow):
                 external_merge_dirty_view_model(
                     self._external_merge_target,
                     backup_root=EXTERNAL_MERGE_BACKUP_ROOT,
+                    extra_message=(
+                        self._external_merge_restore_message
+                        if self._external_merge_restore_invalid
+                        else ""
+                    ),
                 )
             )
             return
