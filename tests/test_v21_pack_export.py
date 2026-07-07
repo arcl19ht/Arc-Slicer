@@ -215,6 +215,7 @@ class V21PackTemplateTests(unittest.TestCase):
         data = app.default_pack_form_for_song("source_song")
         self.assertEqual(data["pack_id"], "source_song")
         self.assertEqual(data["pack_name"], "source_song")
+        self.assertEqual(data["pack_description"], "")
         self.assertEqual(data["pack_img"], "select_source_song.png")
 
     def test_pack_template_rejects_invalid_id_and_img(self):
@@ -252,6 +253,12 @@ class V21PackTemplateTests(unittest.TestCase):
         self.assertEqual(entry["section"], "collab")
         self.assertEqual(entry["plus_character"], -1)
 
+    def test_empty_pack_description_stays_empty_in_template_and_packlist(self):
+        template = app.pack_template_from_form(_form(pack_description=""), "source")
+        entry = app.build_packlist_entry(template)
+        self.assertEqual(template.description, "")
+        self.assertEqual(entry["description_localized"]["en"], "")
+
     def test_cover_crop_geometry_center_crop(self):
         self.assertEqual(app._cover_crop_geometry(1000, 1000), (750, 750, 188, 0))
         self.assertEqual(app._cover_crop_geometry(100, 1000), (374, 3740, 0, 1495))
@@ -284,6 +291,24 @@ class V21PackDoSliceTests(_PackExportCase):
         self.assertEqual(pack["plus_character"], -1)
         self.assertTrue((songs / "pack" / "select_prelude_pack.png").is_file())
         self.assertEqual(self.cover_sources, ["1080_base.jpg"])
+
+    def test_empty_pack_description_exports_empty_localized_description(self):
+        (self.song_dir / "1080_base.jpg").write_bytes(b"jacket")
+        code = self.do_slice(form=_form(pack_description=""))
+
+        self.assertEqual(code, 0, self.logs)
+        songs = app.current_export_songs_dir(app.OUT_DIR)
+        pack = _read_json(songs / "packlist")["packs"][0]
+        self.assertEqual(pack["description_localized"]["en"], "")
+
+    def test_explicit_pack_description_is_preserved_in_export(self):
+        (self.song_dir / "1080_base.jpg").write_bytes(b"jacket")
+        code = self.do_slice(form=_form(pack_description="风暴尾杀专项训练"))
+
+        self.assertEqual(code, 0, self.logs)
+        songs = app.current_export_songs_dir(app.OUT_DIR)
+        pack = _read_json(songs / "packlist")["packs"][0]
+        self.assertEqual(pack["description_localized"]["en"], "风暴尾杀专项训练")
 
     def test_packlist_export_uses_pack_id_as_songlist_set_even_if_set_differs(self):
         (self.song_dir / "1080_base.jpg").write_bytes(b"jacket")
@@ -607,6 +632,7 @@ class V21PackUiTests(unittest.TestCase):
         self.assertEqual(data["chart_designer"], "")
         self.assertEqual(data["jacket_designer"], "")
         self.assertEqual(data["rating"], "")
+        self.assertEqual(data["pack_description"], "")
         self.assertFalse(data["rating_plus"])
         self.assertEqual(data["pack_cover_source"], "auto")
         self.assertEqual(data["pack_cover_path"], "")
