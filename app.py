@@ -3007,6 +3007,7 @@ class SonglistPanel(QFrame):
     """可折叠的 Songlist 元数据配置面板。"""
 
     enabled_changed = pyqtSignal()
+    metadata_changed = pyqtSignal()
 
     # 字段定义：(显示标签, key, 占位提示)
     _FIELDS = [
@@ -3028,6 +3029,9 @@ class SonglistPanel(QFrame):
         super().__init__(parent)
         self._expanded = False
         self._pack_expanded = False
+        self._syncing_shared_pack_id = False
+        self._resetting_source = False
+        self._last_shared_pack_id = ""
         self.setStyleSheet("QFrame { background: transparent; border: none; }")
         self._setup_ui()
 
@@ -3139,6 +3143,8 @@ class SonglistPanel(QFrame):
             col_lay.addWidget(inp)
             grid.addLayout(col_lay, row, col)
             self._inputs[key] = inp
+            if key != "set":
+                inp.textChanged.connect(self._emit_metadata_changed)
 
         body_lay.addLayout(grid)
 
@@ -3193,6 +3199,8 @@ class SonglistPanel(QFrame):
             col_lay.addWidget(inp)
             pack_grid.addLayout(col_lay, row, col)
             self._pack_inputs[key] = inp
+            if key != "pack_id":
+                inp.textChanged.connect(self._emit_metadata_changed)
         pack_lay.addLayout(pack_grid)
 
         cover_row = QHBoxLayout()
@@ -3201,8 +3209,10 @@ class SonglistPanel(QFrame):
         self._pack_upload_check.setStyleSheet(
             f"color: {C_TEXT2}; font-size: 13px; background: transparent; border: none;"
         )
+        self._pack_upload_check.clicked.connect(self._emit_metadata_changed)
         self._pack_cover_path = QLineEdit()
         self._pack_cover_path.setPlaceholderText("PNG / JPG / JPEG")
+        self._pack_cover_path.textChanged.connect(self._emit_metadata_changed)
         btn_cover = QPushButton("选择图片")
         btn_cover.setObjectName("btnSec")
         btn_cover.clicked.connect(self._browse_pack_cover)
@@ -3212,6 +3222,8 @@ class SonglistPanel(QFrame):
         pack_lay.addLayout(cover_row)
         self._pack_controls = [pack_frame, *self._pack_inputs.values(), self._pack_upload_check, self._pack_cover_path, btn_cover]
         self._last_pack_default_source = ""
+        self._inputs["set"].textChanged.connect(self._on_set_pack_id_changed)
+        self._pack_inputs["pack_id"].textChanged.connect(self._on_pack_id_changed)
         pack_body_lay.addWidget(pack_frame)
         self._refresh_packlist_state()
 
@@ -3240,6 +3252,52 @@ class SonglistPanel(QFrame):
         if not self._packlist_enabled.isChecked():
             self._pack_expanded = False
         self._refresh_packlist_state()
+        self.enabled_changed.emit()
+        self._emit_metadata_changed()
+
+    def _emit_metadata_changed(self, *_args):
+        if not getattr(self, "_resetting_source", False) and not getattr(self, "_syncing_shared_pack_id", False):
+            self.metadata_changed.emit()
+
+    def _sync_shared_pack_id(self, value: str, target: QLineEdit):
+        if target.text() == value:
+            return
+        self._syncing_shared_pack_id = True
+        try:
+            target.setText(value)
+        finally:
+            self._syncing_shared_pack_id = False
+
+    def _update_pack_img_for_shared_pack_id(self, old_pack_id: str, new_pack_id: str):
+        img_input = self._pack_inputs["pack_img"]
+        current_img = img_input.text().strip()
+        old_default = default_pack_img_name(old_pack_id) if old_pack_id else ""
+        if not current_img or current_img == old_default:
+            self._syncing_shared_pack_id = True
+            try:
+                img_input.setText(default_pack_img_name(new_pack_id) if new_pack_id else "")
+            finally:
+                self._syncing_shared_pack_id = False
+
+    def _on_set_pack_id_changed(self, text: str):
+        if self._syncing_shared_pack_id:
+            return
+        value = str(text).strip()
+        old_pack_id = self._last_shared_pack_id
+        self._sync_shared_pack_id(value, self._pack_inputs["pack_id"])
+        self._update_pack_img_for_shared_pack_id(old_pack_id, value)
+        self._last_shared_pack_id = value
+        self._emit_metadata_changed()
+
+    def _on_pack_id_changed(self, text: str):
+        if self._syncing_shared_pack_id:
+            return
+        value = str(text).strip()
+        old_pack_id = self._last_shared_pack_id
+        self._sync_shared_pack_id(value, self._inputs["set"])
+        self._update_pack_img_for_shared_pack_id(old_pack_id, value)
+        self._last_shared_pack_id = value
+        self._emit_metadata_changed()
 
     def _set_section_button_state(self, button: QPushButton, active: bool, expanded: bool):
         button.setEnabled(bool(active))
@@ -3306,6 +3364,7 @@ class SonglistPanel(QFrame):
             self._pack_cover_path.setText(path)
             self._pack_upload_check.setChecked(True)
             self._refresh_packlist_state()
+            self._emit_metadata_changed()
 
     def update_pack_defaults(self, source_id: str):
         source_id = str(source_id or "").strip()
@@ -3326,11 +3385,42 @@ class SonglistPanel(QFrame):
                 inp.setText(new_defaults[key])
         self._last_pack_default_source = source_id
 
+    def reset_for_source(self, source_id: str):
+        source_id = str(source_id or "").strip()
+        if not source_id or "目录为空" in source_id:
+            return
+        defaults = default_pack_form_for_song(source_id)
+        self._resetting_source = True
+        try:
+            for key in ("artist", "bpm", "bpm_base", "purchase", "bg", "version",
+                        "chart_designer", "jacket_designer", "rating"):
+                self._inputs[key].setText("")
+            self._inputs["side"].setText("0")
+            self._inputs["title_base"].setText(source_id)
+            self._inputs["set"].setText(defaults["pack_id"])
+            self._pack_inputs["pack_id"].setText(defaults["pack_id"])
+            self._pack_inputs["pack_name"].setText(defaults["pack_name"])
+            self._pack_inputs["pack_description"].setText("")
+            self._pack_inputs["pack_img"].setText(defaults["pack_img"])
+            self._rating_plus.setChecked(False)
+            self._pack_upload_check.setChecked(False)
+            self._pack_cover_path.setText("")
+            self._last_pack_default_source = source_id
+            self._last_shared_pack_id = defaults["pack_id"]
+        finally:
+            self._resetting_source = False
+        self._refresh_packlist_state()
+
     def get_form_data(self) -> dict:
         data = {key: self._inputs[key].text().strip() for _label, key, _placeholder in self._FIELDS}
+        set_value = data.get("set", "")
+        pack_value = self._pack_inputs["pack_id"].text().strip()
+        shared_pack_id = pack_value if pack_value and set_value in ("", "single") else (set_value or pack_value)
+        data["set"] = shared_pack_id
         data["rating_plus"] = self._rating_plus.isChecked()
         for key, inp in self._pack_inputs.items():
             data[key] = inp.text().strip()
+        data["pack_id"] = shared_pack_id
         pack_id = data.get("pack_id") or ""
         if not data.get("pack_img") and pack_id:
             data["pack_img"] = default_pack_img_name(pack_id)
@@ -3366,6 +3456,7 @@ class SonglistPanel(QFrame):
         """从保存的数据恢复面板内容。"""
         if not meta:
             return
+        self._resetting_source = True
         if "songlist_enabled" in meta:
             self.set_songlist_enabled(bool(meta["songlist_enabled"]))
         if "packlist_enabled" in meta:
@@ -3387,6 +3478,13 @@ class SonglistPanel(QFrame):
                 self._inputs[k].setText(str(meta[k]))
         if "rating_plus" in meta:
             self._rating_plus.setChecked(bool(meta["rating_plus"]))
+        set_value = self._inputs["set"].text().strip()
+        pack_value = self._pack_inputs["pack_id"].text().strip()
+        shared_pack_id = pack_value if pack_value and set_value in ("", "single") else (set_value or pack_value)
+        self._inputs["set"].setText(shared_pack_id)
+        self._pack_inputs["pack_id"].setText(shared_pack_id)
+        self._last_shared_pack_id = shared_pack_id
+        self._resetting_source = False
         self._refresh_packlist_state()
 
 
@@ -3405,6 +3503,10 @@ class MainWindow(QMainWindow):
         self._external_merge_phase = "idle"
         self._external_merge_generation = 0
         self._slicer_running = False
+        self._current_export_dirty = True
+        self._last_run_current_export_enabled = True
+        self._current_source_id = ""
+        self._suppress_source_reset = False
         self._uid    = 0
         self._arc_warning_timer = QTimer(self)
         self._arc_warning_timer.setSingleShot(True)
@@ -3423,7 +3525,12 @@ class MainWindow(QMainWindow):
         self._setup_ui()
         if self._migration_report.has_activity():
             self._push_log(self._migration_report.message(), "muted")
-        self._load_initial_data()
+        self._suppress_source_reset = True
+        try:
+            self._load_initial_data()
+        finally:
+            self._suppress_source_reset = False
+            self._current_source_id = self._song_box.currentText()
 
     # ── UI 构建 ───────────────────────────────────────────────────────────────
 
@@ -3512,9 +3619,7 @@ class MainWindow(QMainWindow):
         song_col.addWidget(field_label("曲目 SONG ID"))
         self._song_box = QComboBox()
         self._song_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self._song_box.currentTextChanged.connect(lambda text: self._songlist_panel.update_pack_defaults(text))
-        self._song_box.currentTextChanged.connect(lambda _text: self._schedule_arc_cut_warning_refresh())
-        self._song_box.currentTextChanged.connect(lambda _text: self._refresh_current_audio_duration())
+        self._song_box.currentTextChanged.connect(self._on_song_changed)
         song_col.addWidget(self._song_box)
         tb_lay.addLayout(song_col, 1)
 
@@ -3523,6 +3628,7 @@ class MainWindow(QMainWindow):
         speed_col.addWidget(field_label("速度 SPEED"))
         self._speed_input = QLineEdit("1.0")
         self._speed_input.setFixedWidth(124)
+        self._speed_input.textChanged.connect(self._mark_current_export_dirty)
         speed_col.addWidget(self._speed_input)
         tb_lay.addLayout(speed_col)
 
@@ -3560,6 +3666,8 @@ class MainWindow(QMainWindow):
         # ── Songlist 配置面板
         self._songlist_panel = SonglistPanel()
         self._songlist_panel.enabled_changed.connect(self._refresh_export_target_state)
+        self._songlist_panel.enabled_changed.connect(self._mark_current_export_dirty)
+        self._songlist_panel.metadata_changed.connect(self._mark_current_export_dirty)
         lay.addWidget(self._songlist_panel)
         lay.addSpacing(16)
 
@@ -3578,6 +3686,8 @@ class MainWindow(QMainWindow):
         self._current_export_check.setChecked(True)
         self._library_export_check = QCheckBox("更新总导出包")
         self._library_export_check.setChecked(True)
+        self._current_export_check.clicked.connect(self._mark_current_export_dirty)
+        self._library_export_check.clicked.connect(self._mark_current_export_dirty)
         for box in (self._current_export_check, self._library_export_check):
             box.setStyleSheet(
                 f"color: {C_TEXT2}; font-size: 13px; background: transparent; border: none;"
@@ -3772,6 +3882,29 @@ class MainWindow(QMainWindow):
         if hasattr(self._songlist_panel, "_refresh_packlist_state"):
             self._songlist_panel._refresh_packlist_state()
 
+    def _on_song_changed(self, song_id: str):
+        song_id = str(song_id or "").strip()
+        if getattr(self, "_suppress_source_reset", False):
+            return
+        if song_id == self._current_source_id:
+            self._refresh_current_audio_duration()
+            self._schedule_arc_cut_warning_refresh()
+            return
+        self._current_source_id = song_id
+        if hasattr(self._songlist_panel, "reset_for_source"):
+            self._songlist_panel.reset_for_source(song_id)
+        self._clear_segments()
+        self._add_segment(None, None)
+        self._refresh_current_audio_duration()
+        self._schedule_arc_cut_warning_refresh()
+        self._mark_current_export_dirty()
+
+    def _mark_current_export_dirty(self, *_args):
+        if getattr(self, "_suppress_source_reset", False):
+            return
+        self._current_export_dirty = True
+        self._invalidate_external_merge_plan("当前配置尚未导出，请先运行切片。")
+
     def _slicer_is_running(self) -> bool:
         return bool(self.__dict__.get("_slicer_running", False))
 
@@ -3791,14 +3924,15 @@ class MainWindow(QMainWindow):
             return
         busy = self._external_merge_is_busy()
         slicing = self._slicer_is_running()
+        dirty = bool(getattr(self, "_current_export_dirty", False))
         if hasattr(self, "_btn_run"):
             self._btn_run.setEnabled(not busy and not slicing)
         self._btn_external_choose.setEnabled(not busy and not slicing)
         self._btn_external_check.setEnabled(
-            external_merge_can_check(self._external_merge_target, busy=busy, slicing=slicing)
+            external_merge_can_check(self._external_merge_target, busy=busy, slicing=slicing) and not dirty
         )
         self._btn_external_confirm.setEnabled(
-            external_merge_can_confirm(self._external_merge_plan, busy=busy) and not slicing
+            external_merge_can_confirm(self._external_merge_plan, busy=busy) and not slicing and not dirty
         )
 
     def _invalidate_external_merge_plan(self, message: str = "") -> None:
@@ -3972,6 +4106,7 @@ class MainWindow(QMainWindow):
         row.changed.connect(self._refresh_seg_header)
         row.changed.connect(self._schedule_arc_cut_warning_refresh)
         row.changed.connect(self._schedule_segment_time_validation)
+        row.changed.connect(self._mark_current_export_dirty)
         row.end_cap_requested.connect(self._set_row_end_to_audio_duration)
         self._rows.append(row)
         self._segs_layout.addWidget(row)
@@ -3991,6 +4126,7 @@ class MainWindow(QMainWindow):
         self._refresh_seg_header()
         self._schedule_segment_time_validation()
         self._schedule_arc_cut_warning_refresh()
+        self._mark_current_export_dirty()
 
     def _refresh_seg_header(self):
         total = 0
@@ -4191,6 +4327,7 @@ class MainWindow(QMainWindow):
             self._show_segment_validation_error(*segment_error)
             return
         data = self._collect(speed)
+        self._last_run_current_export_enabled = bool(data.get("current_export_enabled", True))
         if not data["song_id"] or "目录为空" in data["song_id"]:
             self._push_log("✗ 请先选择曲目 Song ID", "err")
             return
@@ -4243,7 +4380,11 @@ class MainWindow(QMainWindow):
     def _on_done(self, code: int):
         self._set_running(False)
         if code == 0:
-            self._invalidate_external_merge_plan("current_export 已更新，请重新检查外部合并计划。")
+            if getattr(self, "_last_run_current_export_enabled", True):
+                self._current_export_dirty = False
+                self._invalidate_external_merge_plan("current_export 已更新，请重新检查外部合并计划。")
+            else:
+                self._mark_current_export_dirty()
 
     def _set_running(self, on: bool):
         self._slicer_running = bool(on)

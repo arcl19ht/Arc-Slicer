@@ -285,6 +285,38 @@ class V21PackDoSliceTests(_PackExportCase):
         self.assertTrue((songs / "pack" / "select_prelude_pack.png").is_file())
         self.assertEqual(self.cover_sources, ["1080_base.jpg"])
 
+    def test_packlist_export_uses_pack_id_as_songlist_set_even_if_set_differs(self):
+        (self.song_dir / "1080_base.jpg").write_bytes(b"jacket")
+        code = self.do_slice(form=_form(set="base", pack_id="tempestissimo", pack_img="select_tempestissimo.png"))
+
+        self.assertEqual(code, 0, self.logs)
+        songs = app.current_export_songs_dir(app.OUT_DIR)
+        song = _read_json(songs / "songlist")["songs"][0]
+        pack = _read_json(songs / "packlist")["packs"][0]
+        self.assertEqual(song["set"], "tempestissimo")
+        self.assertEqual(pack["id"], "tempestissimo")
+        self.assertTrue((songs / "pack" / "select_tempestissimo.png").is_file())
+
+    def test_title_base_and_pack_name_do_not_change_segment_id_or_directory(self):
+        (self.song_dir / "1080_base.jpg").write_bytes(b"jacket")
+        form = _form(
+            title_base="Display Practice",
+            pack_id="practice_pack",
+            pack_name="Visible Pack Name",
+            pack_img="select_practice_pack.png",
+        )
+        code = self.do_slice(form=form)
+
+        self.assertEqual(code, 0, self.logs)
+        songs = app.current_export_songs_dir(app.OUT_DIR)
+        segment_id = "prelude_heavensdoor_21000_22000_x1"
+        song = _read_json(songs / "songlist")["songs"][0]
+        pack = _read_json(songs / "packlist")["packs"][0]
+        self.assertTrue((songs / segment_id).is_dir())
+        self.assertEqual(song["id"], segment_id)
+        self.assertIn("Display Practice", song["title_localized"]["en"])
+        self.assertEqual(pack["name_localized"]["en"], "Visible Pack Name")
+
     def test_packlist_disabled_preserves_songlist_set(self):
         (self.song_dir / "1080_base.jpg").write_bytes(b"jacket")
         code = self.do_slice(packlist=False, form=_form(set="single"))
@@ -493,6 +525,9 @@ class V21PackUiTests(unittest.TestCase):
         panel._pack_cover_path = self._Line()
         panel._pack_controls = [*panel._pack_inputs.values(), panel._pack_upload_check, panel._pack_cover_path]
         panel._last_pack_default_source = ""
+        panel._syncing_shared_pack_id = False
+        panel._resetting_source = False
+        panel._last_shared_pack_id = ""
         panel._inputs = {key: self._Line() for _label, key, _placeholder in app.SonglistPanel._FIELDS}
         panel._rating_plus = self._Check(False)
         panel._refresh_packlist_state()
@@ -521,6 +556,60 @@ class V21PackUiTests(unittest.TestCase):
         data = panel.get_form_data()
         self.assertEqual(data["pack_id"], "manual")
         self.assertEqual(data["pack_img"], "manual.png")
+
+    def test_shared_pack_id_inputs_mirror_each_other_and_update_default_img(self):
+        panel = self._panel()
+        panel.reset_for_source("song_a")
+
+        panel._inputs["set"].setText("practice_pack")
+        panel._on_set_pack_id_changed("practice_pack")
+        data = panel.get_form_data()
+        self.assertEqual(data["set"], "practice_pack")
+        self.assertEqual(data["pack_id"], "practice_pack")
+        self.assertEqual(data["pack_img"], "select_practice_pack.png")
+
+        panel._pack_inputs["pack_img"].setText("custom.png")
+        panel._pack_inputs["pack_id"].setText("manual_pack")
+        panel._on_pack_id_changed("manual_pack")
+        data = panel.get_form_data()
+        self.assertEqual(data["set"], "manual_pack")
+        self.assertEqual(data["pack_id"], "manual_pack")
+        self.assertEqual(data["pack_img"], "custom.png")
+
+    def test_reset_for_new_source_clears_old_metadata_and_segments_defaults(self):
+        panel = self._panel()
+        panel._inputs["title_base"].setText("Old Title")
+        panel._inputs["artist"].setText("Old Artist")
+        panel._inputs["bpm"].setText("240")
+        panel._inputs["bpm_base"].setText("240")
+        panel._inputs["chart_designer"].setText("Old Chart")
+        panel._inputs["jacket_designer"].setText("Old Jacket")
+        panel._inputs["rating"].setText("10")
+        panel._rating_plus.setChecked(True)
+        panel._pack_inputs["pack_id"].setText("old_pack")
+        panel._pack_inputs["pack_name"].setText("Old Pack")
+        panel._pack_inputs["pack_description"].setText("Old Description")
+        panel._pack_inputs["pack_img"].setText("old.png")
+        panel._pack_upload_check.setChecked(True)
+        panel._pack_cover_path.setText("old-cover.png")
+
+        panel.reset_for_source("tempestissimo")
+        data = panel.get_form_data()
+
+        self.assertEqual(data["title_base"], "tempestissimo")
+        self.assertEqual(data["set"], "tempestissimo")
+        self.assertEqual(data["pack_id"], "tempestissimo")
+        self.assertEqual(data["pack_name"], "tempestissimo")
+        self.assertEqual(data["pack_img"], "select_tempestissimo.png")
+        self.assertEqual(data["artist"], "")
+        self.assertEqual(data["bpm"], "")
+        self.assertEqual(data["bpm_base"], "")
+        self.assertEqual(data["chart_designer"], "")
+        self.assertEqual(data["jacket_designer"], "")
+        self.assertEqual(data["rating"], "")
+        self.assertFalse(data["rating_plus"])
+        self.assertEqual(data["pack_cover_source"], "auto")
+        self.assertEqual(data["pack_cover_path"], "")
 
 
 if __name__ == "__main__":

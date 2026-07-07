@@ -154,6 +154,8 @@ class _Panel:
         self._external_merge_worker = None
         self._external_merge_phase = "idle"
         self._external_merge_generation = 0
+        self._current_export_dirty = False
+        self._last_run_current_export_enabled = True
         self._worker = None
         self._slicer_running = False
         self.logs = []
@@ -178,6 +180,9 @@ class _Panel:
 
     def _invalidate_external_merge_plan(self, message=""):
         return app.MainWindow._invalidate_external_merge_plan(self, message)
+
+    def _mark_current_export_dirty(self, *args):
+        return app.MainWindow._mark_current_export_dirty(self, *args)
 
     def _set_running(self, on):
         return app.MainWindow._set_running(self, on)
@@ -408,6 +413,24 @@ class ExternalMergeUiStateTests(unittest.TestCase):
         self.assertIsNone(panel._external_merge_plan)
         self.assertFalse(panel._btn_external_confirm.isEnabled())
         self.assertIn("changed", panel._external_merge_detail_label.text())
+
+    def test_dirty_current_export_disables_external_merge_until_successful_slice(self):
+        panel = _Panel()
+        panel._external_merge_target = Path("target/songs")
+        app.MainWindow._update_external_merge_controls(panel)
+        self.assertTrue(panel._btn_external_check.isEnabled())
+        self.assertTrue(panel._btn_external_confirm.isEnabled())
+
+        app.MainWindow._mark_current_export_dirty(panel)
+        self.assertIsNone(panel._external_merge_plan)
+        self.assertFalse(panel._btn_external_check.isEnabled())
+        self.assertFalse(panel._btn_external_confirm.isEnabled())
+        self.assertIn("当前配置尚未导出", panel._external_merge_detail_label.text())
+
+        app.MainWindow._on_done(panel, 0)
+        self.assertFalse(panel._current_export_dirty)
+        self.assertTrue(panel._btn_external_check.isEnabled())
+        self.assertFalse(panel._btn_external_confirm.isEnabled())
 
     def test_slicing_done_clears_external_plan(self):
         panel = _Panel()
