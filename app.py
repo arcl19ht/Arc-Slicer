@@ -849,6 +849,8 @@ JACKET_FILENAMES = ("1080_base.jpg", "base.jpg", "1080_base_256.jpg")
 PACK_COVER_SIZE = (374, 750)
 PACK_COVER_UPLOAD_SUFFIXES = {".png", ".jpg", ".jpeg"}
 PACK_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+PACK_DEFAULT_SECTION = "collab"
+PACK_SECTION_OPTIONS = ("collab", "archive", "free")
 
 
 def current_export_root(out_dir: Path | None = None) -> Path:
@@ -1216,6 +1218,13 @@ def default_pack_img_name(pack_id: str) -> str:
     return f"select_{pack_id}.png"
 
 
+def normalize_pack_section(value) -> str:
+    raw = str(value or "").strip()
+    if raw in PACK_SECTION_OPTIONS:
+        return raw
+    return PACK_DEFAULT_SECTION
+
+
 def pack_description_placeholder(pack_id: str) -> str:
     pack_id = str(pack_id or "").strip()
     if pack_id:
@@ -1229,6 +1238,7 @@ def default_pack_form_for_song(source_id: str) -> dict:
         "pack_id": source_id,
         "pack_name": source_id,
         "pack_description": "",
+        "pack_section": PACK_DEFAULT_SECTION,
         "pack_img": default_pack_img_name(source_id) if source_id else "",
         "pack_cover_source": "auto",
         "pack_cover_path": "",
@@ -1276,6 +1286,7 @@ def pack_template_from_form(data: dict, source_id: str) -> PackTemplate:
         pack_id=pack_id,
         name=str(data.get("pack_name") or defaults["pack_name"]).strip(),
         description=str(data.get("pack_description", "")).strip(),
+        section=normalize_pack_section(data.get("pack_section", defaults["pack_section"])),
         img=img,
         cover_source=cover_source,
         cover_path=cover_path,
@@ -1285,7 +1296,7 @@ def pack_template_from_form(data: dict, source_id: str) -> PackTemplate:
 def build_packlist_entry(template: PackTemplate) -> dict:
     return {
         "id": template.pack_id,
-        "section": "collab",
+        "section": template.section,
         "plus_character": -1,
         "name_localized": {"en": template.name},
         "description_localized": {"en": template.description},
@@ -1918,6 +1929,7 @@ class PackTemplate:
     img: str
     cover_source: str
     cover_path: str = ""
+    section: str = PACK_DEFAULT_SECTION
 
 
 def _norm_path(path: Path) -> str:
@@ -3534,6 +3546,17 @@ class SonglistPanel(QFrame):
                 inp.textChanged.connect(self._emit_metadata_changed)
         pack_lay.addLayout(pack_grid)
 
+        section_lay = QVBoxLayout()
+        section_lay.setSpacing(5)
+        section_lay.addWidget(metadata_field_label("曲包分区 SECTION"))
+        self._pack_section = QComboBox()
+        self._pack_section.addItems(PACK_SECTION_OPTIONS)
+        self._pack_section.setEditable(False)
+        self._set_pack_section(PACK_DEFAULT_SECTION)
+        self._pack_section.currentTextChanged.connect(self._on_pack_section_changed)
+        section_lay.addWidget(self._pack_section)
+        pack_lay.addLayout(section_lay)
+
         cover_row = QHBoxLayout()
         cover_row.setSpacing(10)
         self._pack_upload_check = QCheckBox("使用上传图片")
@@ -3551,7 +3574,14 @@ class SonglistPanel(QFrame):
         cover_row.addWidget(self._pack_cover_path, 1)
         cover_row.addWidget(btn_cover)
         pack_lay.addLayout(cover_row)
-        self._pack_controls = [pack_frame, *self._pack_inputs.values(), self._pack_upload_check, self._pack_cover_path, btn_cover]
+        self._pack_controls = [
+            pack_frame,
+            *self._pack_inputs.values(),
+            self._pack_section,
+            self._pack_upload_check,
+            self._pack_cover_path,
+            btn_cover,
+        ]
         self._last_pack_default_source = ""
         self._inputs["set"].textChanged.connect(self._on_set_pack_id_changed)
         self._pack_inputs["pack_id"].textChanged.connect(self._on_pack_id_changed)
@@ -3619,6 +3649,40 @@ class SonglistPanel(QFrame):
             return
         value = str(pack_id if pack_id is not None else self._pack_inputs["pack_id"].text()).strip()
         target.setPlaceholderText(pack_description_placeholder(value))
+
+    def _pack_section_text(self) -> str:
+        section = getattr(self, "_pack_section", None)
+        if section is None:
+            return PACK_DEFAULT_SECTION
+        try:
+            text = section.currentText()
+            if isinstance(text, str):
+                return normalize_pack_section(text)
+        except Exception:
+            pass
+        return normalize_pack_section(getattr(section, "_arc_slicer_value", PACK_DEFAULT_SECTION))
+
+    def _set_pack_section(self, value) -> None:
+        normalized = normalize_pack_section(value)
+        section = getattr(self, "_pack_section", None)
+        if section is None:
+            return
+        setattr(section, "_arc_slicer_value", normalized)
+        try:
+            index = section.findText(normalized)
+            if isinstance(index, int) and index >= 0:
+                section.setCurrentIndex(index)
+                return
+        except Exception:
+            pass
+        try:
+            section.setCurrentText(normalized)
+        except Exception:
+            pass
+
+    def _on_pack_section_changed(self, text: str):
+        self._set_pack_section(text)
+        self._emit_metadata_changed()
 
     def _on_set_pack_id_changed(self, text: str):
         if self._syncing_shared_pack_id:
@@ -3745,6 +3809,7 @@ class SonglistPanel(QFrame):
             self._pack_inputs["pack_id"].setText(defaults["pack_id"])
             self._pack_inputs["pack_name"].setText(defaults["pack_name"])
             self._pack_inputs["pack_description"].setText("")
+            self._set_pack_section(PACK_DEFAULT_SECTION)
             self._pack_inputs["pack_img"].setText(defaults["pack_img"])
             self._rating_plus.setChecked(False)
             self._pack_upload_check.setChecked(False)
@@ -3770,6 +3835,7 @@ class SonglistPanel(QFrame):
         if not data.get("pack_img") and pack_id:
             data["pack_img"] = default_pack_img_name(pack_id)
         data["pack_description"] = data.get("pack_description", "")
+        data["pack_section"] = self._pack_section_text()
         data["pack_cover_source"] = "upload" if self._pack_upload_check.isChecked() else "auto"
         data["pack_cover_path"] = self._pack_cover_path.text().strip()
         return data
@@ -3814,6 +3880,7 @@ class SonglistPanel(QFrame):
         for k, inp in self._pack_inputs.items():
             if k in meta:
                 inp.setText(str(meta[k]))
+        self._set_pack_section(meta.get("pack_section", PACK_DEFAULT_SECTION))
         if "pack_cover_source" in meta:
             self._pack_upload_check.setChecked(str(meta.get("pack_cover_source")).lower() == "upload")
         if "pack_cover_path" in meta:

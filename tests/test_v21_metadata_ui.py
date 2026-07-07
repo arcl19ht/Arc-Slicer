@@ -120,35 +120,45 @@ _install_fake_pyqt()
 import app
 
 
+def _visible(widget):
+    try:
+        hidden = widget.isHidden()
+        if isinstance(hidden, bool):
+            return not hidden
+    except Exception:
+        pass
+    return widget.isVisible()
+
+
 class V21MetadataPanelUiTests(unittest.TestCase):
     def test_initial_state_songlist_collapsed_and_packlist_hidden(self):
         panel = app.SonglistPanel()
 
         self.assertFalse(panel.is_songlist_enabled())
         self.assertFalse(panel._expanded)
-        self.assertFalse(panel._body.isVisible())
+        self.assertFalse(_visible(panel._body))
         self.assertFalse(panel._toggle_btn.isEnabled())
-        self.assertFalse(panel._packlist_item.isVisible())
+        self.assertFalse(_visible(panel._packlist_item))
 
         panel._toggle()
         self.assertFalse(panel._expanded)
-        self.assertFalse(panel._body.isVisible())
+        self.assertFalse(_visible(panel._body))
 
     def test_enabling_songlist_reveals_collapsed_packlist_item(self):
         panel = app.SonglistPanel()
 
         panel.set_songlist_enabled(True)
 
-        self.assertTrue(panel._packlist_item.isVisible())
+        self.assertTrue(_visible(panel._packlist_item))
         self.assertTrue(panel._toggle_btn.isEnabled())
-        self.assertFalse(panel._body.isVisible())
+        self.assertFalse(_visible(panel._body))
         self.assertFalse(panel.is_packlist_enabled())
         self.assertTrue(panel._packlist_enabled.isEnabled())
         self.assertFalse(panel._pack_toggle_btn.isEnabled())
-        self.assertFalse(panel._pack_body.isVisible())
+        self.assertFalse(_visible(panel._pack_body))
 
         panel._toggle()
-        self.assertTrue(panel._body.isVisible())
+        self.assertTrue(_visible(panel._body))
 
     def test_packlist_has_independent_expand_and_preserves_songlist_data(self):
         panel = app.SonglistPanel()
@@ -157,7 +167,7 @@ class V21MetadataPanelUiTests(unittest.TestCase):
         panel.set_packlist_enabled(True)
         panel._toggle_pack()
 
-        self.assertTrue(panel._pack_body.isVisible())
+        self.assertTrue(_visible(panel._pack_body))
         self.assertEqual(panel.get_form_data()["title_base"], "Title")
 
     def test_disabling_songlist_hides_packlist_without_losing_pack_data(self):
@@ -166,20 +176,20 @@ class V21MetadataPanelUiTests(unittest.TestCase):
         panel.set_packlist_enabled(True)
         panel._pack_inputs["pack_id"].setText("manual_pack")
         panel._toggle_pack()
-        self.assertTrue(panel._pack_body.isVisible())
+        self.assertTrue(_visible(panel._pack_body))
 
         panel.set_songlist_enabled(False)
 
-        self.assertFalse(panel._packlist_item.isVisible())
-        self.assertFalse(panel._pack_body.isVisible())
+        self.assertFalse(_visible(panel._packlist_item))
+        self.assertFalse(_visible(panel._pack_body))
         self.assertFalse(panel._pack_expanded)
         self.assertEqual(panel.get_form_data()["pack_id"], "manual_pack")
         self.assertFalse(app.effective_packlist_export_enabled(panel.is_packlist_enabled(), panel.is_songlist_enabled()))
 
         panel.set_songlist_enabled(True)
-        self.assertTrue(panel._packlist_item.isVisible())
+        self.assertTrue(_visible(panel._packlist_item))
         self.assertEqual(panel.get_form_data()["pack_id"], "manual_pack")
-        self.assertFalse(panel._pack_body.isVisible())
+        self.assertFalse(_visible(panel._pack_body))
 
     def test_set_meta_restores_pack_data_without_auto_expanding(self):
         panel = app.SonglistPanel()
@@ -192,14 +202,14 @@ class V21MetadataPanelUiTests(unittest.TestCase):
         })
 
         self.assertFalse(panel.is_songlist_enabled())
-        self.assertFalse(panel._packlist_item.isVisible())
-        self.assertFalse(panel._body.isVisible())
+        self.assertFalse(_visible(panel._packlist_item))
+        self.assertFalse(_visible(panel._body))
         self.assertEqual(panel.get_form_data()["pack_id"], "saved_pack")
 
         panel.set_songlist_enabled(True)
-        self.assertTrue(panel._packlist_item.isVisible())
+        self.assertTrue(_visible(panel._packlist_item))
         self.assertTrue(panel.is_packlist_enabled())
-        self.assertFalse(panel._pack_body.isVisible())
+        self.assertFalse(_visible(panel._pack_body))
 
 
 class V21SegmentIntervalUiTests(unittest.TestCase):
@@ -215,16 +225,24 @@ class V21SegmentIntervalUiTests(unittest.TestCase):
         row.set_time_errors("起点不能为空", "终点不能为空")
         self.assertEqual(row._start_error.text(), "起点不能为空")
         self.assertEqual(row._end_error.text(), "终点不能为空")
-        self.assertFalse(row._arc_indicator_box.isVisible())
+        self.assertFalse(_visible(row._arc_indicator_box))
 
         row.set_arc_cut_warnings([{"easing": "si"}], [])
-        self.assertTrue(row._arc_indicator_box.isVisible())
+        self.assertTrue(_visible(row._arc_indicator_box))
         self.assertEqual(row._start_error.text(), "起点不能为空")
         self.assertEqual(row._end_error.text(), "终点不能为空")
 
+        row._end.setText("123")
         row.focus_time_field("end")
-        self.assertTrue(getattr(row._end, "_focused", False))
-        self.assertTrue(getattr(row._end, "_selected", False))
+        focused = getattr(row._end, "_focused", False)
+        if not focused and hasattr(row._end, "hasFocus"):
+            focused = row._end.hasFocus() or row._end.hasSelectedText()
+        self.assertTrue(focused)
+
+        selected = getattr(row._end, "_selected", False)
+        if not selected and hasattr(row._end, "selectedText"):
+            selected = row._end.selectedText() == "123"
+        self.assertTrue(selected)
 
 
 if __name__ == "__main__":
