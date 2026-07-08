@@ -13,6 +13,26 @@ class _Row:
         return self._speed
 
 
+class _TextRow:
+    def __init__(self, start_text, end_text):
+        self._start_text = start_text
+        self._end_text = end_text
+        try:
+            self.s_val = int(start_text)
+        except ValueError:
+            self.s_val = None
+        try:
+            self.e_val = int(end_text)
+        except ValueError:
+            self.e_val = None
+
+    def start_text(self):
+        return self._start_text
+
+    def end_text(self):
+        return self._end_text
+
+
 class WaveformUiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -61,6 +81,34 @@ class WaveformUiTests(unittest.TestCase):
         window._rows[0]._speed = 3.0
         app.MainWindow._refresh_waveform_segments(window)
         self.assertEqual(window._waveform_panel.segment_ranges(), [(1000, 2000), (3000, 5000)])
+
+    def test_main_window_waveform_drafts_are_separate_from_complete_segments(self):
+        window = app.MainWindow.__new__(app.MainWindow)
+        window._rows = [
+            _TextRow("1000", ""),
+            _TextRow("", "2000"),
+            _TextRow("3000", "4000"),
+        ]
+        window._waveform_panel = app.WaveformPanel()
+
+        self.assertEqual(app.MainWindow._waveform_segment_ranges(window), [(3000, 4000)])
+        self.assertEqual(
+            app.MainWindow._waveform_draft_segments(window),
+            [
+                {"index": 0, "kind": "start", "time_ms": 1000},
+                {"index": 1, "kind": "end", "time_ms": 2000},
+            ],
+        )
+
+        app.MainWindow._refresh_waveform_segments(window)
+        self.assertEqual(window._waveform_panel.segment_ranges(), [(3000, 4000)])
+        self.assertEqual(
+            window._waveform_panel.draft_segments(),
+            [
+                {"index": 0, "kind": "start", "time_ms": 1000},
+                {"index": 1, "kind": "end", "time_ms": 2000},
+            ],
+        )
 
 
 if __name__ == "__main__":

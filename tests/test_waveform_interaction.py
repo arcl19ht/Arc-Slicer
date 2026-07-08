@@ -75,6 +75,33 @@ class WaveformInteractionTests(unittest.TestCase):
         self.assertEqual(panel.time_ms_to_x(-1), 0)
         self.assertEqual(panel.time_ms_to_x(120000), 1000)
 
+    def test_hover_time_tracks_mouse_and_leave_clears_without_segment_signals(self):
+        panel = self._panel(100000)
+        created = []
+        changed = []
+        self._capture_signal(panel, "segmentCreated", lambda start, end: created.append((start, end)))
+        self._capture_signal(
+            panel,
+            "segmentEndpointChanged",
+            lambda index, start, end: changed.append((index, start, end)),
+        )
+
+        panel._update_hover_at_widget_x(self._widget_x_for_time(panel, 25000))
+        self.assertEqual(panel.current_hover_time_ms(), 25000)
+
+        panel._update_hover_at_widget_x(panel._waveform_rect().left() - 100)
+        self.assertEqual(panel.current_hover_time_ms(), 0)
+
+        panel._clear_hover()
+        self.assertIsNone(panel.current_hover_time_ms())
+        self.assertEqual(created, [])
+        self.assertEqual(changed, [])
+
+    def test_hover_time_is_empty_without_ready_waveform(self):
+        panel = app.WaveformPanel()
+        panel._update_hover_at_widget_x(500)
+        self.assertIsNone(panel.current_hover_time_ms())
+
     def test_drag_blank_area_creates_segment_in_either_direction(self):
         panel = self._panel()
         created = []

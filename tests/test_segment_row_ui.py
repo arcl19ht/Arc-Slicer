@@ -111,6 +111,62 @@ class SegmentRowUiTests(unittest.TestCase):
         self.assertEqual(win._rows[1]._badge.text(), "2")
         self.assertTrue(win._dirty_marked)
 
+    def test_soft_validation_allows_start_and_end_drafts_until_hard_validation(self):
+        win = app.MainWindow.__new__(app.MainWindow)
+        win._audio_duration_ms = 10000
+
+        start_draft = app.SegmentRow(1, None, None)
+        start_draft.show()
+        start_draft._start.setText("1000")
+        win._rows = [start_draft]
+        app.MainWindow._refresh_segment_time_validation(win)
+        self.assertFalse(start_draft._end_error.isVisible())
+
+        app.MainWindow._validate_segment_row_hard(win, start_draft)
+        self.assertTrue(start_draft._end_error.isVisible())
+        self.assertIn("终点不能为空", start_draft._end_error.text())
+
+        end_draft = app.SegmentRow(2, None, None)
+        end_draft.show()
+        end_draft._end.setText("2000")
+        win._rows = [end_draft]
+        app.MainWindow._refresh_segment_time_validation(win)
+        self.assertFalse(end_draft._start_error.isVisible())
+
+        app.MainWindow._validate_segment_row_hard(win, end_draft)
+        self.assertTrue(end_draft._start_error.isVisible())
+        self.assertIn("起点不能为空", end_draft._start_error.text())
+
+    def test_enter_navigation_moves_to_next_useful_input_and_blocks_invalid_current_field(self):
+        win = app.MainWindow.__new__(app.MainWindow)
+        win._audio_duration_ms = 10000
+        first = app.SegmentRow(1, None, None)
+        second = app.SegmentRow(2, None, None)
+        first.show()
+        second.show()
+        win._rows = [first, second]
+        focused = []
+        first.focus_time_field = lambda field: focused.append(("first", field))
+        second.focus_time_field = lambda field: focused.append(("second", field))
+
+        first._start.setText("1000")
+        app.MainWindow._on_segment_enter_pressed(win, first, "start")
+        self.assertEqual(focused[-1], ("first", "end"))
+
+        first._end.setText("2000")
+        app.MainWindow._on_segment_enter_pressed(win, first, "end")
+        self.assertEqual(focused[-1], ("first", "speed"))
+
+        first._speed_override.setText("1.5")
+        app.MainWindow._on_segment_enter_pressed(win, first, "speed")
+        self.assertEqual(focused[-1], ("second", "start"))
+
+        focused.clear()
+        first._start.setText("-")
+        app.MainWindow._on_segment_enter_pressed(win, first, "start")
+        self.assertEqual(focused[-1], ("first", "start"))
+        self.assertTrue(first._start_error.isVisible())
+
 
 if __name__ == "__main__":
     unittest.main()

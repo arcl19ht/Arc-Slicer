@@ -955,7 +955,40 @@ def validate_segment_bounds(
     start_text: str,
     end_text: str,
     audio_duration_ms: int | None,
+    *,
+    allow_draft: bool = False,
 ) -> SegmentValidationResult:
+    if allow_draft:
+        start_raw = str(start_text)
+        end_raw = str(end_text)
+        if not start_raw and not end_raw:
+            return SegmentValidationResult()
+        if not start_raw or not end_raw:
+            value_text = start_raw or end_raw
+            field_name = "起点" if start_raw else "终点"
+            value, error = _parse_non_negative_time_text(value_text, field_name)
+            result = SegmentValidationResult(
+                start_error=error if start_raw else "",
+                end_error=error if end_raw else "",
+            )
+            if error:
+                result.first_field = "start" if start_raw else "end"
+                result.first_message = error
+                return result
+            if value is not None and audio_duration_ms is not None:
+                if start_raw and value >= audio_duration_ms:
+                    result.start_error = f"起点不能超过音频时长：{format_duration_ms(audio_duration_ms)}"
+                elif end_raw and value > audio_duration_ms:
+                    result.end_error = f"终点不能超过音频时长：{format_duration_ms(audio_duration_ms)}"
+                    result.end_cap_ms = int(audio_duration_ms)
+            if result.start_error:
+                result.first_field = "start"
+                result.first_message = result.start_error
+            elif result.end_error:
+                result.first_field = "end"
+                result.first_message = result.end_error
+            return result
+
     start, start_error = _parse_non_negative_time_text(start_text, "起点")
     end, end_error = _parse_non_negative_time_text(end_text, "终点")
     result = SegmentValidationResult(start_error=start_error, end_error=end_error)
@@ -3201,6 +3234,8 @@ class WaveformPanel(QFrame):
         self._message = "选择源曲后显示波形"
         self._waveform: WaveformData | None = None
         self._segments: list[tuple[int, int]] = []
+        self._draft_segments: list[dict] = []
+        self._hover_time_ms: int | None = None
         self._drag_mode: str | None = None
         self._drag_index: int | None = None
         self._drag_anchor_ms: int | None = None
@@ -3223,6 +3258,12 @@ class WaveformPanel(QFrame):
 
     def segment_ranges(self) -> list[tuple[int, int]]:
         return list(self._segments)
+
+    def draft_segments(self) -> list[dict]:
+        return [dict(item) for item in self._draft_segments]
+
+    def current_hover_time_ms(self) -> int | None:
+        return self._hover_time_ms
 
     def resize(self, width: int, height: int) -> None:
         try:
@@ -3286,6 +3327,8 @@ class WaveformPanel(QFrame):
         self._state = "empty"
         self._message = "选择源曲后显示波形"
         self._waveform = None
+        self._draft_segments = []
+        self._hover_time_ms = None
         self._cancel_drag()
         self.update()
 
@@ -3293,6 +3336,8 @@ class WaveformPanel(QFrame):
         self._state = "loading"
         self._message = "正在生成波形…"
         self._waveform = None
+        self._draft_segments = []
+        self._hover_time_ms = None
         self._cancel_drag()
         self.update()
 
@@ -3300,6 +3345,8 @@ class WaveformPanel(QFrame):
         self._state = "error"
         self._message = "波形生成失败，不影响切片。"
         self._waveform = None
+        self._draft_segments = []
+        self._hover_time_ms = None
         self._cancel_drag()
         self.update()
 
@@ -3307,6 +3354,7 @@ class WaveformPanel(QFrame):
         self._state = "ready"
         self._message = ""
         self._waveform = data
+        self._hover_time_ms = None
         self._cancel_drag()
         self.update()
 
@@ -3321,6 +3369,25 @@ class WaveformPanel(QFrame):
             if e > s:
                 cleaned.append((s, e))
         self._segments = cleaned
+        self.update()
+
+    def set_draft_segments(self, drafts: list[dict]) -> None:
+        cleaned: list[dict] = []
+        for item in drafts:
+            if not isinstance(item, dict):
+                continue
+            kind = item.get("kind")
+            if kind not in {"start", "end"}:
+                continue
+            try:
+                index = int(item.get("index", len(cleaned)))
+                time_ms = int(item["time_ms"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if time_ms < 0:
+                continue
+            cleaned.append({"index": index, "kind": kind, "time_ms": time_ms})
+        self._draft_segments = cleaned
         self.update()
 
     def _local_x_from_widget_x(self, widget_x) -> float:
@@ -3361,6 +3428,21 @@ class WaveformPanel(QFrame):
         if hasattr(event, "position"):
             return float(event.position().x())
         return float(event.pos().x())
+
+    def _update_hover_at_widget_x(self, widget_x: float) -> None:
+        if not self._can_interact():
+            self._hover_time_ms = None
+            self.update()
+            return
+        hover_time = self.x_to_time_ms(self._local_x_from_widget_x(widget_x))
+        if hover_time != self._hover_time_ms:
+            self._hover_time_ms = hover_time
+            self.update()
+
+    def _clear_hover(self) -> None:
+        self._hover_time_ms = None
+        self.unsetCursor()
+        self.update()
 
     def _cancel_drag(self) -> None:
         self._drag_mode = None
@@ -3459,11 +3541,16 @@ class WaveformPanel(QFrame):
             self._update_interaction_at_widget_x(self._event_widget_x(event))
             event.accept()
             return
+        self._update_hover_at_widget_x(self._event_widget_x(event))
         if self._can_interact() and self._hit_endpoint(self._event_widget_x(event)) is not None:
             self.setCursor(Qt.CursorShape.SizeHorCursor)
         else:
             self.unsetCursor()
         super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        self._clear_hover()
+        super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton and self._drag_mode is not None:
@@ -3505,6 +3592,27 @@ class WaveformPanel(QFrame):
                 QColor(201, 100, 66, 48),
             )
 
+        if self._draft_segments:
+            draft_pen = QPen(QColor(138, 118, 103, 150), 1)
+            try:
+                draft_pen.setStyle(Qt.PenStyle.DashLine)
+            except Exception:
+                pass
+            painter.setPen(draft_pen)
+            for draft in self._draft_segments:
+                anchor_x = rect.left() + self.time_ms_to_x(draft["time_ms"])
+                painter.drawLine(anchor_x, rect.top(), anchor_x, rect.bottom())
+                if draft["kind"] == "start":
+                    guide_end = min(rect.right(), anchor_x + max(24, rect.width() // 12))
+                    painter.drawLine(anchor_x, mid_y, guide_end, mid_y)
+                    painter.drawLine(guide_end - 4, mid_y - 3, guide_end, mid_y)
+                    painter.drawLine(guide_end - 4, mid_y + 3, guide_end, mid_y)
+                else:
+                    guide_start = max(rect.left(), anchor_x - max(24, rect.width() // 12))
+                    painter.drawLine(guide_start, mid_y, anchor_x, mid_y)
+                    painter.drawLine(guide_start + 4, mid_y - 3, guide_start, mid_y)
+                    painter.drawLine(guide_start + 4, mid_y + 3, guide_start, mid_y)
+
         if self._drag_preview is not None:
             start_ms, end_ms = self._drag_preview
             start_x = rect.left() + self.time_ms_to_x(start_ms)
@@ -3538,12 +3646,24 @@ class WaveformPanel(QFrame):
             format_duration_ms(duration_ms),
         )
 
+        if self._hover_time_ms is not None:
+            hover_x = rect.left() + self.time_ms_to_x(self._hover_time_ms)
+            painter.setPen(QPen(QColor(C_TEXT2), 1))
+            painter.drawLine(hover_x, rect.top(), hover_x, rect.bottom())
+            painter.drawText(
+                rect.adjusted(6, 4, -6, -4),
+                Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
+                format_duration_ms(self._hover_time_ms),
+            )
+
 
 class SegmentRow(QFrame):
     deleted = pyqtSignal(object)   # emits self
     changed = pyqtSignal()
     end_cap_requested = pyqtSignal(object)
     copy_requested = pyqtSignal(object)
+    field_committed = pyqtSignal(object, str)
+    enter_pressed = pyqtSignal(object, str)
 
     def __init__(
         self,
@@ -3751,6 +3871,12 @@ class SegmentRow(QFrame):
         self._start.textChanged.connect(self._on_change)
         self._end.textChanged.connect(self._on_change)
         self._speed_override.textChanged.connect(self._on_change)
+        self._start.editingFinished.connect(lambda: self.field_committed.emit(self, "start"))
+        self._end.editingFinished.connect(lambda: self.field_committed.emit(self, "end"))
+        self._speed_override.editingFinished.connect(lambda: self.field_committed.emit(self, "speed"))
+        self._start.returnPressed.connect(lambda: self.enter_pressed.emit(self, "start"))
+        self._end.returnPressed.connect(lambda: self.enter_pressed.emit(self, "end"))
+        self._speed_override.returnPressed.connect(lambda: self.enter_pressed.emit(self, "speed"))
         btn_copy.clicked.connect(lambda: self.copy_requested.emit(self))
         btn_del.clicked.connect(lambda: self.deleted.emit(self))
 
@@ -5249,6 +5375,8 @@ class MainWindow(QMainWindow):
         row.changed.connect(self._mark_current_export_dirty)
         row.end_cap_requested.connect(self._set_row_end_to_audio_duration)
         row.copy_requested.connect(self._copy_segment)
+        row.field_committed.connect(self._on_segment_field_committed)
+        row.enter_pressed.connect(self._on_segment_enter_pressed)
         self._rows.append(row)
         self._segs_layout.addWidget(row)
         if hasattr(self, "_refresh_seg_header"):
@@ -5296,6 +5424,8 @@ class MainWindow(QMainWindow):
         new_row.changed.connect(self._mark_current_export_dirty)
         new_row.end_cap_requested.connect(self._set_row_end_to_audio_duration)
         new_row.copy_requested.connect(self._copy_segment)
+        new_row.field_committed.connect(self._on_segment_field_committed)
+        new_row.enter_pressed.connect(self._on_segment_enter_pressed)
         insert_at = self._rows.index(row) + 1
         self._rows.insert(insert_at, new_row)
         if hasattr(self._segs_layout, "insertWidget"):
@@ -5351,10 +5481,104 @@ class MainWindow(QMainWindow):
             ranges.append((int(row.s_val), int(row.e_val)))
         return ranges
 
+    def _waveform_draft_segments(self) -> list[dict]:
+        drafts: list[dict] = []
+        for index, row in enumerate(getattr(self, "_rows", [])):
+            start_text = row.start_text() if hasattr(row, "start_text") else ("" if row.s_val is None else str(row.s_val))
+            end_text = row.end_text() if hasattr(row, "end_text") else ("" if row.e_val is None else str(row.e_val))
+            if bool(start_text) == bool(end_text):
+                continue
+            value_text = start_text or end_text
+            field_name = "起点" if start_text else "终点"
+            value, error = _parse_non_negative_time_text(value_text, field_name)
+            if error or value is None:
+                continue
+            drafts.append({
+                "index": index,
+                "kind": "start" if start_text else "end",
+                "time_ms": int(value),
+            })
+        return drafts
+
     def _refresh_waveform_segments(self) -> None:
-        panel = getattr(self, "_waveform_panel", None)
-        if panel is not None and hasattr(panel, "set_segments"):
+        panel = self.__dict__.get("_waveform_panel")
+        if panel is None:
+            return
+        if hasattr(panel, "set_segments"):
             panel.set_segments(self._waveform_segment_ranges())
+        if hasattr(panel, "set_draft_segments"):
+            panel.set_draft_segments(self._waveform_draft_segments())
+
+    def _validate_segment_row_hard(self, row: SegmentRow) -> SegmentValidationResult:
+        result = validate_segment_bounds(row.start_text(), row.end_text(), getattr(self, "_audio_duration_ms", None))
+        row.set_time_errors(result.start_error, result.end_error, result.end_cap_ms)
+        if hasattr(row, "set_speed_error"):
+            row.set_speed_error(self._segment_speed_error(row))
+        return result
+
+    def _on_segment_field_committed(self, row: SegmentRow, field: str) -> None:
+        if row not in self._rows:
+            return
+        if field == "speed":
+            if hasattr(row, "set_speed_error"):
+                row.set_speed_error(self._segment_speed_error(row))
+            return
+        self._validate_segment_row_hard(row)
+
+    def _first_empty_field_after(self, row_index: int) -> tuple[SegmentRow, str] | None:
+        for row in self._rows[row_index + 1:]:
+            if not row.start_text():
+                return row, "start"
+            if not row.end_text():
+                return row, "end"
+            if not row.speed_override_text():
+                return row, "speed"
+        return None
+
+    def _focus_next_segment_field(self, row: SegmentRow, field: str) -> None:
+        try:
+            index = self._rows.index(row)
+        except ValueError:
+            return
+
+        target: tuple[SegmentRow, str] | None = None
+        if field == "start":
+            if not row.end_text():
+                target = (row, "end")
+            elif not row.speed_override_text():
+                target = (row, "speed")
+            else:
+                target = self._first_empty_field_after(index)
+        elif field == "end":
+            if not row.speed_override_text():
+                target = (row, "speed")
+            else:
+                target = self._first_empty_field_after(index)
+        elif field == "speed":
+            target = self._first_empty_field_after(index)
+
+        if target is not None:
+            target_row, target_field = target
+            target_row.focus_time_field(target_field)
+
+    def _on_segment_enter_pressed(self, row: SegmentRow, field: str) -> None:
+        if row not in self._rows:
+            return
+        if field == "speed":
+            speed_error = self._segment_speed_error(row)
+            row.set_speed_error(speed_error)
+            if speed_error:
+                row.focus_time_field("speed")
+                return
+        else:
+            result = self._validate_segment_row_hard(row)
+            if result.first_field == field:
+                row.focus_time_field(field)
+                return
+            if field == "end" and result.first_field == "start":
+                row.focus_time_field("start")
+                return
+        self._focus_next_segment_field(row, field)
 
     def _add_waveform_segment(self, start_ms: int, end_ms: int) -> None:
         try:
@@ -5458,7 +5682,7 @@ class MainWindow(QMainWindow):
                 if hasattr(row, "clear_speed_error"):
                     row.clear_speed_error()
                 continue
-            result = validate_segment_bounds(row.start_text(), row.end_text(), duration_ms)
+            result = validate_segment_bounds(row.start_text(), row.end_text(), duration_ms, allow_draft=True)
             row.set_time_errors(result.start_error, result.end_error, result.end_cap_ms)
             if hasattr(row, "set_speed_error"):
                 speed_error = self._segment_speed_error(row)
