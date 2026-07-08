@@ -104,6 +104,8 @@ _AUTO_SEGMENT = object()
 WAVEFORM_CACHE_VERSION = 1
 WAVEFORM_DECODE_SAMPLE_RATE = 8000
 DEFAULT_WAVEFORM_SAMPLES_PER_SECOND = 100
+WAVEFORM_MIN_SEGMENT_MS = 100
+WAVEFORM_HANDLE_PX = 8
 
 # ─── 颜色常量 ─────────────────────────────────────────────────────────────────
 
@@ -3144,13 +3146,69 @@ class ArcCutStatus(QFrame):
         self._card.move(x, y)
 
 
+class _SimpleWaveformPoint:
+    def __init__(self, y: int):
+        self._y = int(y)
+
+    def y(self) -> int:
+        return self._y
+
+
+class _SimpleWaveformRect:
+    def __init__(self, left: int, top: int, width: int, height: int):
+        self._left = int(left)
+        self._top = int(top)
+        self._width = max(1, int(width))
+        self._height = max(1, int(height))
+
+    def left(self) -> int:
+        return self._left
+
+    def top(self) -> int:
+        return self._top
+
+    def width(self) -> int:
+        return self._width
+
+    def height(self) -> int:
+        return self._height
+
+    def right(self) -> int:
+        return self._left + self._width
+
+    def bottom(self) -> int:
+        return self._top + self._height
+
+    def center(self) -> _SimpleWaveformPoint:
+        return _SimpleWaveformPoint(self._top + self._height // 2)
+
+    def adjusted(self, left: int, top: int, right: int, bottom: int):
+        return _SimpleWaveformRect(
+            self._left + int(left),
+            self._top + int(top),
+            self._width - int(left) + int(right),
+            self._height - int(top) + int(bottom),
+        )
+
+
 class WaveformPanel(QFrame):
+    segmentCreated = pyqtSignal(int, int)
+    segmentEndpointChanged = pyqtSignal(int, int, int)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._state = "empty"
         self._message = "选择源曲后显示波形"
         self._waveform: WaveformData | None = None
         self._segments: list[tuple[int, int]] = []
+        self._drag_mode: str | None = None
+        self._drag_index: int | None = None
+        self._drag_anchor_ms: int | None = None
+        self._drag_preview: tuple[int, int] | None = None
+        self._last_endpoint_emit: tuple[int, int, int] | None = None
+        self._fallback_width = 1000
+        self._fallback_height = 130
+        self.setMouseTracking(True)
         self.setMinimumHeight(128)
         self.setMaximumHeight(150)
         self.setStyleSheet(
@@ -3166,28 +3224,90 @@ class WaveformPanel(QFrame):
     def segment_ranges(self) -> list[tuple[int, int]]:
         return list(self._segments)
 
+    def resize(self, width: int, height: int) -> None:
+        try:
+            self._fallback_width = max(1, int(width) - 24)
+            self._fallback_height = max(1, int(height) - 20)
+        except (TypeError, ValueError):
+            pass
+        try:
+            super().resize(width, height)
+        except Exception:
+            pass
+
+    def _waveform_rect(self) -> QRect:
+        try:
+            rect = self.rect().adjusted(12, 10, -12, -10)
+            if isinstance(rect.width(), int) and isinstance(rect.left(), int):
+                return rect
+        except Exception:
+            pass
+        return _SimpleWaveformRect(12, 10, self._fallback_width, self._fallback_height)
+
+    def _duration_ms(self) -> int:
+        data = self._waveform
+        if self._state != "ready" or data is None:
+            return 0
+        try:
+            return max(0, int(data.duration_ms))
+        except (TypeError, ValueError):
+            return 0
+
+    def _can_interact(self) -> bool:
+        return self._duration_ms() > 0 and bool(self._waveform and self._waveform.peaks)
+
+    def time_ms_to_x(self, time_ms) -> int:
+        rect = self._waveform_rect()
+        width = max(1, rect.width())
+        duration_ms = self._duration_ms()
+        if duration_ms <= 0:
+            return 0
+        try:
+            value = int(time_ms)
+        except (TypeError, ValueError):
+            value = 0
+        value = max(0, min(duration_ms, value))
+        return int(round(width * value / duration_ms))
+
+    def x_to_time_ms(self, x) -> int:
+        rect = self._waveform_rect()
+        width = max(1, rect.width())
+        duration_ms = self._duration_ms()
+        if duration_ms <= 0:
+            return 0
+        try:
+            value = float(x)
+        except (TypeError, ValueError):
+            value = 0.0
+        value = max(0.0, min(float(width), value))
+        return int(round(duration_ms * value / width))
+
     def set_empty(self) -> None:
         self._state = "empty"
         self._message = "选择源曲后显示波形"
         self._waveform = None
+        self._cancel_drag()
         self.update()
 
     def set_loading(self) -> None:
         self._state = "loading"
         self._message = "正在生成波形…"
         self._waveform = None
+        self._cancel_drag()
         self.update()
 
     def set_error(self) -> None:
         self._state = "error"
         self._message = "波形生成失败，不影响切片。"
         self._waveform = None
+        self._cancel_drag()
         self.update()
 
     def set_waveform(self, data: WaveformData) -> None:
         self._state = "ready"
         self._message = ""
         self._waveform = data
+        self._cancel_drag()
         self.update()
 
     def set_segments(self, segments: list[tuple[int, int]]) -> None:
@@ -3202,6 +3322,155 @@ class WaveformPanel(QFrame):
                 cleaned.append((s, e))
         self._segments = cleaned
         self.update()
+
+    def _local_x_from_widget_x(self, widget_x) -> float:
+        return float(widget_x) - float(self._waveform_rect().left())
+
+    def _segment_widget_edges(self) -> list[tuple[int, int, int, int, int]]:
+        rect = self._waveform_rect()
+        edges: list[tuple[int, int, int, int, int]] = []
+        if not self._can_interact():
+            return edges
+        for index, (start_ms, end_ms) in enumerate(self._segments):
+            start_x = rect.left() + self.time_ms_to_x(start_ms)
+            end_x = rect.left() + self.time_ms_to_x(end_ms)
+            if end_x <= start_x:
+                end_x = start_x + 1
+            edges.append((index, start_x, end_x, start_ms, end_ms))
+        return edges
+
+    def _hit_endpoint(self, widget_x) -> tuple[int, str] | None:
+        x = float(widget_x)
+        for index, start_x, end_x, _start_ms, _end_ms in reversed(self._segment_widget_edges()):
+            left_distance = abs(x - start_x)
+            right_distance = abs(x - end_x)
+            if left_distance <= WAVEFORM_HANDLE_PX or right_distance <= WAVEFORM_HANDLE_PX:
+                if left_distance <= right_distance:
+                    return index, "start"
+                return index, "end"
+        return None
+
+    def _hit_segment_body(self, widget_x) -> int | None:
+        x = float(widget_x)
+        for index, start_x, end_x, _start_ms, _end_ms in reversed(self._segment_widget_edges()):
+            if start_x < x < end_x:
+                return index
+        return None
+
+    def _event_widget_x(self, event: QMouseEvent) -> float:
+        if hasattr(event, "position"):
+            return float(event.position().x())
+        return float(event.pos().x())
+
+    def _cancel_drag(self) -> None:
+        self._drag_mode = None
+        self._drag_index = None
+        self._drag_anchor_ms = None
+        self._drag_preview = None
+        self._last_endpoint_emit = None
+
+    def _begin_interaction_at_widget_x(self, widget_x: float) -> bool:
+        if not self._can_interact():
+            return False
+        endpoint = self._hit_endpoint(widget_x)
+        if endpoint is not None:
+            index, side = endpoint
+            if not (0 <= index < len(self._segments)):
+                return False
+            start_ms, end_ms = self._segments[index]
+            if end_ms <= start_ms:
+                return False
+            self._drag_mode = side
+            self._drag_index = index
+            self._drag_preview = None
+            self._last_endpoint_emit = None
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+            return True
+        if self._hit_segment_body(widget_x) is not None:
+            self._cancel_drag()
+            return False
+        self._drag_mode = "create"
+        self._drag_index = None
+        self._drag_anchor_ms = self.x_to_time_ms(self._local_x_from_widget_x(widget_x))
+        self._drag_preview = None
+        self._last_endpoint_emit = None
+        return True
+
+    def _update_interaction_at_widget_x(self, widget_x: float) -> None:
+        if not self._can_interact() or self._drag_mode is None:
+            return
+        current_ms = self.x_to_time_ms(self._local_x_from_widget_x(widget_x))
+        if self._drag_mode == "create":
+            anchor = self._drag_anchor_ms
+            if anchor is None:
+                return
+            start_ms = min(anchor, current_ms)
+            end_ms = max(anchor, current_ms)
+            self._drag_preview = (start_ms, end_ms) if end_ms > start_ms else None
+            self.update()
+            return
+        if self._drag_mode in ("start", "end") and self._drag_index is not None:
+            self._apply_endpoint_drag(current_ms)
+
+    def _finish_interaction_at_widget_x(self, widget_x: float) -> None:
+        if not self._can_interact() or self._drag_mode is None:
+            self._cancel_drag()
+            self.unsetCursor()
+            self.update()
+            return
+        self._update_interaction_at_widget_x(widget_x)
+        if self._drag_mode == "create" and self._drag_preview is not None:
+            start_ms, end_ms = self._drag_preview
+            if end_ms - start_ms >= WAVEFORM_MIN_SEGMENT_MS:
+                self.segmentCreated.emit(int(start_ms), int(end_ms))
+        self._cancel_drag()
+        self.unsetCursor()
+        self.update()
+
+    def _apply_endpoint_drag(self, current_ms: int) -> None:
+        index = self._drag_index
+        if index is None or not (0 <= index < len(self._segments)):
+            return
+        start_ms, end_ms = self._segments[index]
+        duration_ms = self._duration_ms()
+        if self._drag_mode == "start":
+            new_start = max(0, min(int(current_ms), int(end_ms) - WAVEFORM_MIN_SEGMENT_MS))
+            new_end = int(end_ms)
+        else:
+            new_start = int(start_ms)
+            new_end = min(duration_ms, max(int(current_ms), int(start_ms) + WAVEFORM_MIN_SEGMENT_MS))
+        if new_end - new_start < WAVEFORM_MIN_SEGMENT_MS:
+            return
+        self._segments[index] = (new_start, new_end)
+        emitted = (index, new_start, new_end)
+        if emitted != self._last_endpoint_emit:
+            self._last_endpoint_emit = emitted
+            self.segmentEndpointChanged.emit(index, new_start, new_end)
+        self.update()
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton and self._begin_interaction_at_widget_x(self._event_widget_x(event)):
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if self._drag_mode is not None:
+            self._update_interaction_at_widget_x(self._event_widget_x(event))
+            event.accept()
+            return
+        if self._can_interact() and self._hit_endpoint(self._event_widget_x(event)) is not None:
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton and self._drag_mode is not None:
+            self._finish_interaction_at_widget_x(self._event_widget_x(event))
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -3227,14 +3496,27 @@ class WaveformPanel(QFrame):
 
         duration_ms = max(1, int(data.duration_ms))
         for start_ms, end_ms in self._segments:
-            start_x = rect.left() + int(rect.width() * max(0, start_ms) / duration_ms)
-            end_x = rect.left() + int(rect.width() * min(duration_ms, end_ms) / duration_ms)
+            start_x = rect.left() + self.time_ms_to_x(start_ms)
+            end_x = rect.left() + self.time_ms_to_x(end_ms)
             if end_x <= start_x:
                 end_x = start_x + 1
             painter.fillRect(
                 QRect(start_x, rect.top(), end_x - start_x, rect.height()),
                 QColor(201, 100, 66, 48),
             )
+
+        if self._drag_preview is not None:
+            start_ms, end_ms = self._drag_preview
+            start_x = rect.left() + self.time_ms_to_x(start_ms)
+            end_x = rect.left() + self.time_ms_to_x(end_ms)
+            if end_x > start_x:
+                painter.fillRect(
+                    QRect(start_x, rect.top(), end_x - start_x, rect.height()),
+                    QColor(201, 100, 66, 72),
+                )
+                painter.setPen(QPen(QColor(C_ACCENT), 1))
+                painter.drawLine(start_x, rect.top(), start_x, rect.bottom())
+                painter.drawLine(end_x, rect.top(), end_x, rect.bottom())
 
         peaks = data.peaks
         painter.setPen(QPen(QColor("#8A7667"), 1))
@@ -3629,6 +3911,11 @@ class SegmentRow(QFrame):
         widget.selectAll()
 
     def set_end_text(self, end_ms: int) -> None:
+        self._end.setText(str(int(end_ms)))
+        self._on_change()
+
+    def set_time_range(self, start_ms: int, end_ms: int) -> None:
+        self._start.setText(str(int(start_ms)))
         self._end.setText(str(int(end_ms)))
         self._on_change()
 
@@ -4392,6 +4679,8 @@ class MainWindow(QMainWindow):
         lay.addLayout(seg_head)
 
         self._waveform_panel = WaveformPanel()
+        self._waveform_panel.segmentCreated.connect(self._add_waveform_segment)
+        self._waveform_panel.segmentEndpointChanged.connect(self._update_waveform_segment_endpoint)
         lay.addWidget(self._waveform_panel)
         lay.addSpacing(12)
 
@@ -5066,6 +5355,32 @@ class MainWindow(QMainWindow):
         panel = getattr(self, "_waveform_panel", None)
         if panel is not None and hasattr(panel, "set_segments"):
             panel.set_segments(self._waveform_segment_ranges())
+
+    def _add_waveform_segment(self, start_ms: int, end_ms: int) -> None:
+        try:
+            start = int(start_ms)
+            end = int(end_ms)
+        except (TypeError, ValueError):
+            return
+        if end - start < WAVEFORM_MIN_SEGMENT_MS:
+            return
+        self._add_segment(start, end, None)
+        self._mark_current_export_dirty()
+
+    def _update_waveform_segment_endpoint(self, index: int, start_ms: int, end_ms: int) -> None:
+        try:
+            row = self._rows[int(index)]
+            start = int(start_ms)
+            end = int(end_ms)
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return
+        if end - start < WAVEFORM_MIN_SEGMENT_MS:
+            return
+        row.set_time_range(start, end)
+        self._refresh_waveform_segments()
+        self._schedule_segment_time_validation()
+        self._schedule_arc_cut_warning_refresh()
+        self._mark_current_export_dirty()
 
     def _request_waveform_for_current_song(self) -> None:
         panel = getattr(self, "_waveform_panel", None)
