@@ -43,6 +43,7 @@ class WaveformUiTests(unittest.TestCase):
 
     def test_waveform_panel_states(self):
         panel = app.WaveformPanel()
+        panel.set_draft_segments([{"index": 0, "kind": "start", "time_ms": 1000}])
 
         self.assertEqual(panel.status_text(), "选择源曲后显示波形")
         self.assertIsNone(panel.waveform_data())
@@ -50,22 +51,41 @@ class WaveformUiTests(unittest.TestCase):
         panel.set_loading()
         self.assertEqual(panel.status_text(), "正在生成波形…")
         self.assertIsNone(panel.waveform_data())
+        self.assertEqual(panel.draft_segments(), [])
 
+        panel.set_draft_segments([{"index": 1, "kind": "end", "time_ms": 2000}])
         data = app.WaveformData(duration_ms=4000, samples_per_second=100, peaks=[(-0.1, 0.2)])
         panel.set_waveform(data)
         self.assertEqual(panel.status_text(), "")
         self.assertIs(panel.waveform_data(), data)
+        self.assertEqual(panel.draft_segments(), [{"index": 1, "kind": "end", "time_ms": 2000}])
 
         panel.set_error()
         self.assertEqual(panel.status_text(), "波形生成失败，不影响切片。")
         self.assertIsNone(panel.waveform_data())
+        self.assertEqual(panel.draft_segments(), [])
+
+        panel.set_draft_segments([{"index": 2, "kind": "start", "time_ms": 3000}])
+        panel.set_empty()
+        self.assertEqual(panel.draft_segments(), [])
 
     def test_waveform_panel_segment_ranges_are_cleaned(self):
         panel = app.WaveformPanel()
 
         panel.set_segments([(1000, 2000), (5000, 3000), ("bad", 7000), (3000, 5000)])
+        panel.set_draft_segments([
+            {"index": 0, "kind": "start", "time_ms": 6000},
+            {"index": 1, "kind": "end", "time_ms": 7000},
+        ])
 
         self.assertEqual(panel.segment_ranges(), [(1000, 2000), (3000, 5000)])
+        self.assertEqual(
+            panel.draft_segments(),
+            [
+                {"index": 0, "kind": "start", "time_ms": 6000},
+                {"index": 1, "kind": "end", "time_ms": 7000},
+            ],
+        )
 
     def test_main_window_waveform_segment_ranges_ignore_speed(self):
         window = app.MainWindow.__new__(app.MainWindow)

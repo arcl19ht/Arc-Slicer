@@ -167,6 +167,28 @@ class SegmentRowUiTests(unittest.TestCase):
         self.assertEqual(focused[-1], ("first", "start"))
         self.assertTrue(first._start_error.isVisible())
 
+    def test_run_slicing_hard_validation_still_blocks_start_and_end_drafts(self):
+        win = app.MainWindow.__new__(app.MainWindow)
+        win._audio_duration_ms = 10000
+
+        start_draft = app.SegmentRow(1, None, None)
+        start_draft.show()
+        start_draft._start.setText("1000")
+        win._rows = [start_draft]
+        error = app.MainWindow._first_segment_validation_error(win)
+        self.assertIsNotNone(error)
+        self.assertEqual(error[2].first_field, "end")
+        self.assertTrue(start_draft._end_error.isVisible())
+
+        end_draft = app.SegmentRow(1, None, None)
+        end_draft.show()
+        end_draft._end.setText("2000")
+        win._rows = [end_draft]
+        error = app.MainWindow._first_segment_validation_error(win)
+        self.assertIsNotNone(error)
+        self.assertEqual(error[2].first_field, "start")
+        self.assertTrue(end_draft._start_error.isVisible())
+
 
 if __name__ == "__main__":
     unittest.main()
