@@ -5,6 +5,7 @@ Arc Slicer — PyQt6 独立桌面应用
 from __future__ import annotations
 
 import hashlib
+import array
 import json
 import math
 import os
@@ -94,11 +95,15 @@ LIBRARY_EXPORT_ROOT = OUT_DIR / "library_export"
 LIBRARY_EXPORT_SONGS_DIR = LIBRARY_EXPORT_ROOT / "songs"
 EXTERNAL_MERGE_BACKUP_ROOT = DATA_ROOT / "backups" / "external_merge"
 EXTERNAL_MERGE_TARGET_CONFIG_KEY = "external_merge_target_songs_dir"
+WAVEFORM_CACHE_DIR = DATA_ROOT / "cache" / "waveforms"
 CONFIG_PATH = DATA_ROOT / "config.json"
 SLIDES_PATH = DATA_ROOT / "slides.json"
 SONGLIST_EXAMPLE_PATH = APP_DIR / "songlist_example.json"
 _FFMPEG_BUNDLED = RES_DIR / "ffmpeg.exe"
 _AUTO_SEGMENT = object()
+WAVEFORM_CACHE_VERSION = 1
+WAVEFORM_DECODE_SAMPLE_RATE = 8000
+DEFAULT_WAVEFORM_SAMPLES_PER_SECOND = 100
 
 # ─── 颜色常量 ─────────────────────────────────────────────────────────────────
 
@@ -763,6 +768,173 @@ def probe_audio_duration_ms(audio_path: Path) -> int:
         errors.append(f"ffmpeg: {ex}")
 
     raise RuntimeError("; ".join(err for err in errors if err) or "无法读取音频时长")
+
+
+@dataclass
+class WaveformData:
+    duration_ms: int
+    samples_per_second: int
+    peaks: list[tuple[float, float]]
+
+
+def aggregate_pcm_waveform(
+    pcm_bytes: bytes,
+    sample_rate: int = WAVEFORM_DECODE_SAMPLE_RATE,
+    samples_per_second: int = DEFAULT_WAVEFORM_SAMPLES_PER_SECOND,
+) -> WaveformData:
+    if sample_rate <= 0:
+        raise ValueError("sample_rate must be positive")
+    if samples_per_second <= 0:
+        raise ValueError("samples_per_second must be positive")
+    if not pcm_bytes:
+        return WaveformData(duration_ms=0, samples_per_second=int(samples_per_second), peaks=[])
+
+    sample_count = len(pcm_bytes) // 2
+    if sample_count <= 0:
+        return WaveformData(duration_ms=0, samples_per_second=int(samples_per_second), peaks=[])
+
+    samples = array.array("h")
+    samples.frombytes(pcm_bytes[: sample_count * 2])
+    if sys.byteorder != "little":
+        samples.byteswap()
+
+    samples_per_bucket = max(1, int(round(sample_rate / samples_per_second)))
+    peaks: list[tuple[float, float]] = []
+    for start in range(0, sample_count, samples_per_bucket):
+        bucket = samples[start:start + samples_per_bucket]
+        if not bucket:
+            continue
+        min_amp = max(-1.0, min(1.0, min(bucket) / 32768.0))
+        max_amp = max(-1.0, min(1.0, max(bucket) / 32767.0))
+        peaks.append((float(min_amp), float(max_amp)))
+
+    duration_ms = int(round(sample_count * 1000 / sample_rate))
+    return WaveformData(
+        duration_ms=duration_ms,
+        samples_per_second=int(samples_per_second),
+        peaks=peaks,
+    )
+
+
+def waveform_cache_key(audio_path: Path, samples_per_second: int = DEFAULT_WAVEFORM_SAMPLES_PER_SECOND) -> str:
+    path = Path(audio_path)
+    stat = path.stat()
+    payload = json.dumps(
+        {
+            "path": str(path.resolve(strict=False)),
+            "size": int(stat.st_size),
+            "mtime_ns": int(stat.st_mtime_ns),
+            "samples_per_second": int(samples_per_second),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def waveform_cache_path(
+    audio_path: Path,
+    samples_per_second: int = DEFAULT_WAVEFORM_SAMPLES_PER_SECOND,
+    cache_dir: Path | None = None,
+) -> Path:
+    return Path(cache_dir or WAVEFORM_CACHE_DIR) / f"{waveform_cache_key(audio_path, samples_per_second)}.json"
+
+
+def _coerce_waveform_peaks(raw_peaks) -> list[tuple[float, float]]:
+    if not isinstance(raw_peaks, list):
+        raise ValueError("invalid peaks")
+    peaks: list[tuple[float, float]] = []
+    for item in raw_peaks:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            raise ValueError("invalid peak")
+        lo = max(-1.0, min(1.0, float(item[0])))
+        hi = max(-1.0, min(1.0, float(item[1])))
+        peaks.append((lo, hi))
+    return peaks
+
+
+def read_waveform_cache(path: Path) -> WaveformData | None:
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(raw, dict) or raw.get("version") != WAVEFORM_CACHE_VERSION:
+            return None
+        duration_ms = int(raw.get("duration_ms", 0))
+        samples_per_second = int(raw.get("samples_per_second", 0))
+        if duration_ms < 0 or samples_per_second <= 0:
+            return None
+        return WaveformData(
+            duration_ms=duration_ms,
+            samples_per_second=samples_per_second,
+            peaks=_coerce_waveform_peaks(raw.get("peaks")),
+        )
+    except Exception:
+        return None
+
+
+def write_waveform_cache(path: Path, data: WaveformData) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f".{path.name}.tmp_{uuid.uuid4().hex}"
+    payload = {
+        "version": WAVEFORM_CACHE_VERSION,
+        "duration_ms": int(data.duration_ms),
+        "samples_per_second": int(data.samples_per_second),
+        "peaks": [[float(lo), float(hi)] for lo, hi in data.peaks],
+    }
+    try:
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def decode_audio_waveform(
+    audio_path: Path,
+    samples_per_second: int = DEFAULT_WAVEFORM_SAMPLES_PER_SECOND,
+) -> WaveformData:
+    ffmpeg = _get_ffmpeg()
+    cp = subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(audio_path),
+            "-ac",
+            "1",
+            "-ar",
+            str(WAVEFORM_DECODE_SAMPLE_RATE),
+            "-f",
+            "s16le",
+            "pipe:1",
+        ],
+        check=True,
+        capture_output=True,
+        creationflags=_subprocess_no_window_flag(),
+    )
+    return aggregate_pcm_waveform(cp.stdout or b"", WAVEFORM_DECODE_SAMPLE_RATE, samples_per_second)
+
+
+def load_or_generate_waveform(
+    audio_path: Path,
+    samples_per_second: int = DEFAULT_WAVEFORM_SAMPLES_PER_SECOND,
+    cache_dir: Path | None = None,
+) -> WaveformData:
+    cache_path = waveform_cache_path(audio_path, samples_per_second, cache_dir)
+    cached = read_waveform_cache(cache_path)
+    if cached is not None:
+        return cached
+    data = decode_audio_waveform(audio_path, samples_per_second)
+    try:
+        write_waveform_cache(cache_path, data)
+    except Exception:
+        pass
+    return data
 
 
 def _parse_non_negative_time_text(text: str, field_name: str) -> tuple[int | None, str]:
@@ -2369,6 +2541,34 @@ class ExternalMergeWorker(QThread):
             self.done_signal.emit(self.mode, self.generation, None, str(ex))
 
 
+class WaveformWorker(QThread):
+    done_signal = pyqtSignal(int, str, object, str)
+
+    def __init__(
+        self,
+        generation: int,
+        audio_path: Path,
+        samples_per_second: int = DEFAULT_WAVEFORM_SAMPLES_PER_SECOND,
+        cache_dir: Path | None = None,
+    ):
+        super().__init__()
+        self.generation = int(generation)
+        self.audio_path = Path(audio_path)
+        self.samples_per_second = int(samples_per_second)
+        self.cache_dir = Path(cache_dir) if cache_dir is not None else None
+
+    def run(self):
+        try:
+            data = load_or_generate_waveform(
+                self.audio_path,
+                self.samples_per_second,
+                self.cache_dir,
+            )
+            self.done_signal.emit(self.generation, str(self.audio_path), data, "")
+        except Exception as ex:
+            self.done_signal.emit(self.generation, str(self.audio_path), None, str(ex))
+
+
 class SlicerWorker(QThread):
     log_signal  = pyqtSignal(str, str)  # text, kind
     done_signal = pyqtSignal(int)       # return code
@@ -2942,6 +3142,119 @@ class ArcCutStatus(QFrame):
         y = max(available.top(), min(y, available.bottom() - card_h))
         x = max(available.left(), min(x, available.right() - card_w))
         self._card.move(x, y)
+
+
+class WaveformPanel(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._state = "empty"
+        self._message = "选择源曲后显示波形"
+        self._waveform: WaveformData | None = None
+        self._segments: list[tuple[int, int]] = []
+        self.setMinimumHeight(128)
+        self.setMaximumHeight(150)
+        self.setStyleSheet(
+            f"QFrame {{ background: #F4EEE3; border: 1px solid #DED4C5; border-radius: 12px; }}"
+        )
+
+    def status_text(self) -> str:
+        return self._message
+
+    def waveform_data(self) -> WaveformData | None:
+        return self._waveform
+
+    def segment_ranges(self) -> list[tuple[int, int]]:
+        return list(self._segments)
+
+    def set_empty(self) -> None:
+        self._state = "empty"
+        self._message = "选择源曲后显示波形"
+        self._waveform = None
+        self.update()
+
+    def set_loading(self) -> None:
+        self._state = "loading"
+        self._message = "正在生成波形…"
+        self._waveform = None
+        self.update()
+
+    def set_error(self) -> None:
+        self._state = "error"
+        self._message = "波形生成失败，不影响切片。"
+        self._waveform = None
+        self.update()
+
+    def set_waveform(self, data: WaveformData) -> None:
+        self._state = "ready"
+        self._message = ""
+        self._waveform = data
+        self.update()
+
+    def set_segments(self, segments: list[tuple[int, int]]) -> None:
+        cleaned: list[tuple[int, int]] = []
+        for start, end in segments:
+            try:
+                s = int(start)
+                e = int(end)
+            except (TypeError, ValueError):
+                continue
+            if e > s:
+                cleaned.append((s, e))
+        self._segments = cleaned
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        rect = self.rect().adjusted(12, 10, -12, -10)
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+
+        painter.fillRect(rect, QColor("#F7F1E7"))
+        painter.setPen(QPen(QColor("#DED4C5"), 1))
+        painter.drawRect(rect)
+
+        mid_y = rect.center().y()
+        painter.setPen(QPen(QColor("#C9C0B1"), 1))
+        painter.drawLine(rect.left(), mid_y, rect.right(), mid_y)
+
+        data = self._waveform
+        if self._state != "ready" or data is None or not data.peaks or data.duration_ms <= 0:
+            painter.setPen(QColor(C_MUTED))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._message)
+            return
+
+        duration_ms = max(1, int(data.duration_ms))
+        for start_ms, end_ms in self._segments:
+            start_x = rect.left() + int(rect.width() * max(0, start_ms) / duration_ms)
+            end_x = rect.left() + int(rect.width() * min(duration_ms, end_ms) / duration_ms)
+            if end_x <= start_x:
+                end_x = start_x + 1
+            painter.fillRect(
+                QRect(start_x, rect.top(), end_x - start_x, rect.height()),
+                QColor(201, 100, 66, 48),
+            )
+
+        peaks = data.peaks
+        painter.setPen(QPen(QColor("#8A7667"), 1))
+        height_half = max(1, rect.height() // 2 - 8)
+        width = max(1, rect.width())
+        for x_offset in range(width):
+            index = min(len(peaks) - 1, int(x_offset * len(peaks) / width))
+            lo, hi = peaks[index]
+            y1 = mid_y - int(max(0.0, hi) * height_half)
+            y2 = mid_y - int(min(0.0, lo) * height_half)
+            if y2 < y1:
+                y1, y2 = y2, y1
+            painter.drawLine(rect.left() + x_offset, y1, rect.left() + x_offset, y2)
+
+        painter.setPen(QColor(C_LABEL))
+        painter.drawText(
+            rect.adjusted(6, 4, -6, -4),
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
+            format_duration_ms(duration_ms),
+        )
 
 
 class SegmentRow(QFrame):
@@ -3918,6 +4231,10 @@ class MainWindow(QMainWindow):
         self._cfg    = load_config()
         self._rows: list[SegmentRow] = []
         self._worker: SlicerWorker | None = None
+        self._waveform_worker: WaveformWorker | None = None
+        self._waveform_workers: list[WaveformWorker] = []
+        self._waveform_generation = 0
+        self._waveform_audio_path = ""
         self._external_merge_worker: ExternalMergeWorker | None = None
         self._external_merge_target: Path | None = None
         self._external_merge_plan: external_merge.ExternalMergePlan | None = None
@@ -3955,6 +4272,7 @@ class MainWindow(QMainWindow):
         finally:
             self._suppress_source_reset = False
             self._current_source_id = self._song_box.currentText()
+        self._request_waveform_for_current_song()
         if self._current_export_dirty:
             self._invalidate_external_merge_plan()
 
@@ -4072,6 +4390,10 @@ class MainWindow(QMainWindow):
         seg_head.addSpacing(14)
         seg_head.addWidget(make_label("毫秒 · 对应 .aff 整数时间", size=12, color=C_LABEL))
         lay.addLayout(seg_head)
+
+        self._waveform_panel = WaveformPanel()
+        lay.addWidget(self._waveform_panel)
+        lay.addSpacing(12)
 
         # ── 段落列表
         self._segs_widget = QWidget()
@@ -4253,6 +4575,7 @@ class MainWindow(QMainWindow):
             self._song_box.addItem("（songs 目录为空）")
             self._refresh_current_audio_duration()
             self._schedule_arc_cut_warning_refresh()
+            self._request_waveform_for_current_song()
             return
         for s in songs:
             self._song_box.addItem(s)
@@ -4260,6 +4583,7 @@ class MainWindow(QMainWindow):
             self._song_box.setCurrentText(current)
         self._refresh_current_audio_duration()
         self._schedule_arc_cut_warning_refresh()
+        self._request_waveform_for_current_song()
 
     def _apply_slides(self, data: dict):
         if data.get("speed") is not None:
@@ -4325,6 +4649,8 @@ class MainWindow(QMainWindow):
         if song_id == self._current_source_id:
             self._refresh_current_audio_duration()
             self._schedule_arc_cut_warning_refresh()
+            if hasattr(self, "_request_waveform_for_current_song"):
+                self._request_waveform_for_current_song()
             return
         self._current_source_id = song_id
         if hasattr(self._songlist_panel, "reset_for_source"):
@@ -4333,6 +4659,8 @@ class MainWindow(QMainWindow):
         self._add_segment(None, None)
         self._refresh_current_audio_duration()
         self._schedule_arc_cut_warning_refresh()
+        if hasattr(self, "_request_waveform_for_current_song"):
+            self._request_waveform_for_current_song()
         self._mark_current_export_dirty()
 
     def _current_default_speed(self, fallback: float = 1.0) -> float:
@@ -4350,6 +4678,8 @@ class MainWindow(QMainWindow):
                 pass
         if hasattr(self, "_refresh_seg_header"):
             self._refresh_seg_header()
+        if hasattr(self, "_refresh_waveform_segments"):
+            self._refresh_waveform_segments()
         self._mark_current_export_dirty()
 
     def _mark_current_export_dirty(self, *_args):
@@ -4595,6 +4925,7 @@ class MainWindow(QMainWindow):
         self._add_segment(None, None)
         self._refresh_current_audio_duration()
         self._schedule_arc_cut_warning_refresh()
+        self._request_waveform_for_current_song()
 
     # ── 段落管理 ──────────────────────────────────────────────────────────────
 
@@ -4603,6 +4934,8 @@ class MainWindow(QMainWindow):
             row = self._rows.pop()
             self._segs_layout.removeWidget(row)
             row.deleteLater()
+        if hasattr(self, "_refresh_waveform_segments"):
+            self._refresh_waveform_segments()
 
     def _add_segment(self, s=_AUTO_SEGMENT, e=_AUTO_SEGMENT, speed_override=None):
         if s is _AUTO_SEGMENT and e is _AUTO_SEGMENT:
@@ -4620,6 +4953,7 @@ class MainWindow(QMainWindow):
         )
         row.deleted.connect(self._remove_segment)
         row.changed.connect(self._refresh_seg_header)
+        row.changed.connect(self._refresh_waveform_segments)
         row.changed.connect(self._schedule_arc_cut_warning_refresh)
         if hasattr(self, "_schedule_segment_time_validation"):
             row.changed.connect(self._schedule_segment_time_validation)
@@ -4630,6 +4964,8 @@ class MainWindow(QMainWindow):
         self._segs_layout.addWidget(row)
         if hasattr(self, "_refresh_seg_header"):
             self._refresh_seg_header()
+        if hasattr(self, "_refresh_waveform_segments"):
+            self._refresh_waveform_segments()
         if hasattr(self, "_schedule_segment_time_validation"):
             self._schedule_segment_time_validation()
         if hasattr(self, "_schedule_arc_cut_warning_refresh"):
@@ -4645,6 +4981,7 @@ class MainWindow(QMainWindow):
             self._add_segment(None, None)
             return
         self._refresh_seg_header()
+        self._refresh_waveform_segments()
         if hasattr(self, "_schedule_segment_time_validation"):
             self._schedule_segment_time_validation()
         if hasattr(self, "_schedule_arc_cut_warning_refresh"):
@@ -4663,6 +5000,7 @@ class MainWindow(QMainWindow):
         )
         new_row.deleted.connect(self._remove_segment)
         new_row.changed.connect(self._refresh_seg_header)
+        new_row.changed.connect(self._refresh_waveform_segments)
         new_row.changed.connect(self._schedule_arc_cut_warning_refresh)
         if hasattr(self, "_schedule_segment_time_validation"):
             new_row.changed.connect(self._schedule_segment_time_validation)
@@ -4678,6 +5016,7 @@ class MainWindow(QMainWindow):
         for i, r in enumerate(self._rows):
             r.update_index(i + 1)
         self._refresh_seg_header()
+        self._refresh_waveform_segments()
         if hasattr(self, "_schedule_segment_time_validation"):
             self._schedule_segment_time_validation()
         if hasattr(self, "_schedule_arc_cut_warning_refresh"):
@@ -4714,6 +5053,62 @@ class MainWindow(QMainWindow):
             return None
         songs_dir = Path(raw_songs_dir)
         return songs_dir / song_id / "base.ogg"
+
+    def _waveform_segment_ranges(self) -> list[tuple[int, int]]:
+        ranges: list[tuple[int, int]] = []
+        for row in getattr(self, "_rows", []):
+            if row.s_val is None or row.e_val is None or row.e_val <= row.s_val:
+                continue
+            ranges.append((int(row.s_val), int(row.e_val)))
+        return ranges
+
+    def _refresh_waveform_segments(self) -> None:
+        panel = getattr(self, "_waveform_panel", None)
+        if panel is not None and hasattr(panel, "set_segments"):
+            panel.set_segments(self._waveform_segment_ranges())
+
+    def _request_waveform_for_current_song(self) -> None:
+        panel = getattr(self, "_waveform_panel", None)
+        if panel is None:
+            return
+        self._waveform_generation += 1
+        generation = self._waveform_generation
+        self._refresh_waveform_segments()
+        audio_path = self._current_audio_path()
+        if audio_path is None or not audio_path.is_file():
+            self._waveform_audio_path = ""
+            panel.set_empty()
+            return
+
+        self._waveform_audio_path = str(audio_path)
+        panel.set_loading()
+        worker = WaveformWorker(generation, audio_path)
+        self._waveform_worker = worker
+        self._waveform_workers.append(worker)
+        worker.done_signal.connect(self._on_waveform_done)
+        worker.start()
+
+    def _on_waveform_done(self, generation: int, audio_path: str, data, error: str):
+        try:
+            sender = self.sender()
+            if sender in self._waveform_workers:
+                self._waveform_workers.remove(sender)
+        except Exception:
+            pass
+        if generation != getattr(self, "_waveform_generation", 0):
+            return
+        if audio_path != getattr(self, "_waveform_audio_path", ""):
+            return
+        panel = getattr(self, "_waveform_panel", None)
+        if panel is None:
+            return
+        if error or not isinstance(data, WaveformData):
+            panel.set_error()
+            if error:
+                self._push_log(f"⚠ 波形生成失败，不影响切片: {error}", "muted")
+            return
+        panel.set_waveform(data)
+        self._refresh_waveform_segments()
 
     def _refresh_current_audio_duration(self):
         audio_path = self._current_audio_path()
@@ -4821,6 +5216,7 @@ class MainWindow(QMainWindow):
             return
         row.set_end_text(self._audio_duration_ms)
         self._refresh_seg_header()
+        self._refresh_waveform_segments()
         self._refresh_segment_time_validation()
         self._schedule_arc_cut_warning_refresh()
 
@@ -5060,6 +5456,17 @@ class MainWindow(QMainWindow):
         weight = self.LOG_WEIGHTS.get(kind, "400")
         self._log_widget.append(f'<span style="color:{color}; font-weight:{weight};">{escaped}</span>')
         self._log_widget.moveCursor(QTextCursor.MoveOperation.End)
+
+    def closeEvent(self, event):
+        self._waveform_generation += 1
+        for worker in list(getattr(self, "_waveform_workers", [])):
+            try:
+                if worker.isRunning():
+                    worker.quit()
+                    worker.wait(500)
+            except Exception:
+                pass
+        super().closeEvent(event)
 
     # ── 窗口级拖放（从 Explorer 直接拖到窗口任意位置）─────────────────────────
 
