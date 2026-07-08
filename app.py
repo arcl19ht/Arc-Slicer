@@ -34,6 +34,10 @@ from PyQt6.QtWidgets import (
     QScrollArea, QFrame, QFileDialog, QSizePolicy, QSpacerItem,
     QCheckBox, QGridLayout, QGraphicsDropShadowEffect,
 )
+try:
+    from PyQt6.QtWidgets import QScrollBar
+except ImportError:  # Older headless tests install a small fake PyQt surface.
+    QScrollBar = None
 
 import external_merge
 
@@ -109,22 +113,33 @@ WAVEFORM_HANDLE_PX = 8
 
 # ─── 颜色常量 ─────────────────────────────────────────────────────────────────
 
-C_BG       = "#EDE9DF"
-C_CARD     = "#FAF9F5"
-C_CARD2    = "#F2EFE7"
-C_BORDER   = "#E9E5DA"
-C_BORDER2  = "#E7E3D8"
-C_ACCENT   = "#C96442"
-C_ACCENT_H = "#B5573A"
-C_TEXT     = "#23211E"
-C_TEXT2    = "#3A372F"
-C_MUTED    = "#6E6B63"
-C_LABEL    = "#9A968C"
-C_INPUT_BG = "#F7F5EE"
-C_INPUT_BD = "#E4DFD2"
-C_OK       = "#5E7A52"
-C_ERR      = "#C1573F"
-C_BADGE_BG = "#F6E9E2"
+C_BG       = "#F3F4F6"
+C_CARD     = "#FFFFFF"
+C_CARD2    = "#F9FAFB"
+C_BORDER   = "#D1D5DB"
+C_BORDER2  = "#E5E7EB"
+C_ACCENT   = "#2563EB"
+C_ACCENT_H = "#1D4ED8"
+C_TEXT     = "#111827"
+C_TEXT2    = "#374151"
+C_MUTED    = "#6B7280"
+C_LABEL    = "#9CA3AF"
+C_INPUT_BG = "#FFFFFF"
+C_INPUT_BD = "#D1D5DB"
+C_OK       = "#0F766E"
+C_ERR      = "#DC2626"
+C_BADGE_BG = "#E5E7EB"
+C_WAVEFORM = "#4B5563"
+C_TIMELINE_BG = "#F8FAFC"
+C_TIMELINE_TRACK = "#F3F4F6"
+C_LANE_SEPARATOR = "#DADDE1"
+C_SEGMENT_FILL = "#DBEAFE"
+C_SEGMENT_ALT_FILL = "#E0E7FF"
+C_SEGMENT_BORDER = "#64748B"
+C_SELECTED = "#2563EB"
+C_HOVERED = "#60A5FA"
+C_DRAFT_START = "#0F766E"
+C_DRAFT_END = "#7C3AED"
 
 # ─── AFF 切片逻辑 ─────────────────────────────────────────────────────────────
 
@@ -2678,7 +2693,7 @@ QScrollBar:vertical {{
     margin: 0;
 }}
 QScrollBar::handle:vertical {{
-    background: #C9C4B8;
+    background: #CBD5E1;
     border-radius: 3px;
     min-height: 30px;
 }}
@@ -2752,25 +2767,25 @@ QPushButton#btnRun:disabled {{
     border: 1px solid #BFB4A6;
 }}
 QPushButton#btnSec {{
-    background: #EEE9DE;
+    background: #F9FAFB;
     color: {C_TEXT2};
-    border: 1px solid #D8D0C2;
+    border: 1px solid {C_BORDER};
     padding: 11px 16px;
     font-size: 14px;
 }}
 QPushButton#btnSec:hover {{
-    background: #E3DED2;
-    border-color: #C9BFAF;
+    background: #FFFFFF;
+    border-color: {C_BORDER};
 }}
 QPushButton#btnSec:disabled {{
-    background: #E1DBD0;
-    color: #7F776B;
-    border: 1px solid #C9C0B2;
+    background: #E5E7EB;
+    color: #6B7280;
+    border: 1px solid #D1D5DB;
 }}
 QPushButton#btnAdd {{
-    background: #FBFAF6;
+    background: {C_CARD2};
     color: {C_LABEL};
-    border: 1.5px dashed #D8D2C4;
+    border: 1.5px dashed {C_BORDER};
     border-radius: 12px;
     padding: 13px;
     font-size: 14px;
@@ -2779,26 +2794,26 @@ QPushButton#btnAdd {{
 QPushButton#btnAdd:hover {{
     border-color: {C_ACCENT};
     color: {C_ACCENT};
-    background: #FBF1EC;
+    background: #EFF6FF;
 }}
 QPushButton#btnDir {{
     background: {C_CARD};
     color: {C_TEXT2};
-    border: 1px solid #D8D2C4;
+    border: 1px solid {C_BORDER};
     border-radius: 8px;
     padding: 6px 12px;
     font-size: 12px;
     font-weight: 600;
 }}
 QPushButton#btnDir:hover {{
-    background: #F0ECE2;
+    background: {C_CARD2};
     border-color: {C_ACCENT};
     color: {C_ACCENT};
 }}
 QPushButton#btnDel {{
     background: {C_INPUT_BG};
-    color: #B0584A;
-    border: 1px solid #EAE6DC;
+    color: {C_ERR};
+    border: 1px solid {C_BORDER2};
     border-radius: 8px;
     padding: 0;
     font-size: 12px;
@@ -2809,12 +2824,12 @@ QPushButton#btnDel {{
     max-height: 30px;
 }}
 QPushButton#btnDel:hover {{
-    background: #FBECE8;
-    border-color: #E6907A;
+    background: #FEF2F2;
+    border-color: #FCA5A5;
 }}
 QTextEdit#log {{
-    background: #1F1E1B;
-    color: #E0D8C9;
+    background: #111827;
+    color: #E5E7EB;
     border: none;
     border-radius: 12px;
     padding: 14px 16px;
@@ -2948,14 +2963,14 @@ class DropZone(QFrame):
     def _update_style(self):
         if self._over:
             self.setStyleSheet(
-                f"QFrame {{ background: #FBF1EC; border: 1.5px dashed {C_ACCENT}; border-radius: 12px; }}"
+                f"QFrame {{ background: #EFF6FF; border: 1.5px dashed {C_ACCENT}; border-radius: 12px; }}"
             )
             self._main_lbl.setStyleSheet(
                 f"font-size: 13px; font-weight: 600; color: {C_ACCENT}; background: transparent; border: none;"
             )
         else:
             self.setStyleSheet(
-                "QFrame { background: #FBFAF6; border: 1.5px dashed #D8D2C4; border-radius: 12px; }"
+                f"QFrame {{ background: {C_CARD2}; border: 1.5px dashed {C_BORDER}; border-radius: 12px; }}"
             )
             self._main_lbl.setStyleSheet(
                 f"font-size: 13px; font-weight: 600; color: {C_MUTED}; background: transparent; border: none;"
@@ -3034,7 +3049,7 @@ class ArcCutInfoCard(QFrame):
         self.setMouseTracking(True)
         self.setFixedWidth(300)
         self.setStyleSheet(
-            f"QFrame#arcCutInfoCard {{ background: #FFFDF8; border: 1px solid #D8D2C4; "
+            f"QFrame#arcCutInfoCard {{ background: {C_CARD}; border: 1px solid {C_BORDER}; "
             f"border-radius: 8px; }}"
             f"QLabel {{ color: {C_TEXT}; background: transparent; border: none; }}"
         )
@@ -3042,7 +3057,7 @@ class ArcCutInfoCard(QFrame):
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(18)
         shadow.setOffset(0, 4)
-        shadow.setColor(QColor(80, 65, 45, 36))
+        shadow.setColor(QColor(31, 41, 55, 32))
         self.setGraphicsEffect(shadow)
 
         content = _arc_cut_info_content(hits, boundary)
@@ -3187,6 +3202,18 @@ class _SimpleWaveformPoint:
         return self._y
 
 
+class _SimpleWaveformSize:
+    def __init__(self, width: int, height: int):
+        self._width = int(width)
+        self._height = int(height)
+
+    def width(self) -> int:
+        return self._width
+
+    def height(self) -> int:
+        return self._height
+
+
 class _SimpleWaveformRect:
     def __init__(self, left: int, top: int, width: int, height: int):
         self._left = int(left)
@@ -3234,6 +3261,12 @@ class WaveformPanel(QFrame):
     segmentHovered = pyqtSignal(str)
     segmentSelected = pyqtSignal(str)
     emptySelected = pyqtSignal()
+    TIMELINE_LANE_HEIGHT = 28
+    TIMELINE_LANE_GAP = 2
+    TIMELINE_PADDING = 6
+    TIMELINE_SCROLLBAR_WIDTH = 10
+    TIMELINE_COLLAPSED_LANES = 3
+    TIMELINE_MAX_EXPANDED_LANES = 10
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3253,11 +3286,28 @@ class WaveformPanel(QFrame):
         self._last_endpoint_emit: tuple[int, int, int] | None = None
         self._fallback_width = 1000
         self._fallback_height = 130
+        self._timeline_expanded = True
+        self._timeline_visible_lanes = self.TIMELINE_COLLAPSED_LANES
+        self._timeline_scroll_offset = 0
+        self._timeline_scrollbar = None
+        if QScrollBar is not None:
+            try:
+                self._timeline_scrollbar = QScrollBar(Qt.Orientation.Vertical, self)
+                self._timeline_scrollbar.valueChanged.connect(self._on_timeline_scrollbar_value_changed)
+                self._timeline_scrollbar.setVisible(False)
+                self._timeline_scrollbar.setStyleSheet(
+                    "QScrollBar:vertical { background: transparent; width: 10px; margin: 0; }"
+                    "QScrollBar::handle:vertical { background: #CBD5E1; border-radius: 5px; min-height: 24px; }"
+                    "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+                    "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }"
+                )
+            except Exception:
+                self._timeline_scrollbar = None
         self.setMouseTracking(True)
         self.setMinimumHeight(220)
-        self.setMaximumHeight(280)
+        self.setMaximumHeight(460)
         self.setStyleSheet(
-            "QFrame { background: #F8F9FA; border: 1px solid #D8D8D2; border-radius: 12px; }"
+            f"QFrame {{ background: {C_TIMELINE_BG}; border: 1px solid {C_BORDER}; border-radius: 10px; }}"
         )
 
     def status_text(self) -> str:
@@ -3286,6 +3336,35 @@ class WaveformPanel(QFrame):
             pass
         try:
             super().resize(width, height)
+        except Exception:
+            pass
+        self._update_timeline_scrollbar()
+
+    def sizeHint(self) -> QSize:
+        content_h = 24 + self._waveform_area_preferred_height() + 18 + self._preferred_timeline_viewport_height()
+        width = 720
+        height = max(220, min(460, int(content_h)))
+        try:
+            size = QSize(width, height)
+            if type(size.width()) is int and type(size.height()) is int:
+                return size
+        except Exception:
+            pass
+        return _SimpleWaveformSize(width, height)
+
+    def minimumSizeHint(self) -> QSize:
+        try:
+            size = QSize(520, 220)
+            if type(size.width()) is int and type(size.height()) is int:
+                return size
+        except Exception:
+            pass
+        return _SimpleWaveformSize(520, 220)
+
+    def resizeEvent(self, event) -> None:
+        self._update_timeline_scrollbar()
+        try:
+            super().resizeEvent(event)
         except Exception:
             pass
 
@@ -3327,6 +3406,11 @@ class WaveformPanel(QFrame):
         return self._make_rect(rect.left(), top, rect.width(), max(1, height))
 
     def _timeline_area_rect(self) -> QRect:
+        outer = self._timeline_outer_rect()
+        width = max(1, outer.width() - self._timeline_scrollbar_reserved_width())
+        return self._make_rect(outer.left(), outer.top(), width, outer.height())
+
+    def _timeline_outer_rect(self) -> QRect:
         rect = self._content_rect()
         ruler = self._ruler_rect()
         top = ruler.bottom() + 1
@@ -3334,6 +3418,126 @@ class WaveformPanel(QFrame):
 
     def _waveform_rect(self) -> QRect:
         return self._waveform_area_rect()
+
+    def _waveform_area_preferred_height(self) -> int:
+        return 88
+
+    def _timeline_lane_count(self) -> int:
+        return max(1, len(self._segment_items))
+
+    def _timeline_content_height(self) -> int:
+        count = self._timeline_lane_count()
+        return (
+            self.TIMELINE_PADDING * 2
+            + count * self.TIMELINE_LANE_HEIGHT
+            + max(0, count - 1) * self.TIMELINE_LANE_GAP
+        )
+
+    def _preferred_timeline_viewport_height(self) -> int:
+        count = self._timeline_lane_count()
+        if self._timeline_expanded:
+            visible = min(max(1, count), self.TIMELINE_MAX_EXPANDED_LANES)
+        else:
+            visible = min(max(1, count), max(1, self._timeline_visible_lanes))
+        return (
+            self.TIMELINE_PADDING * 2
+            + visible * self.TIMELINE_LANE_HEIGHT
+            + max(0, visible - 1) * self.TIMELINE_LANE_GAP
+        )
+
+    def _timeline_scroll_max_for_rect(self, rect) -> int:
+        return max(0, self._timeline_content_height() - max(1, rect.height()))
+
+    def _timeline_scroll_max(self) -> int:
+        return self._timeline_scroll_max_for_rect(self._timeline_outer_rect())
+
+    def _timeline_scrollbar_reserved_width(self) -> int:
+        return self.TIMELINE_SCROLLBAR_WIDTH + 4 if self._timeline_scroll_max_for_rect(self._timeline_outer_rect()) > 0 else 0
+
+    def _clamp_timeline_scroll(self) -> None:
+        self._timeline_scroll_offset = max(0, min(int(self._timeline_scroll_offset), self._timeline_scroll_max()))
+
+    def _set_timeline_scroll_offset(self, value: int) -> bool:
+        old = self._timeline_scroll_offset
+        self._timeline_scroll_offset = max(0, min(int(value), self._timeline_scroll_max()))
+        changed = self._timeline_scroll_offset != old
+        if changed:
+            self.update()
+        self._update_timeline_scrollbar()
+        return changed
+
+    def _scroll_timeline_by(self, delta: int) -> bool:
+        return self._set_timeline_scroll_offset(self._timeline_scroll_offset + int(delta))
+
+    def _on_timeline_scrollbar_value_changed(self, value: int) -> None:
+        self._timeline_scroll_offset = max(0, min(int(value), self._timeline_scroll_max()))
+        self.update()
+
+    def _update_timeline_scrollbar(self) -> None:
+        self._clamp_timeline_scroll()
+        bar = self._timeline_scrollbar
+        if bar is None:
+            return
+        outer = self._timeline_outer_rect()
+        scroll_max = self._timeline_scroll_max_for_rect(outer)
+        try:
+            bar.setGeometry(
+                outer.right() - self.TIMELINE_SCROLLBAR_WIDTH + 1,
+                outer.top(),
+                self.TIMELINE_SCROLLBAR_WIDTH,
+                outer.height(),
+            )
+            old_block = bar.blockSignals(True)
+            bar.setRange(0, scroll_max)
+            bar.setPageStep(max(1, outer.height()))
+            bar.setSingleStep(self.TIMELINE_LANE_HEIGHT + self.TIMELINE_LANE_GAP)
+            bar.setValue(self._timeline_scroll_offset)
+            bar.blockSignals(old_block)
+            bar.setVisible(scroll_max > 0)
+        except Exception:
+            pass
+
+    def timeline_expanded(self) -> bool:
+        return bool(self._timeline_expanded)
+
+    def set_timeline_expanded(self, expanded: bool) -> None:
+        expanded = bool(expanded)
+        if self._timeline_expanded == expanded:
+            return
+        self._timeline_expanded = expanded
+        self._set_timeline_scroll_offset(0)
+        self.updateGeometry()
+        self.update()
+
+    def set_timeline_visible_lanes(self, count: int) -> None:
+        try:
+            value = int(count)
+        except (TypeError, ValueError):
+            value = self.TIMELINE_COLLAPSED_LANES
+        self._timeline_visible_lanes = max(1, value)
+        self._update_timeline_scrollbar()
+        self.updateGeometry()
+        self.update()
+
+    def toggle_timeline_expanded(self) -> None:
+        self.set_timeline_expanded(not self._timeline_expanded)
+
+    def ensure_segment_uid_visible(self, uid: str) -> bool:
+        uid = str(uid or "")
+        if not uid:
+            return False
+        index = next((i for i, item in enumerate(self._segment_items) if item.get("uid") == uid), None)
+        if index is None:
+            return False
+        lane_top = self.TIMELINE_PADDING + index * (self.TIMELINE_LANE_HEIGHT + self.TIMELINE_LANE_GAP)
+        lane_bottom = lane_top + self.TIMELINE_LANE_HEIGHT
+        viewport_h = max(1, self._timeline_outer_rect().height())
+        offset = self._timeline_scroll_offset
+        if lane_top < offset:
+            return self._set_timeline_scroll_offset(lane_top)
+        if lane_bottom > offset + viewport_h:
+            return self._set_timeline_scroll_offset(lane_bottom - viewport_h)
+        return False
 
     def _duration_ms(self) -> int:
         data = self._waveform
@@ -3381,6 +3585,7 @@ class WaveformPanel(QFrame):
         self._segments = []
         self._draft_segments = []
         self._hover_time_ms = None
+        self._set_timeline_scroll_offset(0)
         self._cancel_drag()
         self.update()
 
@@ -3392,6 +3597,7 @@ class WaveformPanel(QFrame):
         self._segments = []
         self._draft_segments = []
         self._hover_time_ms = None
+        self._set_timeline_scroll_offset(0)
         self._cancel_drag()
         self.update()
 
@@ -3403,6 +3609,7 @@ class WaveformPanel(QFrame):
         self._segments = []
         self._draft_segments = []
         self._hover_time_ms = None
+        self._set_timeline_scroll_offset(0)
         self._cancel_drag()
         self.update()
 
@@ -3438,6 +3645,8 @@ class WaveformPanel(QFrame):
                 })
         self._segments = cleaned
         self._segment_items = items
+        self._update_timeline_scrollbar()
+        self.updateGeometry()
         self.update()
 
     def set_selection_state(self, selected_uid: str = "", hovered_uid: str = "") -> None:
@@ -3462,6 +3671,8 @@ class WaveformPanel(QFrame):
                 continue
             cleaned.append({"index": index, "kind": kind, "time_ms": time_ms})
         self._draft_segments = cleaned
+        self._update_timeline_scrollbar()
+        self.updateGeometry()
         self.update()
 
     def _local_x_from_widget_x(self, widget_x) -> float:
@@ -3484,13 +3695,17 @@ class WaveformPanel(QFrame):
 
     def _lane_rect(self, index: int) -> QRect:
         rect = self._timeline_area_rect()
-        count = max(1, len(self._segment_items))
-        gap = 3 if count > 1 else 0
-        usable_height = max(1, rect.height() - gap * (count - 1))
-        lane_height = max(18, usable_height // count)
-        top = rect.top() + index * (lane_height + gap)
-        bottom = rect.bottom() - 1 if index == count - 1 else min(rect.bottom() - 1, top + lane_height - 1)
-        return self._make_rect(rect.left(), int(top), rect.width(), max(1, int(bottom - top + 1)))
+        try:
+            index = int(index)
+        except (TypeError, ValueError):
+            index = 0
+        top = (
+            rect.top()
+            + self.TIMELINE_PADDING
+            + index * (self.TIMELINE_LANE_HEIGHT + self.TIMELINE_LANE_GAP)
+            - self._timeline_scroll_offset
+        )
+        return self._make_rect(rect.left(), int(top), rect.width(), self.TIMELINE_LANE_HEIGHT)
 
     def _segment_lane_rect(self, _rect, index: int) -> QRect:
         return self._lane_rect(index)
@@ -3502,6 +3717,17 @@ class WaveformPanel(QFrame):
         if end_x <= start_x:
             end_x = start_x + 1
         return self._make_rect(int(start_x), lane_rect.top(), max(1, int(end_x - start_x)), lane_rect.height())
+
+    def _timeline_toggle_rect(self):
+        outer = self._timeline_outer_rect()
+        width = 42
+        return self._make_rect(outer.right() - width - self._timeline_scrollbar_reserved_width(), outer.top() + 4, width, 14)
+
+    def _point_in_timeline_toggle(self, widget_x: float, widget_y: float) -> bool:
+        try:
+            return self._timeline_toggle_rect().contains(int(widget_x), int(widget_y))
+        except Exception:
+            return False
 
     def _hit_endpoint(self, widget_x, widget_y: float | None = None) -> tuple[int, str] | None:
         x = float(widget_x)
@@ -3578,6 +3804,10 @@ class WaveformPanel(QFrame):
 
     def _begin_interaction_at_pos(self, widget_x: float, widget_y: float | None) -> bool:
         if not self._can_interact():
+            return False
+        if widget_y is not None and self._point_in_timeline_toggle(widget_x, widget_y):
+            self.toggle_timeline_expanded()
+            self._cancel_drag()
             return False
         if widget_y is not None and not self._timeline_area_rect().contains(int(widget_x), int(widget_y)):
             self._cancel_drag()
@@ -3704,21 +3934,57 @@ class WaveformPanel(QFrame):
             return
         super().mouseReleaseEvent(event)
 
+    def wheelEvent(self, event) -> None:
+        try:
+            x = self._event_widget_x(event)
+            y = self._event_widget_y(event)
+        except Exception:
+            try:
+                x = float(event.position().x())
+                y = float(event.position().y())
+            except Exception:
+                x = 0.0
+                y = 0.0
+        if self._timeline_outer_rect().contains(int(x), int(y)) and self._timeline_scroll_max() > 0:
+            delta_y = 0
+            try:
+                pixel_delta = event.pixelDelta()
+                delta_y = int(pixel_delta.y())
+            except Exception:
+                delta_y = 0
+            if not delta_y:
+                try:
+                    angle_delta = event.angleDelta()
+                    delta_y = int(angle_delta.y())
+                except Exception:
+                    delta_y = 0
+            step = self.TIMELINE_LANE_HEIGHT + self.TIMELINE_LANE_GAP
+            amount = -delta_y if abs(delta_y) < step else int(round(-delta_y / 120.0 * step))
+            if amount == 0:
+                amount = step if delta_y < 0 else -step
+            if self._scroll_timeline_by(amount):
+                try:
+                    event.accept()
+                except Exception:
+                    pass
+                return
+        super().wheelEvent(event)
+
     def _draw_waveform_background(self, painter: QPainter, rect) -> None:
-        painter.fillRect(rect, QColor("#F7F7F5"))
-        painter.setPen(QPen(QColor("#D8D8D2"), 1))
+        painter.fillRect(rect, QColor(C_TIMELINE_BG))
+        painter.setPen(QPen(QColor(C_BORDER), 1))
         painter.drawRect(rect)
 
         mid_y = rect.center().y()
-        painter.setPen(QPen(QColor("#D8D8D2"), 1))
+        painter.setPen(QPen(QColor(C_LANE_SEPARATOR), 1))
         painter.drawLine(rect.left(), mid_y, rect.right(), mid_y)
 
     def _draw_ruler(self, painter: QPainter, rect, duration_ms: int) -> None:
-        painter.fillRect(rect, QColor("#F8F9FA"))
-        painter.setPen(QPen(QColor("#DADDE1"), 1))
+        painter.fillRect(rect, QColor(C_CARD2))
+        painter.setPen(QPen(QColor(C_LANE_SEPARATOR), 1))
         painter.drawLine(rect.left(), rect.top(), rect.right(), rect.top())
         painter.drawLine(rect.left(), rect.bottom(), rect.right(), rect.bottom())
-        painter.setPen(QColor("#64748B"))
+        painter.setPen(QColor(C_SEGMENT_BORDER))
         painter.drawText(rect.adjusted(6, 0, -6, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, "0.000s")
         painter.drawText(
             rect.adjusted(6, 0, -6, 0),
@@ -3727,20 +3993,30 @@ class WaveformPanel(QFrame):
         )
 
     def _draw_timeline_background(self, painter: QPainter, rect) -> None:
-        painter.fillRect(rect, QColor("#F1F3F5"))
-        painter.setPen(QPen(QColor("#DADDE1"), 1))
+        painter.fillRect(rect, QColor(C_TIMELINE_TRACK))
+        painter.setPen(QPen(QColor(C_LANE_SEPARATOR), 1))
         painter.drawRect(rect)
         lane_count = max(1, len(self._segment_items))
         for index in range(lane_count):
             lane_rect = self._lane_rect(index)
-            painter.fillRect(lane_rect, QColor("#F8FAFC") if index % 2 == 0 else QColor("#F3F4F6"))
-            painter.setPen(QPen(QColor("#DADDE1"), 1))
+            painter.fillRect(lane_rect, QColor(C_TIMELINE_BG) if index % 2 == 0 else QColor(C_CARD2))
+            painter.setPen(QPen(QColor(C_LANE_SEPARATOR), 1))
             painter.drawLine(lane_rect.left(), lane_rect.bottom(), lane_rect.right(), lane_rect.bottom())
+        toggle = self._timeline_toggle_rect()
+        painter.fillRect(toggle, QColor("#FFFFFF"))
+        painter.setPen(QPen(QColor(C_BORDER), 1))
+        painter.drawRect(toggle)
+        painter.setPen(QColor(C_MUTED))
+        painter.drawText(
+            toggle,
+            Qt.AlignmentFlag.AlignCenter,
+            "收起" if self._timeline_expanded else "展开",
+        )
 
     def _draw_waveform(self, painter: QPainter, rect, data: WaveformData) -> None:
         peaks = data.peaks
         mid_y = rect.center().y()
-        painter.setPen(QPen(QColor("#5F666D"), 1))
+        painter.setPen(QPen(QColor(C_WAVEFORM), 1))
         height_half = max(1, rect.height() // 2 - 8)
         width = max(1, rect.width())
         for x_offset in range(width):
@@ -3753,7 +4029,7 @@ class WaveformPanel(QFrame):
             painter.drawLine(rect.left() + x_offset, y1, rect.left() + x_offset, y2)
 
     def _draw_complete_segments(self, painter: QPainter, rect) -> None:
-        group_colors = ("#2563EB", "#0F766E", "#7C3AED", "#475569")
+        group_colors = (C_SEGMENT_FILL, C_SEGMENT_ALT_FILL, "#CCFBF1", "#EDE9FE")
         group_index: dict[tuple, int] = {}
         for item in self._segment_items:
             group_key = item.get("group_key")
@@ -3767,7 +4043,7 @@ class WaveformPanel(QFrame):
             selected = uid == self._selected_segment_uid
             hovered = uid == self._hovered_segment_uid
             fill_alpha = 98 if selected else 82 if hovered else 64
-            border_color = QColor("#2563EB") if selected else QColor("#60A5FA") if hovered else QColor("#64748B")
+            border_color = QColor(C_SELECTED) if selected else QColor(C_HOVERED) if hovered else QColor(C_SEGMENT_BORDER)
             border_width = 3 if selected else 2 if hovered else 1
             painter.fillRect(clip_rect.adjusted(1, 2, -1, -2), QColor(color.red(), color.green(), color.blue(), fill_alpha))
             painter.setPen(QPen(border_color, border_width))
@@ -3776,7 +4052,7 @@ class WaveformPanel(QFrame):
             painter.fillRect(QRect(clip_rect.left() + 2, clip_rect.top() + 4, handle_w, max(4, clip_rect.height() - 8)), border_color)
             painter.fillRect(QRect(clip_rect.right() - handle_w - 1, clip_rect.top() + 4, handle_w, max(4, clip_rect.height() - 8)), border_color)
             label = f"{int(item.get('index', 0)) + 1}  {format_duration_ms(start_ms)}-{format_duration_ms(end_ms)}"
-            painter.setPen(QColor("#0F172A"))
+            painter.setPen(QColor(C_TEXT))
             painter.drawText(clip_rect.adjusted(10, 0, -8, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, label)
 
     def _draw_drag_preview(self, painter: QPainter, rect) -> None:
@@ -3791,7 +4067,7 @@ class WaveformPanel(QFrame):
             QRect(start_x, rect.top() + 4, end_x - start_x, max(6, rect.height() - 8)),
             QColor(37, 99, 235, 70),
         )
-        painter.setPen(QPen(QColor("#2563EB"), 2))
+        painter.setPen(QPen(QColor(C_SELECTED), 2))
         painter.drawLine(start_x, rect.top() + 2, start_x, rect.bottom() - 2)
         painter.drawLine(end_x, rect.top() + 2, end_x, rect.bottom() - 2)
 
@@ -3815,7 +4091,7 @@ class WaveformPanel(QFrame):
         for draft in self._draft_segments:
             anchor_x = rect.left() + self.time_ms_to_x(draft["time_ms"])
             is_start = draft["kind"] == "start"
-            color = QColor("#3D7C7A") if is_start else QColor("#7A6496")
+            color = QColor(C_DRAFT_START) if is_start else QColor(C_DRAFT_END)
             fill = QColor(color.red(), color.green(), color.blue(), 30)
             guide_pen = QPen(QColor(color.red(), color.green(), color.blue(), 210), 2)
             try:
@@ -3890,7 +4166,16 @@ class WaveformPanel(QFrame):
             return
 
         self._draw_waveform_background(painter, waveform_rect)
+        try:
+            painter.save()
+            painter.setClipRect(timeline_rect)
+        except Exception:
+            pass
         self._draw_timeline_background(painter, timeline_rect)
+        try:
+            painter.restore()
+        except Exception:
+            pass
 
         data = self._waveform
         if self._state != "ready" or data is None or not data.peaks or data.duration_ms <= 0:
@@ -3901,9 +4186,18 @@ class WaveformPanel(QFrame):
         duration_ms = max(1, int(data.duration_ms))
         self._draw_waveform(painter, waveform_rect, data)
         self._draw_ruler(painter, ruler_rect, duration_ms)
+        try:
+            painter.save()
+            painter.setClipRect(timeline_rect)
+        except Exception:
+            pass
         self._draw_complete_segments(painter, timeline_rect)
         self._draw_drag_preview(painter, timeline_rect)
         self._draw_draft_segments(painter, timeline_rect)
+        try:
+            painter.restore()
+        except Exception:
+            pass
         self._draw_hover_cursor(painter, waveform_rect)
         self._draw_duration_label(painter, waveform_rect, duration_ms)
 
@@ -4033,7 +4327,7 @@ class SegmentRow(QFrame):
         input_row.addWidget(start_col, 1)
 
         arrow = QLabel("→")
-        arrow.setStyleSheet(f"color: #C9C4B8; font-size: 15px; background: transparent; border: none;")
+        arrow.setStyleSheet(f"color: {C_LABEL}; font-size: 15px; background: transparent; border: none;")
         arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
         input_row.addWidget(arrow, 0, Qt.AlignmentFlag.AlignBottom)
 
@@ -4174,7 +4468,7 @@ class SegmentRow(QFrame):
             "}"
             "QLineEdit:focus {"
             f"border-color: {C_ACCENT}; "
-            "background: #FFFDF8;"
+            f"background: {C_CARD2};"
             "}"
         )
 
@@ -4183,20 +4477,20 @@ class SegmentRow(QFrame):
 
     def _refresh_card_style(self) -> None:
         if getattr(self, "_is_selected", False):
-            bg = "#FFFDF8"
-            border = "#C96442"
+            bg = "#EFF6FF"
+            border = C_SELECTED
             width = 2
         elif getattr(self, "_is_hovered", False):
-            bg = "#FFFDF8"
-            border = "#D9C8B6"
+            bg = "#F8FAFC"
+            border = C_HOVERED
             width = 1
         elif getattr(self, "_group_count", 1) > 1:
-            bg = "#FFFCF6"
-            border = "#D8CDBD"
+            bg = "#F8FAFC"
+            border = C_BORDER
             width = 1
         else:
-            bg = "#FFFFFF"
-            border = "#EAE6DC"
+            bg = C_CARD
+            border = C_BORDER2
             width = 1
         self.setStyleSheet(
             f"QFrame {{ background: {bg}; border: {width}px solid {border}; border-radius: 12px; }}"
@@ -5348,6 +5642,12 @@ class MainWindow(QMainWindow):
     def _set_selected_segment_uid(self, uid: str = "", *, scroll: bool = False) -> None:
         self._selected_segment_uid = str(uid or "")
         self._refresh_segment_interaction_state()
+        panel = self.__dict__.get("_waveform_panel")
+        if self._selected_segment_uid and panel is not None and hasattr(panel, "ensure_segment_uid_visible"):
+            try:
+                panel.ensure_segment_uid_visible(self._selected_segment_uid)
+            except Exception:
+                pass
         if scroll and self._selected_segment_uid:
             row = self._row_by_uid(self._selected_segment_uid)
             if row is not None:

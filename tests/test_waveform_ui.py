@@ -70,6 +70,14 @@ class WaveformUiTests(unittest.TestCase):
         panel.set_empty()
         self.assertEqual(panel.draft_segments(), [])
 
+    def test_theme_constants_are_neutral_not_warm_legacy_colors(self):
+        self.assertEqual(app.C_BG, "#F3F4F6")
+        self.assertEqual(app.C_CARD, "#FFFFFF")
+        self.assertEqual(app.C_ACCENT, "#2563EB")
+        self.assertNotIn(app.C_BG, {"#EDE9DF", "#FAF9F5", "#F2EFE7"})
+        self.assertNotIn(app.C_CARD, {"#FAF9F5", "#F2EFE7"})
+        self.assertNotIn(app.C_ACCENT, {"#C96442", "#B5573A"})
+
     def test_waveform_panel_segment_ranges_are_cleaned(self):
         panel = app.WaveformPanel()
 
@@ -105,6 +113,42 @@ class WaveformUiTests(unittest.TestCase):
         self.assertEqual(panel._waveform_rect().top(), waveform.top())
         self.assertEqual(panel._waveform_rect().height(), waveform.height())
         self.assertEqual(panel.x_to_time_ms(panel.time_ms_to_x(5000)), 5000)
+
+    def test_timeline_expanded_prefers_enough_height_for_five_lanes(self):
+        panel = app.WaveformPanel()
+        panel.set_segments([
+            (1000, 2000, "seg_1", (1000, 2000)),
+            (2000, 3000, "seg_2", (2000, 3000)),
+            (3000, 4000, "seg_3", (3000, 4000)),
+            (4000, 5000, "seg_4", (4000, 5000)),
+            (5000, 6000, "seg_5", (5000, 6000)),
+        ])
+        self.assertTrue(panel.timeline_expanded())
+        panel.resize(1024, panel.sizeHint().height())
+
+        timeline = panel._timeline_area_rect()
+        fifth_lane = panel._lane_rect(4)
+        self.assertGreaterEqual(fifth_lane.top(), timeline.top())
+        self.assertLessEqual(fifth_lane.bottom(), timeline.bottom())
+        self.assertEqual(panel._timeline_scroll_max(), 0)
+
+    def test_timeline_collapsed_scrolls_and_expanded_restores_lanes(self):
+        panel = app.WaveformPanel()
+        panel.set_segments([(i * 1000, i * 1000 + 800, f"seg_{i}", (i, i + 1)) for i in range(1, 7)])
+        panel.set_timeline_expanded(False)
+        panel.resize(1024, panel.sizeHint().height())
+
+        self.assertFalse(panel.timeline_expanded())
+        self.assertGreater(panel._timeline_scroll_max(), 0)
+        before = panel._lane_rect(5).top()
+        self.assertTrue(panel._scroll_timeline_by(panel.TIMELINE_LANE_HEIGHT * 2))
+        self.assertLess(panel._lane_rect(5).top(), before)
+
+        panel.set_timeline_expanded(True)
+        panel.resize(1024, panel.sizeHint().height())
+        self.assertTrue(panel.timeline_expanded())
+        self.assertEqual(panel._timeline_scroll_max(), 0)
+        self.assertLessEqual(panel._lane_rect(5).bottom(), panel._timeline_area_rect().bottom())
 
     def test_main_window_waveform_segment_ranges_ignore_speed(self):
         window = app.MainWindow.__new__(app.MainWindow)

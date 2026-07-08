@@ -29,6 +29,37 @@ class _CaptureSignal:
             callback(*args)
 
 
+class _Point:
+    def __init__(self, x=0, y=0):
+        self._x = x
+        self._y = y
+
+    def x(self):
+        return self._x
+
+    def y(self):
+        return self._y
+
+
+class _WheelEvent:
+    def __init__(self, x, y, delta_y):
+        self._pos = _Point(x, y)
+        self._delta = _Point(0, delta_y)
+        self.accepted = False
+
+    def position(self):
+        return self._pos
+
+    def angleDelta(self):
+        return self._delta
+
+    def pixelDelta(self):
+        return _Point(0, 0)
+
+    def accept(self):
+        self.accepted = True
+
+
 class WaveformInteractionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -174,6 +205,45 @@ class WaveformInteractionTests(unittest.TestCase):
         self.assertTrue(panel._begin_interaction_at_pos(x_start, y_lane))
         panel._update_interaction_at_pos(self._widget_x_for_time(panel, 12000), y_lane)
         self.assertEqual(changed[-1], (0, 12000, 20000))
+
+    def test_timeline_scroll_offset_updates_lane_hit_testing(self):
+        panel = self._panel(10000)
+        panel.set_segments([(1000, 3000, f"seg_{i}", (1000, 3000)) for i in range(6)])
+        panel.set_timeline_expanded(False)
+        panel.resize(1024, panel.sizeHint().height())
+        panel.ensure_segment_uid_visible("seg_5")
+
+        x_clip = self._widget_x_for_time(panel, 2000)
+        y_lane = panel._lane_rect(5).top() + 6
+        self.assertEqual(panel._hit_segment_body(x_clip, y_lane), 5)
+        self.assertFalse(panel._begin_interaction_at_pos(x_clip, y_lane))
+        self.assertEqual(panel._selected_segment_uid, "seg_5")
+
+    def test_timeline_wheel_scrolls_without_segment_signals(self):
+        panel = self._panel(10000)
+        panel.set_segments([(1000, 3000, f"seg_{i}", (1000, 3000)) for i in range(7)])
+        panel.set_timeline_expanded(False)
+        panel.resize(1024, panel.sizeHint().height())
+        created = []
+        changed = []
+        committed = []
+        self._capture_signal(panel, "segmentCreated", lambda start, end: created.append((start, end)))
+        self._capture_signal(
+            panel,
+            "segmentEndpointChanged",
+            lambda index, start, end: changed.append((index, start, end)),
+        )
+        self._capture_signal(panel, "segmentEndpointCommitted", lambda: committed.append(True))
+
+        timeline = panel._timeline_area_rect()
+        event = _WheelEvent(timeline.left() + 10, timeline.top() + 10, -120)
+        panel.wheelEvent(event)
+
+        self.assertTrue(event.accepted)
+        self.assertGreater(panel._timeline_scroll_offset, 0)
+        self.assertEqual(created, [])
+        self.assertEqual(changed, [])
+        self.assertEqual(committed, [])
 
     def test_hit_priority_endpoint_then_body_then_blank(self):
         panel = self._panel()

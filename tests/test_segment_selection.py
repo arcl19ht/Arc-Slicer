@@ -95,6 +95,22 @@ class SegmentSelectionTests(unittest.TestCase):
         self.assertEqual(win._selected_segment_uid, "")
         self.assertFalse(row._is_selected)
 
+    def test_selected_uid_scrolls_timeline_lane_into_view(self):
+        win = _window()
+        for index in range(8):
+            app.MainWindow._add_segment(win, index * 1000, index * 1000 + 800, None)
+        panel = win._waveform_panel
+        panel.set_timeline_expanded(False)
+        panel.resize(1024, panel.sizeHint().height())
+        panel._set_timeline_scroll_offset(0)
+        target = win._rows[-1]
+
+        app.MainWindow._set_selected_segment_uid(win, target.uid)
+
+        self.assertEqual(win._selected_segment_uid, target.uid)
+        self.assertGreater(panel._timeline_scroll_offset, 0)
+        self.assertLessEqual(panel._lane_rect(7).bottom(), panel._timeline_area_rect().bottom())
+
     def test_deleting_selected_row_clears_selected_and_hovered_uid(self):
         win = _window()
         app.MainWindow._add_segment(win, 1000, 2000, None)
