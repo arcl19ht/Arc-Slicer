@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 import app
 
@@ -78,6 +79,16 @@ class WaveformUiTests(unittest.TestCase):
         self.assertNotIn(app.C_CARD, {"#FAF9F5", "#F2EFE7"})
         self.assertNotIn(app.C_ACCENT, {"#C96442", "#B5573A"})
 
+    def test_app_py_no_longer_contains_legacy_warm_theme_hexes(self):
+        source = Path(app.__file__).read_text(encoding="utf-8")
+        legacy = {
+            "#EDE9DF", "#FAF9F5", "#F2EFE7", "#C96442", "#B5573A", "#F6E9E2",
+            "#F7F1E7", "#E1D6C5", "#F1E6D7", "#D0BDA5", "#DED4C5", "#F4EEE3",
+            "#FFF3EA", "#FBE2D5", "#D8CEC1", "#BFB4A6",
+        }
+        for color in legacy:
+            self.assertNotIn(color, source)
+
     def test_waveform_panel_segment_ranges_are_cleaned(self):
         panel = app.WaveformPanel()
 
@@ -131,6 +142,36 @@ class WaveformUiTests(unittest.TestCase):
         self.assertGreaterEqual(fifth_lane.top(), timeline.top())
         self.assertLessEqual(fifth_lane.bottom(), timeline.bottom())
         self.assertEqual(panel._timeline_scroll_max(), 0)
+
+    def test_timeline_uses_resize_grip_instead_of_text_toggle(self):
+        panel = app.WaveformPanel()
+        panel.set_segments([(i * 1000, i * 1000 + 800, f"seg_{i}", (i, i + 1)) for i in range(1, 6)])
+        panel.resize(1024, panel.sizeHint().height())
+
+        self.assertNotIn("_timeline_toggle_rect", app.WaveformPanel.__dict__)
+        self.assertTrue(hasattr(panel, "_timeline_grip_rect"))
+        timeline = panel._timeline_area_rect()
+        grip = panel._timeline_grip_rect()
+        self.assertGreater(grip.height(), 0)
+        self.assertGreaterEqual(grip.top(), timeline.bottom())
+        self.assertTrue(panel._hit_timeline_grip(grip.center().x(), grip.center().y()))
+        self.assertFalse(panel._hit_timeline_grip(timeline.left() + 4, timeline.top() + 4))
+
+    def test_timeline_grip_drag_shrinks_viewport_and_enables_scroll(self):
+        panel = app.WaveformPanel()
+        panel.set_segments([(i * 1000, i * 1000 + 800, f"seg_{i}", (i, i + 1)) for i in range(1, 7)])
+        panel.resize(1024, panel.sizeHint().height())
+        original_height = panel._timeline_outer_rect().height()
+        grip = panel._timeline_grip_rect()
+
+        self.assertTrue(panel._begin_interaction_at_pos(grip.center().x(), grip.center().y()))
+        panel._update_interaction_at_pos(grip.center().x(), grip.center().y() - 70)
+        panel._finish_interaction_at_pos(grip.center().x(), grip.center().y() - 70)
+
+        self.assertIsNotNone(panel._timeline_user_height)
+        self.assertLess(panel._timeline_outer_rect().height(), original_height)
+        self.assertGreater(panel._timeline_scroll_max(), 0)
+        self.assertLess(panel._lane_rect(5).bottom(), panel._timeline_area_rect().bottom() + panel._timeline_content_height())
 
     def test_timeline_collapsed_scrolls_and_expanded_restores_lanes(self):
         panel = app.WaveformPanel()

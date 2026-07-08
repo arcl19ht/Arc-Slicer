@@ -245,6 +245,31 @@ class WaveformInteractionTests(unittest.TestCase):
         self.assertEqual(changed, [])
         self.assertEqual(committed, [])
 
+    def test_timeline_resize_grip_does_not_emit_segment_signals(self):
+        panel = self._panel(10000)
+        panel.set_segments([(1000, 3000, f"seg_{i}", (1000, 3000)) for i in range(7)])
+        panel.resize(1024, panel.sizeHint().height())
+        created = []
+        changed = []
+        committed = []
+        self._capture_signal(panel, "segmentCreated", lambda start, end: created.append((start, end)))
+        self._capture_signal(
+            panel,
+            "segmentEndpointChanged",
+            lambda index, start, end: changed.append((index, start, end)),
+        )
+        self._capture_signal(panel, "segmentEndpointCommitted", lambda: committed.append(True))
+
+        grip = panel._timeline_grip_rect()
+        self.assertTrue(panel._begin_interaction_at_pos(grip.center().x(), grip.center().y()))
+        panel._update_interaction_at_pos(grip.center().x(), grip.center().y() - 80)
+        panel._finish_interaction_at_pos(grip.center().x(), grip.center().y() - 80)
+
+        self.assertGreater(panel._timeline_scroll_max(), 0)
+        self.assertEqual(created, [])
+        self.assertEqual(changed, [])
+        self.assertEqual(committed, [])
+
     def test_hit_priority_endpoint_then_body_then_blank(self):
         panel = self._panel()
         panel.set_segments([(10000, 20000)])

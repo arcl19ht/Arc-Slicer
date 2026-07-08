@@ -298,7 +298,7 @@ class SegmentValidationUiFlowTests(unittest.TestCase):
         self.assertIn("self._end_cap_btn.setCursor(Qt.CursorShape.PointingHandCursor)", source)
         self.assertIn("QPushButton:hover", source)
         self.assertIn("border-radius: 6px", source)
-        self.assertIn("background: #FFF3EA", source)
+        self.assertIn("background: #EFF6FF", source)
 
     def test_refresh_skips_completely_blank_row_until_export(self):
         win = object.__new__(app.MainWindow)

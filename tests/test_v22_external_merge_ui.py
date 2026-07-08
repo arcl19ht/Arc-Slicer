@@ -625,7 +625,8 @@ class ExternalMergeUiStateTests(unittest.TestCase):
         self.assertIn("需要先运行切片", panel._external_merge_status_label.text())
         self.assertIn("当前配置尚未导出", panel._external_merge_detail_label.text())
         self.assertNotIn("上次目标目录不可用", panel._external_merge_detail_label.text())
-        self.assertIn("#FFF4E6", panel._external_merge_detail_label._stylesheet)
+        self.assertIn("background: #FFFFFF", panel._external_merge_detail_label._stylesheet)
+        self.assertIn("#F59E0B", panel._external_merge_detail_label._stylesheet)
 
         app.MainWindow._invalidate_external_merge_plan(panel, "目标路径已变更")
         self.assertIn("需要先运行切片", panel._external_merge_status_label.text())
