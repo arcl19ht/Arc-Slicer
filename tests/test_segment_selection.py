@@ -119,7 +119,7 @@ class SegmentSelectionTests(unittest.TestCase):
         panel.emptySelected.connect(lambda: emptied.append(True))
 
         x_clip = panel._waveform_rect().left() + panel.time_ms_to_x(2000)
-        y_clip = 40
+        y_clip = panel._lane_rect(0).top() + 6
         self.assertFalse(panel._begin_interaction_at_pos(x_clip, y_clip))
         self.assertEqual(panel._selected_segment_uid, "seg_a")
         panel._update_hover_at_pos(x_clip, y_clip)
@@ -128,6 +128,23 @@ class SegmentSelectionTests(unittest.TestCase):
         x_empty = panel._waveform_rect().left() + panel.time_ms_to_x(8000)
         panel._begin_interaction_at_pos(x_empty, y_clip)
         self.assertEqual(panel._selected_segment_uid, "")
+
+    def test_waveform_area_click_does_not_select_or_create_segment(self):
+        panel = app.WaveformPanel()
+        panel.resize(1024, 220)
+        panel.set_waveform(app.WaveformData(duration_ms=10000, samples_per_second=100, peaks=[(-0.2, 0.2)] * 20))
+        panel.set_segments([(1000, 3000, "seg_a", (1000, 3000))])
+
+        x_clip = panel._waveform_rect().left() + panel.time_ms_to_x(2000)
+        y_waveform = panel._waveform_area_rect().top() + 10
+
+        self.assertFalse(panel._begin_interaction_at_pos(x_clip, y_waveform))
+        self.assertEqual(panel._selected_segment_uid, "")
+        self.assertIsNone(panel._drag_mode)
+
+        panel._update_hover_at_pos(x_clip, y_waveform)
+        self.assertEqual(panel.current_hover_time_ms(), 2000)
+        self.assertEqual(panel._hovered_segment_uid, "")
 
     def test_waveform_lane_hit_test_uses_y_position_for_overlapping_clips(self):
         panel = app.WaveformPanel()
@@ -138,7 +155,7 @@ class SegmentSelectionTests(unittest.TestCase):
             (1000, 3000, "seg_b", (1000, 3000)),
         ])
         x_clip = panel._waveform_rect().left() + panel.time_ms_to_x(2000)
-        y_second_lane = 105
+        y_second_lane = panel._lane_rect(1).top() + 6
 
         self.assertEqual(panel._hit_segment_body(x_clip, y_second_lane), 1)
         panel._begin_interaction_at_pos(x_clip, y_second_lane)

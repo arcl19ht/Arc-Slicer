@@ -155,6 +155,26 @@ class WaveformInteractionTests(unittest.TestCase):
         panel._update_interaction_at_widget_x(self._widget_x_for_time(panel, 0))
         self.assertEqual(changed[-1], (0, 10000, 10100))
 
+    def test_endpoint_drag_requires_timeline_lane_handle_when_y_is_provided(self):
+        panel = self._panel()
+        changed = []
+        self._capture_signal(
+            panel,
+            "segmentEndpointChanged",
+            lambda index, start, end: changed.append((index, start, end)),
+        )
+        panel.set_segments([(10000, 20000, "seg_a", (10000, 20000))])
+        x_start = self._widget_x_for_time(panel, 10000)
+        y_waveform = panel._waveform_area_rect().top() + 8
+        y_lane = panel._lane_rect(0).top() + 6
+
+        self.assertFalse(panel._begin_interaction_at_pos(x_start, y_waveform))
+        self.assertIsNone(panel._drag_mode)
+
+        self.assertTrue(panel._begin_interaction_at_pos(x_start, y_lane))
+        panel._update_interaction_at_pos(self._widget_x_for_time(panel, 12000), y_lane)
+        self.assertEqual(changed[-1], (0, 12000, 20000))
+
     def test_hit_priority_endpoint_then_body_then_blank(self):
         panel = self._panel()
         panel.set_segments([(10000, 20000)])

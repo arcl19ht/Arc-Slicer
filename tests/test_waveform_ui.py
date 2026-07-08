@@ -88,6 +88,24 @@ class WaveformUiTests(unittest.TestCase):
             ],
         )
 
+    def test_waveform_panel_splits_waveform_ruler_and_timeline_areas(self):
+        panel = app.WaveformPanel()
+        panel.resize(1024, 220)
+        panel.set_waveform(app.WaveformData(duration_ms=10000, samples_per_second=100, peaks=[(-0.1, 0.2)]))
+
+        waveform = panel._waveform_area_rect()
+        ruler = panel._ruler_rect()
+        timeline = panel._timeline_area_rect()
+
+        self.assertGreater(waveform.height(), 0)
+        self.assertGreater(ruler.height(), 0)
+        self.assertGreater(timeline.height(), 0)
+        self.assertLess(waveform.bottom(), ruler.top())
+        self.assertLess(ruler.bottom(), timeline.top())
+        self.assertEqual(panel._waveform_rect().top(), waveform.top())
+        self.assertEqual(panel._waveform_rect().height(), waveform.height())
+        self.assertEqual(panel.x_to_time_ms(panel.time_ms_to_x(5000)), 5000)
+
     def test_main_window_waveform_segment_ranges_ignore_speed(self):
         window = app.MainWindow.__new__(app.MainWindow)
         window._rows = [

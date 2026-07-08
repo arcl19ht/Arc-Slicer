@@ -3212,6 +3212,9 @@ class _SimpleWaveformRect:
     def bottom(self) -> int:
         return self._top + self._height
 
+    def contains(self, x: int, y: int) -> bool:
+        return self.left() <= int(x) <= self.right() and self.top() <= int(y) <= self.bottom()
+
     def center(self) -> _SimpleWaveformPoint:
         return _SimpleWaveformPoint(self._top + self._height // 2)
 
@@ -3251,10 +3254,10 @@ class WaveformPanel(QFrame):
         self._fallback_width = 1000
         self._fallback_height = 130
         self.setMouseTracking(True)
-        self.setMinimumHeight(128)
-        self.setMaximumHeight(150)
+        self.setMinimumHeight(220)
+        self.setMaximumHeight(280)
         self.setStyleSheet(
-            f"QFrame {{ background: #F4EEE3; border: 1px solid #DED4C5; border-radius: 12px; }}"
+            "QFrame { background: #F8F9FA; border: 1px solid #D8D8D2; border-radius: 12px; }"
         )
 
     def status_text(self) -> str:
@@ -3286,14 +3289,51 @@ class WaveformPanel(QFrame):
         except Exception:
             pass
 
-    def _waveform_rect(self) -> QRect:
+    def _rect_is_usable(self, rect) -> bool:
+        try:
+            values = (rect.left(), rect.top(), rect.width(), rect.height(), rect.right(), rect.bottom())
+        except Exception:
+            return False
+        return all(type(value) in (int, float) for value in values)
+
+    def _make_rect(self, left: int, top: int, width: int, height: int):
+        try:
+            rect = QRect(int(left), int(top), max(1, int(width)), max(1, int(height)))
+            if self._rect_is_usable(rect):
+                return rect
+        except Exception:
+            pass
+        return _SimpleWaveformRect(int(left), int(top), max(1, int(width)), max(1, int(height)))
+
+    def _content_rect(self) -> QRect:
         try:
             rect = self.rect().adjusted(12, 10, -12, -10)
-            if isinstance(rect.width(), int) and isinstance(rect.left(), int):
+            if self._rect_is_usable(rect):
                 return rect
         except Exception:
             pass
         return _SimpleWaveformRect(12, 10, self._fallback_width, self._fallback_height)
+
+    def _waveform_area_rect(self) -> QRect:
+        rect = self._content_rect()
+        height = max(54, min(88, int(rect.height() * 0.52)))
+        return self._make_rect(rect.left(), rect.top(), rect.width(), min(height, rect.height()))
+
+    def _ruler_rect(self) -> QRect:
+        rect = self._content_rect()
+        waveform = self._waveform_area_rect()
+        top = waveform.bottom() + 1
+        height = min(20, max(14, rect.bottom() - top + 1))
+        return self._make_rect(rect.left(), top, rect.width(), max(1, height))
+
+    def _timeline_area_rect(self) -> QRect:
+        rect = self._content_rect()
+        ruler = self._ruler_rect()
+        top = ruler.bottom() + 1
+        return self._make_rect(rect.left(), top, rect.width(), max(1, rect.bottom() - top + 1))
+
+    def _waveform_rect(self) -> QRect:
+        return self._waveform_area_rect()
 
     def _duration_ms(self) -> int:
         data = self._waveform
@@ -3428,7 +3468,7 @@ class WaveformPanel(QFrame):
         return float(widget_x) - float(self._waveform_rect().left())
 
     def _segment_widget_edges(self) -> list[tuple[int, int, int, int, int]]:
-        rect = self._waveform_rect()
+        rect = self._timeline_area_rect()
         edges: list[tuple[int, int, int, int, int]] = []
         if not self._can_interact():
             return edges
@@ -3442,27 +3482,31 @@ class WaveformPanel(QFrame):
             edges.append((index, start_x, end_x, start_ms, end_ms))
         return edges
 
-    def _segment_lane_rect(self, rect, index: int) -> QRect:
+    def _lane_rect(self, index: int) -> QRect:
+        rect = self._timeline_area_rect()
         count = max(1, len(self._segment_items))
         gap = 3 if count > 1 else 0
         usable_height = max(1, rect.height() - gap * (count - 1))
-        lane_height = max(6, usable_height // count)
+        lane_height = max(18, usable_height // count)
         top = rect.top() + index * (lane_height + gap)
         bottom = rect.bottom() - 1 if index == count - 1 else min(rect.bottom() - 1, top + lane_height - 1)
-        return QRect(rect.left(), int(top), rect.width(), max(1, int(bottom - top + 1)))
+        return self._make_rect(rect.left(), int(top), rect.width(), max(1, int(bottom - top + 1)))
+
+    def _segment_lane_rect(self, _rect, index: int) -> QRect:
+        return self._lane_rect(index)
 
     def _segment_clip_rect(self, rect, index: int, start_ms: int, end_ms: int) -> QRect:
-        lane_rect = self._segment_lane_rect(rect, index)
+        lane_rect = self._lane_rect(index)
         start_x = rect.left() + self.time_ms_to_x(start_ms)
         end_x = rect.left() + self.time_ms_to_x(end_ms)
         if end_x <= start_x:
             end_x = start_x + 1
-        return QRect(int(start_x), lane_rect.top(), max(1, int(end_x - start_x)), lane_rect.height())
+        return self._make_rect(int(start_x), lane_rect.top(), max(1, int(end_x - start_x)), lane_rect.height())
 
     def _hit_endpoint(self, widget_x, widget_y: float | None = None) -> tuple[int, str] | None:
         x = float(widget_x)
         for index, start_x, end_x, _start_ms, _end_ms in reversed(self._segment_widget_edges()):
-            if widget_y is not None and not self._segment_lane_rect(self._waveform_rect(), index).contains(int(x), int(widget_y)):
+            if widget_y is not None and not self._lane_rect(index).contains(int(x), int(widget_y)):
                 continue
             left_distance = abs(x - start_x)
             right_distance = abs(x - end_x)
@@ -3475,7 +3519,7 @@ class WaveformPanel(QFrame):
     def _hit_segment_body(self, widget_x, widget_y: float | None = None) -> int | None:
         x = float(widget_x)
         for index, start_x, end_x, _start_ms, _end_ms in reversed(self._segment_widget_edges()):
-            if widget_y is not None and not self._segment_lane_rect(self._waveform_rect(), index).contains(int(x), int(widget_y)):
+            if widget_y is not None and not self._lane_rect(index).contains(int(x), int(widget_y)):
                 continue
             if start_x < x < end_x:
                 return index
@@ -3534,6 +3578,9 @@ class WaveformPanel(QFrame):
 
     def _begin_interaction_at_pos(self, widget_x: float, widget_y: float | None) -> bool:
         if not self._can_interact():
+            return False
+        if widget_y is not None and not self._timeline_area_rect().contains(int(widget_x), int(widget_y)):
+            self._cancel_drag()
             return False
         endpoint = self._hit_endpoint(widget_x, widget_y)
         if endpoint is not None:
@@ -3658,18 +3705,42 @@ class WaveformPanel(QFrame):
         super().mouseReleaseEvent(event)
 
     def _draw_waveform_background(self, painter: QPainter, rect) -> None:
-        painter.fillRect(rect, QColor("#F7F1E7"))
-        painter.setPen(QPen(QColor("#DED4C5"), 1))
+        painter.fillRect(rect, QColor("#F7F7F5"))
+        painter.setPen(QPen(QColor("#D8D8D2"), 1))
         painter.drawRect(rect)
 
         mid_y = rect.center().y()
-        painter.setPen(QPen(QColor("#C9C0B1"), 1))
+        painter.setPen(QPen(QColor("#D8D8D2"), 1))
         painter.drawLine(rect.left(), mid_y, rect.right(), mid_y)
+
+    def _draw_ruler(self, painter: QPainter, rect, duration_ms: int) -> None:
+        painter.fillRect(rect, QColor("#F8F9FA"))
+        painter.setPen(QPen(QColor("#DADDE1"), 1))
+        painter.drawLine(rect.left(), rect.top(), rect.right(), rect.top())
+        painter.drawLine(rect.left(), rect.bottom(), rect.right(), rect.bottom())
+        painter.setPen(QColor("#64748B"))
+        painter.drawText(rect.adjusted(6, 0, -6, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, "0.000s")
+        painter.drawText(
+            rect.adjusted(6, 0, -6, 0),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+            format_duration_ms(duration_ms),
+        )
+
+    def _draw_timeline_background(self, painter: QPainter, rect) -> None:
+        painter.fillRect(rect, QColor("#F1F3F5"))
+        painter.setPen(QPen(QColor("#DADDE1"), 1))
+        painter.drawRect(rect)
+        lane_count = max(1, len(self._segment_items))
+        for index in range(lane_count):
+            lane_rect = self._lane_rect(index)
+            painter.fillRect(lane_rect, QColor("#F8FAFC") if index % 2 == 0 else QColor("#F3F4F6"))
+            painter.setPen(QPen(QColor("#DADDE1"), 1))
+            painter.drawLine(lane_rect.left(), lane_rect.bottom(), lane_rect.right(), lane_rect.bottom())
 
     def _draw_waveform(self, painter: QPainter, rect, data: WaveformData) -> None:
         peaks = data.peaks
         mid_y = rect.center().y()
-        painter.setPen(QPen(QColor("#8A7667"), 1))
+        painter.setPen(QPen(QColor("#5F666D"), 1))
         height_half = max(1, rect.height() // 2 - 8)
         width = max(1, rect.width())
         for x_offset in range(width):
@@ -3682,7 +3753,7 @@ class WaveformPanel(QFrame):
             painter.drawLine(rect.left() + x_offset, y1, rect.left() + x_offset, y2)
 
     def _draw_complete_segments(self, painter: QPainter, rect) -> None:
-        group_colors = ("#C96442", "#3D7C7A", "#7A6496", "#6F7F52")
+        group_colors = ("#2563EB", "#0F766E", "#7C3AED", "#475569")
         group_index: dict[tuple, int] = {}
         for item in self._segment_items:
             group_key = item.get("group_key")
@@ -3693,15 +3764,20 @@ class WaveformPanel(QFrame):
             end_ms = item["end"]
             clip_rect = self._segment_clip_rect(rect, int(item.get("index", 0)), start_ms, end_ms)
             uid = item["uid"]
-            alpha = 82 if uid == self._selected_segment_uid else 62 if uid == self._hovered_segment_uid else 42
-            painter.fillRect(
-                clip_rect,
-                QColor(color.red(), color.green(), color.blue(), alpha),
-            )
-            if uid == self._selected_segment_uid or uid == self._hovered_segment_uid:
-                width = 2 if uid == self._selected_segment_uid else 1
-                painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 230), width))
-                painter.drawRect(clip_rect.adjusted(0, 0, -1, -1))
+            selected = uid == self._selected_segment_uid
+            hovered = uid == self._hovered_segment_uid
+            fill_alpha = 98 if selected else 82 if hovered else 64
+            border_color = QColor("#2563EB") if selected else QColor("#60A5FA") if hovered else QColor("#64748B")
+            border_width = 3 if selected else 2 if hovered else 1
+            painter.fillRect(clip_rect.adjusted(1, 2, -1, -2), QColor(color.red(), color.green(), color.blue(), fill_alpha))
+            painter.setPen(QPen(border_color, border_width))
+            painter.drawRect(clip_rect.adjusted(1, 2, -2, -3))
+            handle_w = 4
+            painter.fillRect(QRect(clip_rect.left() + 2, clip_rect.top() + 4, handle_w, max(4, clip_rect.height() - 8)), border_color)
+            painter.fillRect(QRect(clip_rect.right() - handle_w - 1, clip_rect.top() + 4, handle_w, max(4, clip_rect.height() - 8)), border_color)
+            label = f"{int(item.get('index', 0)) + 1}  {format_duration_ms(start_ms)}-{format_duration_ms(end_ms)}"
+            painter.setPen(QColor("#0F172A"))
+            painter.drawText(clip_rect.adjusted(10, 0, -8, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, label)
 
     def _draw_drag_preview(self, painter: QPainter, rect) -> None:
         if self._drag_preview is None:
@@ -3712,12 +3788,12 @@ class WaveformPanel(QFrame):
         if end_x <= start_x:
             return
         painter.fillRect(
-            QRect(start_x, rect.top(), end_x - start_x, rect.height()),
-            QColor(201, 100, 66, 72),
+            QRect(start_x, rect.top() + 4, end_x - start_x, max(6, rect.height() - 8)),
+            QColor(37, 99, 235, 70),
         )
-        painter.setPen(QPen(QColor(C_ACCENT), 1))
-        painter.drawLine(start_x, rect.top(), start_x, rect.bottom())
-        painter.drawLine(end_x, rect.top(), end_x, rect.bottom())
+        painter.setPen(QPen(QColor("#2563EB"), 2))
+        painter.drawLine(start_x, rect.top() + 2, start_x, rect.bottom() - 2)
+        painter.drawLine(end_x, rect.top() + 2, end_x, rect.bottom() - 2)
 
     def _draw_draft_label(self, painter: QPainter, rect, anchor_x: int, text: str, color: QColor, side: str) -> None:
         label_w = 104
@@ -3807,25 +3883,29 @@ class WaveformPanel(QFrame):
         super().paintEvent(event)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        rect = self.rect().adjusted(12, 10, -12, -10)
-        if rect.width() <= 0 or rect.height() <= 0:
+        waveform_rect = self._waveform_area_rect()
+        ruler_rect = self._ruler_rect()
+        timeline_rect = self._timeline_area_rect()
+        if waveform_rect.width() <= 0 or waveform_rect.height() <= 0:
             return
 
-        self._draw_waveform_background(painter, rect)
+        self._draw_waveform_background(painter, waveform_rect)
+        self._draw_timeline_background(painter, timeline_rect)
 
         data = self._waveform
         if self._state != "ready" or data is None or not data.peaks or data.duration_ms <= 0:
             painter.setPen(QColor(C_MUTED))
-            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._message)
+            painter.drawText(waveform_rect, Qt.AlignmentFlag.AlignCenter, self._message)
             return
 
         duration_ms = max(1, int(data.duration_ms))
-        self._draw_waveform(painter, rect, data)
-        self._draw_complete_segments(painter, rect)
-        self._draw_drag_preview(painter, rect)
-        self._draw_draft_segments(painter, rect)
-        self._draw_hover_cursor(painter, rect)
-        self._draw_duration_label(painter, rect, duration_ms)
+        self._draw_waveform(painter, waveform_rect, data)
+        self._draw_ruler(painter, ruler_rect, duration_ms)
+        self._draw_complete_segments(painter, timeline_rect)
+        self._draw_drag_preview(painter, timeline_rect)
+        self._draw_draft_segments(painter, timeline_rect)
+        self._draw_hover_cursor(painter, waveform_rect)
+        self._draw_duration_label(painter, waveform_rect, duration_ms)
 
 
 class SegmentRow(QFrame):
