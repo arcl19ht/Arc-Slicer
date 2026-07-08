@@ -194,7 +194,10 @@ class WaveformInteractionTests(unittest.TestCase):
         app.MainWindow._add_waveform_segment(win, 10000, 20000)
 
         self.assertEqual(len(win._rows), 1)
-        self.assertEqual(win._rows[0].to_dict(), {"s": 10000, "e": 20000, "speed_override": None})
+        self.assertEqual(
+            {k: win._rows[0].to_dict()[k] for k in ("s", "e", "speed_override")},
+            {"s": 10000, "e": 20000, "speed_override": None},
+        )
         self.assertEqual(win._waveform_panel.segment_ranges(), [(10000, 20000)])
         self.assertTrue(win._current_export_dirty)
         self.assertIn("当前配置尚未导出", win._invalidated)
@@ -204,8 +207,40 @@ class WaveformInteractionTests(unittest.TestCase):
         win._rows[0]._speed_override.setText("2")
         app.MainWindow._update_waveform_segment_endpoint(win, 0, 12000, 21000)
 
-        self.assertEqual(win._rows[0].to_dict(), {"s": 12000, "e": 21000, "speed_override": 2.0})
+        self.assertEqual(
+            {k: win._rows[0].to_dict()[k] for k in ("s", "e", "speed_override")},
+            {"s": 12000, "e": 21000, "speed_override": 2.0},
+        )
         self.assertEqual(win._waveform_panel.segment_ranges(), [(12000, 21000)])
+
+    def test_waveform_endpoint_update_uses_uid_not_row_index(self):
+        win = app.MainWindow.__new__(app.MainWindow)
+        win._rows = []
+        win._segs_layout = _Layout()
+        win._speed_input = type("Speed", (), {"text": lambda self: "1.0"})()
+        win._waveform_panel = app.WaveformPanel()
+        win._auto_sort_enabled = False
+        win._sort_mode = "manual"
+        win._selected_segment_uid = ""
+        win._hovered_segment_uid = ""
+        win._refresh_seg_header = lambda: None
+        win._schedule_segment_time_validation = lambda: setattr(win, "_validated", True)
+        win._schedule_arc_cut_warning_refresh = lambda: setattr(win, "_arc_refreshed", True)
+        win._mark_current_export_dirty = lambda *args: setattr(win, "_dirty_marked", True)
+
+        app.MainWindow._add_segment(win, None, None, None)
+        app.MainWindow._add_segment(win, 10000, 20000, None)
+        draft_uid = win._rows[0].uid
+        complete_uid = win._rows[1].uid
+        app.MainWindow._refresh_waveform_segments(win)
+
+        app.MainWindow._update_waveform_segment_endpoint(win, 0, 12000, 21000)
+
+        self.assertEqual(win._rows[0].uid, draft_uid)
+        self.assertIsNone(win._rows[0].s_val)
+        self.assertIsNone(win._rows[0].e_val)
+        self.assertEqual(win._rows[1].uid, complete_uid)
+        self.assertEqual((win._rows[1].s_val, win._rows[1].e_val), (12000, 21000))
 
 
 if __name__ == "__main__":

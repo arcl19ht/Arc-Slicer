@@ -53,7 +53,11 @@ class SegmentRowUiTests(unittest.TestCase):
         row.set_end_text(1000)
         self.assertEqual(row.end_text(), "1000")
         self.assertEqual(row.e_val, 1000)
-        self.assertEqual(row.to_dict(), {"s": 0, "e": 1000, "speed_override": None})
+        self.assertEqual(
+            {k: row.to_dict()[k] for k in ("s", "e", "speed_override")},
+            {"s": 0, "e": 1000, "speed_override": None},
+        )
+        self.assertTrue(row.to_dict()["uid"])
 
     def test_speed_override_blank_inherits_default_and_updates_duration(self):
         row = app.SegmentRow(1, 0, 2000, default_speed=1.0)
@@ -96,7 +100,10 @@ class SegmentRowUiTests(unittest.TestCase):
         win._rows = []
         win._segs_layout = _Layout()
         win._speed_input = type("Speed", (), {"text": lambda self: "0.75"})()
+        win._auto_sort_enabled = False
+        win._sort_mode = "manual"
         win._refresh_seg_header = lambda: None
+        win._refresh_waveform_segments = lambda: None
         win._schedule_segment_time_validation = lambda: None
         win._schedule_arc_cut_warning_refresh = lambda: None
         win._mark_current_export_dirty = lambda *args: setattr(win, "_dirty_marked", True)
@@ -106,8 +113,15 @@ class SegmentRowUiTests(unittest.TestCase):
         app.MainWindow._copy_segment(win, win._rows[0])
 
         self.assertEqual(len(win._rows), 2)
-        self.assertEqual(win._rows[0].to_dict(), {"s": 1000, "e": 2000, "speed_override": 2.0})
-        self.assertEqual(win._rows[1].to_dict(), {"s": 1000, "e": 2000, "speed_override": None})
+        self.assertEqual(
+            {k: win._rows[0].to_dict()[k] for k in ("s", "e", "speed_override")},
+            {"s": 1000, "e": 2000, "speed_override": 2.0},
+        )
+        self.assertEqual(
+            {k: win._rows[1].to_dict()[k] for k in ("s", "e", "speed_override")},
+            {"s": 1000, "e": 2000, "speed_override": None},
+        )
+        self.assertNotEqual(win._rows[0].uid, win._rows[1].uid)
         self.assertEqual(win._rows[1]._badge.text(), "2")
         self.assertTrue(win._dirty_marked)
 

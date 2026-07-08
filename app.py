@@ -3227,6 +3227,10 @@ class _SimpleWaveformRect:
 class WaveformPanel(QFrame):
     segmentCreated = pyqtSignal(int, int)
     segmentEndpointChanged = pyqtSignal(int, int, int)
+    segmentEndpointCommitted = pyqtSignal()
+    segmentHovered = pyqtSignal(str)
+    segmentSelected = pyqtSignal(str)
+    emptySelected = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3234,8 +3238,11 @@ class WaveformPanel(QFrame):
         self._message = "选择源曲后显示波形"
         self._waveform: WaveformData | None = None
         self._segments: list[tuple[int, int]] = []
+        self._segment_items: list[dict] = []
         self._draft_segments: list[dict] = []
         self._hover_time_ms: int | None = None
+        self._hovered_segment_uid = ""
+        self._selected_segment_uid = ""
         self._drag_mode: str | None = None
         self._drag_index: int | None = None
         self._drag_anchor_ms: int | None = None
@@ -3258,6 +3265,9 @@ class WaveformPanel(QFrame):
 
     def segment_ranges(self) -> list[tuple[int, int]]:
         return list(self._segments)
+
+    def segment_items(self) -> list[dict]:
+        return [dict(item) for item in self._segment_items]
 
     def draft_segments(self) -> list[dict]:
         return [dict(item) for item in self._draft_segments]
@@ -3327,6 +3337,8 @@ class WaveformPanel(QFrame):
         self._state = "empty"
         self._message = "选择源曲后显示波形"
         self._waveform = None
+        self._segment_items = []
+        self._segments = []
         self._draft_segments = []
         self._hover_time_ms = None
         self._cancel_drag()
@@ -3336,6 +3348,8 @@ class WaveformPanel(QFrame):
         self._state = "loading"
         self._message = "正在生成波形…"
         self._waveform = None
+        self._segment_items = []
+        self._segments = []
         self._draft_segments = []
         self._hover_time_ms = None
         self._cancel_drag()
@@ -3345,6 +3359,8 @@ class WaveformPanel(QFrame):
         self._state = "error"
         self._message = "波形生成失败，不影响切片。"
         self._waveform = None
+        self._segment_items = []
+        self._segments = []
         self._draft_segments = []
         self._hover_time_ms = None
         self._cancel_drag()
@@ -3360,15 +3376,33 @@ class WaveformPanel(QFrame):
 
     def set_segments(self, segments: list[tuple[int, int]]) -> None:
         cleaned: list[tuple[int, int]] = []
-        for start, end in segments:
+        items: list[dict] = []
+        for index, item in enumerate(segments):
             try:
+                start = item[0]
+                end = item[1]
                 s = int(start)
                 e = int(end)
-            except (TypeError, ValueError):
+                uid = str(item[2]) if len(item) >= 3 else str(index)
+                group_key = tuple(item[3]) if len(item) >= 4 and item[3] is not None else (s, e)
+            except (TypeError, ValueError, IndexError):
                 continue
             if e > s:
                 cleaned.append((s, e))
+                items.append({
+                    "index": len(items),
+                    "uid": uid,
+                    "start": s,
+                    "end": e,
+                    "group_key": group_key,
+                })
         self._segments = cleaned
+        self._segment_items = items
+        self.update()
+
+    def set_selection_state(self, selected_uid: str = "", hovered_uid: str = "") -> None:
+        self._selected_segment_uid = str(selected_uid or "")
+        self._hovered_segment_uid = str(hovered_uid or "")
         self.update()
 
     def set_draft_segments(self, drafts: list[dict]) -> None:
@@ -3398,7 +3432,9 @@ class WaveformPanel(QFrame):
         edges: list[tuple[int, int, int, int, int]] = []
         if not self._can_interact():
             return edges
-        for index, (start_ms, end_ms) in enumerate(self._segments):
+        for index, item in enumerate(self._segment_items):
+            start_ms = item["start"]
+            end_ms = item["end"]
             start_x = rect.left() + self.time_ms_to_x(start_ms)
             end_x = rect.left() + self.time_ms_to_x(end_ms)
             if end_x <= start_x:
@@ -3406,9 +3442,28 @@ class WaveformPanel(QFrame):
             edges.append((index, start_x, end_x, start_ms, end_ms))
         return edges
 
-    def _hit_endpoint(self, widget_x) -> tuple[int, str] | None:
+    def _segment_lane_rect(self, rect, index: int) -> QRect:
+        count = max(1, len(self._segment_items))
+        gap = 3 if count > 1 else 0
+        usable_height = max(1, rect.height() - gap * (count - 1))
+        lane_height = max(6, usable_height // count)
+        top = rect.top() + index * (lane_height + gap)
+        bottom = rect.bottom() - 1 if index == count - 1 else min(rect.bottom() - 1, top + lane_height - 1)
+        return QRect(rect.left(), int(top), rect.width(), max(1, int(bottom - top + 1)))
+
+    def _segment_clip_rect(self, rect, index: int, start_ms: int, end_ms: int) -> QRect:
+        lane_rect = self._segment_lane_rect(rect, index)
+        start_x = rect.left() + self.time_ms_to_x(start_ms)
+        end_x = rect.left() + self.time_ms_to_x(end_ms)
+        if end_x <= start_x:
+            end_x = start_x + 1
+        return QRect(int(start_x), lane_rect.top(), max(1, int(end_x - start_x)), lane_rect.height())
+
+    def _hit_endpoint(self, widget_x, widget_y: float | None = None) -> tuple[int, str] | None:
         x = float(widget_x)
         for index, start_x, end_x, _start_ms, _end_ms in reversed(self._segment_widget_edges()):
+            if widget_y is not None and not self._segment_lane_rect(self._waveform_rect(), index).contains(int(x), int(widget_y)):
+                continue
             left_distance = abs(x - start_x)
             right_distance = abs(x - end_x)
             if left_distance <= WAVEFORM_HANDLE_PX or right_distance <= WAVEFORM_HANDLE_PX:
@@ -3417,9 +3472,11 @@ class WaveformPanel(QFrame):
                 return index, "end"
         return None
 
-    def _hit_segment_body(self, widget_x) -> int | None:
+    def _hit_segment_body(self, widget_x, widget_y: float | None = None) -> int | None:
         x = float(widget_x)
         for index, start_x, end_x, _start_ms, _end_ms in reversed(self._segment_widget_edges()):
+            if widget_y is not None and not self._segment_lane_rect(self._waveform_rect(), index).contains(int(x), int(widget_y)):
+                continue
             if start_x < x < end_x:
                 return index
         return None
@@ -3429,18 +3486,39 @@ class WaveformPanel(QFrame):
             return float(event.position().x())
         return float(event.pos().x())
 
+    def _event_widget_y(self, event: QMouseEvent) -> float:
+        if hasattr(event, "position"):
+            return float(event.position().y())
+        return float(event.pos().y())
+
     def _update_hover_at_widget_x(self, widget_x: float) -> None:
+        self._update_hover_at_pos(widget_x, None)
+
+    def _update_hover_at_pos(self, widget_x: float, widget_y: float | None) -> None:
         if not self._can_interact():
             self._hover_time_ms = None
+            if self._hovered_segment_uid:
+                self._hovered_segment_uid = ""
+                self.segmentHovered.emit("")
             self.update()
             return
         hover_time = self.x_to_time_ms(self._local_x_from_widget_x(widget_x))
+        body_index = self._hit_segment_body(widget_x, widget_y)
+        hover_uid = ""
+        if body_index is not None and 0 <= body_index < len(self._segment_items):
+            hover_uid = self._segment_items[body_index]["uid"]
+        if hover_uid != self._hovered_segment_uid:
+            self._hovered_segment_uid = hover_uid
+            self.segmentHovered.emit(hover_uid)
         if hover_time != self._hover_time_ms:
             self._hover_time_ms = hover_time
             self.update()
 
     def _clear_hover(self) -> None:
         self._hover_time_ms = None
+        if self._hovered_segment_uid:
+            self._hovered_segment_uid = ""
+            self.segmentHovered.emit("")
         self.unsetCursor()
         self.update()
 
@@ -3452,9 +3530,12 @@ class WaveformPanel(QFrame):
         self._last_endpoint_emit = None
 
     def _begin_interaction_at_widget_x(self, widget_x: float) -> bool:
+        return self._begin_interaction_at_pos(widget_x, None)
+
+    def _begin_interaction_at_pos(self, widget_x: float, widget_y: float | None) -> bool:
         if not self._can_interact():
             return False
-        endpoint = self._hit_endpoint(widget_x)
+        endpoint = self._hit_endpoint(widget_x, widget_y)
         if endpoint is not None:
             index, side = endpoint
             if not (0 <= index < len(self._segments)):
@@ -3468,9 +3549,17 @@ class WaveformPanel(QFrame):
             self._last_endpoint_emit = None
             self.setCursor(Qt.CursorShape.SizeHorCursor)
             return True
-        if self._hit_segment_body(widget_x) is not None:
+        if self._hit_segment_body(widget_x, widget_y) is not None:
             self._cancel_drag()
+            index = self._hit_segment_body(widget_x, widget_y)
+            if index is not None and 0 <= index < len(self._segment_items):
+                uid = self._segment_items[index]["uid"]
+                self._selected_segment_uid = uid
+                self.segmentSelected.emit(uid)
             return False
+        if self._selected_segment_uid:
+            self._selected_segment_uid = ""
+            self.emptySelected.emit()
         self._drag_mode = "create"
         self._drag_index = None
         self._drag_anchor_ms = self.x_to_time_ms(self._local_x_from_widget_x(widget_x))
@@ -3479,6 +3568,9 @@ class WaveformPanel(QFrame):
         return True
 
     def _update_interaction_at_widget_x(self, widget_x: float) -> None:
+        self._update_interaction_at_pos(widget_x, None)
+
+    def _update_interaction_at_pos(self, widget_x: float, _widget_y: float | None) -> None:
         if not self._can_interact() or self._drag_mode is None:
             return
         current_ms = self.x_to_time_ms(self._local_x_from_widget_x(widget_x))
@@ -3495,16 +3587,22 @@ class WaveformPanel(QFrame):
             self._apply_endpoint_drag(current_ms)
 
     def _finish_interaction_at_widget_x(self, widget_x: float) -> None:
+        self._finish_interaction_at_pos(widget_x, None)
+
+    def _finish_interaction_at_pos(self, widget_x: float, widget_y: float | None) -> None:
         if not self._can_interact() or self._drag_mode is None:
             self._cancel_drag()
             self.unsetCursor()
             self.update()
             return
-        self._update_interaction_at_widget_x(widget_x)
+        self._update_interaction_at_pos(widget_x, widget_y)
+        commit_endpoint = self._drag_mode in ("start", "end")
         if self._drag_mode == "create" and self._drag_preview is not None:
             start_ms, end_ms = self._drag_preview
             if end_ms - start_ms >= WAVEFORM_MIN_SEGMENT_MS:
                 self.segmentCreated.emit(int(start_ms), int(end_ms))
+        elif commit_endpoint:
+            self.segmentEndpointCommitted.emit()
         self._cancel_drag()
         self.unsetCursor()
         self.update()
@@ -3531,18 +3629,18 @@ class WaveformPanel(QFrame):
         self.update()
 
     def mousePressEvent(self, event: QMouseEvent):
-        if event.button() == Qt.MouseButton.LeftButton and self._begin_interaction_at_widget_x(self._event_widget_x(event)):
+        if event.button() == Qt.MouseButton.LeftButton and self._begin_interaction_at_pos(self._event_widget_x(event), self._event_widget_y(event)):
             event.accept()
             return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent):
         if self._drag_mode is not None:
-            self._update_interaction_at_widget_x(self._event_widget_x(event))
+            self._update_interaction_at_pos(self._event_widget_x(event), self._event_widget_y(event))
             event.accept()
             return
-        self._update_hover_at_widget_x(self._event_widget_x(event))
-        if self._can_interact() and self._hit_endpoint(self._event_widget_x(event)) is not None:
+        self._update_hover_at_pos(self._event_widget_x(event), self._event_widget_y(event))
+        if self._can_interact() and self._hit_endpoint(self._event_widget_x(event), self._event_widget_y(event)) is not None:
             self.setCursor(Qt.CursorShape.SizeHorCursor)
         else:
             self.unsetCursor()
@@ -3554,7 +3652,7 @@ class WaveformPanel(QFrame):
 
     def mouseReleaseEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton and self._drag_mode is not None:
-            self._finish_interaction_at_widget_x(self._event_widget_x(event))
+            self._finish_interaction_at_pos(self._event_widget_x(event), self._event_widget_y(event))
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -3584,15 +3682,26 @@ class WaveformPanel(QFrame):
             painter.drawLine(rect.left() + x_offset, y1, rect.left() + x_offset, y2)
 
     def _draw_complete_segments(self, painter: QPainter, rect) -> None:
-        for start_ms, end_ms in self._segments:
-            start_x = rect.left() + self.time_ms_to_x(start_ms)
-            end_x = rect.left() + self.time_ms_to_x(end_ms)
-            if end_x <= start_x:
-                end_x = start_x + 1
+        group_colors = ("#C96442", "#3D7C7A", "#7A6496", "#6F7F52")
+        group_index: dict[tuple, int] = {}
+        for item in self._segment_items:
+            group_key = item.get("group_key")
+            if group_key not in group_index:
+                group_index[group_key] = len(group_index)
+            color = QColor(group_colors[group_index[group_key] % len(group_colors)])
+            start_ms = item["start"]
+            end_ms = item["end"]
+            clip_rect = self._segment_clip_rect(rect, int(item.get("index", 0)), start_ms, end_ms)
+            uid = item["uid"]
+            alpha = 82 if uid == self._selected_segment_uid else 62 if uid == self._hovered_segment_uid else 42
             painter.fillRect(
-                QRect(start_x, rect.top(), end_x - start_x, rect.height()),
-                QColor(201, 100, 66, 48),
+                clip_rect,
+                QColor(color.red(), color.green(), color.blue(), alpha),
             )
+            if uid == self._selected_segment_uid or uid == self._hovered_segment_uid:
+                width = 2 if uid == self._selected_segment_uid else 1
+                painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 230), width))
+                painter.drawRect(clip_rect.adjusted(0, 0, -1, -1))
 
     def _draw_drag_preview(self, painter: QPainter, rect) -> None:
         if self._drag_preview is None:
@@ -3726,6 +3835,9 @@ class SegmentRow(QFrame):
     copy_requested = pyqtSignal(object)
     field_committed = pyqtSignal(object, str)
     enter_pressed = pyqtSignal(object, str)
+    hovered = pyqtSignal(object)
+    unhovered = pyqtSignal(object)
+    selected = pyqtSignal(object)
 
     def __init__(
         self,
@@ -3735,16 +3847,21 @@ class SegmentRow(QFrame):
         parent=None,
         speed_override: float | None = None,
         default_speed: float = 1.0,
+        uid: str | None = None,
     ):
         super().__init__(parent)
         self.s_val = s
         self.e_val = e
+        self.uid = str(uid or f"seg_{uuid.uuid4().hex[:10]}")
+        self.created_order = 0
+        self._is_hovered = False
+        self._is_selected = False
+        self._group_index = 0
+        self._group_count = 1
         self._default_speed = validate_speed_value(float(default_speed))
         self._initial_speed_override = normalize_speed_override_value(speed_override)
-        self.setStyleSheet(
-            "QFrame { background: #FFFFFF; border: 1px solid #EAE6DC; border-radius: 12px; }"
-        )
         self._setup_ui(index, s, e)
+        self._refresh_card_style()
 
     def _setup_ui(self, index: int, s: int | None, e: int | None):
         lay = QVBoxLayout(self)
@@ -3888,6 +4005,12 @@ class SegmentRow(QFrame):
         self._start_error = self._make_time_error_label()
         self._end_error = self._make_time_error_label()
         self._speed_error = self._make_time_error_label()
+        self._group_label = QLabel("")
+        self._group_label.setStyleSheet(
+            "font-size: 10px; font-weight: 700; color: #6F7F52; "
+            "background: #F6F1E5; border: 1px solid #DED4C5; border-radius: 6px; padding: 2px 7px;"
+        )
+        self._group_label.hide()
         self._end_cap_btn = QPushButton("")
         self._end_cap_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._end_cap_btn.setFixedHeight(20)
@@ -3917,6 +4040,7 @@ class SegmentRow(QFrame):
         status_row.addWidget(self._end_error)
         status_row.addWidget(self._end_cap_btn)
         status_row.addWidget(self._speed_error)
+        status_row.addWidget(self._group_label)
 
         self._arc_indicator_box = QWidget()
         self._arc_indicator_box.setStyleSheet("background: transparent; border: none;")
@@ -3977,6 +4101,27 @@ class SegmentRow(QFrame):
     def _speed_placeholder(self) -> str:
         return f"留空继承默认 {_speed_text(self._default_speed)}×"
 
+    def _refresh_card_style(self) -> None:
+        if getattr(self, "_is_selected", False):
+            bg = "#FFFDF8"
+            border = "#C96442"
+            width = 2
+        elif getattr(self, "_is_hovered", False):
+            bg = "#FFFDF8"
+            border = "#D9C8B6"
+            width = 1
+        elif getattr(self, "_group_count", 1) > 1:
+            bg = "#FFFCF6"
+            border = "#D8CDBD"
+            width = 1
+        else:
+            bg = "#FFFFFF"
+            border = "#EAE6DC"
+            width = 1
+        self.setStyleSheet(
+            f"QFrame {{ background: {bg}; border: {width}px solid {border}; border-radius: 12px; }}"
+        )
+
     def _install_time_validator(self, field: QLineEdit) -> None:
         try:
             from PyQt6.QtCore import QRegularExpression
@@ -4034,10 +4179,25 @@ class SegmentRow(QFrame):
                 f"font-family: 'Consolas','Courier New',monospace; font-size: 13px; "
                 f"color: {C_LABEL}; background: transparent; border: none;"
             )
-            self.setStyleSheet("QFrame { background: #FFFFFF; border: 1px solid #EAE6DC; border-radius: 12px; }")
+            self._refresh_card_style()
 
     def update_index(self, index: int):
         self._badge.setText(str(index))
+
+    def set_interaction_state(self, selected: bool = False, hovered: bool = False) -> None:
+        self._is_selected = bool(selected)
+        self._is_hovered = bool(hovered)
+        self._refresh_card_style()
+
+    def set_visual_group(self, group_index: int = 0, group_count: int = 1) -> None:
+        self._group_index = int(group_index)
+        self._group_count = max(1, int(group_count))
+        if self._group_count > 1:
+            self._group_label.setText(f"片段组 · {self._group_count} 个速度")
+            self._group_label.show()
+        else:
+            self._group_label.hide()
+        self._refresh_card_style()
 
     def start_text(self) -> str:
         return self._start.text()
@@ -4131,7 +4291,19 @@ class SegmentRow(QFrame):
         if self.s_val is None or self.e_val is None:
             return None
         override = self.speed_override_value()
-        return {"s": self.s_val, "e": self.e_val, "speed_override": override}
+        return {"uid": self.uid, "s": self.s_val, "e": self.e_val, "speed_override": override}
+
+    def enterEvent(self, event):
+        self.hovered.emit(self)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.unhovered.emit(self)
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event: QMouseEvent):
+        self.selected.emit(self)
+        super().mousePressEvent(event)
 
 
 # ─── Songlist 配置面板 ────────────────────────────────────────────────────────
@@ -4723,6 +4895,11 @@ class MainWindow(QMainWindow):
         self._current_source_id = ""
         self._suppress_source_reset = False
         self._uid    = 0
+        self._segment_order = 0
+        self._selected_segment_uid = ""
+        self._hovered_segment_uid = ""
+        self._auto_sort_enabled = True
+        self._sort_mode = "time"
         self._arc_warning_timer = QTimer(self)
         self._arc_warning_timer.setSingleShot(True)
         self._arc_warning_timer.timeout.connect(self._refresh_arc_cut_warnings)
@@ -4848,6 +5025,7 @@ class MainWindow(QMainWindow):
         self._speed_input = QLineEdit("1.0")
         self._speed_input.setFixedWidth(124)
         self._speed_input.textChanged.connect(self._on_default_speed_changed)
+        self._speed_input.editingFinished.connect(self._on_default_speed_committed)
         speed_col.addWidget(self._speed_input)
         tb_lay.addLayout(speed_col)
 
@@ -4863,12 +5041,28 @@ class MainWindow(QMainWindow):
         self._audio_duration_label = make_label("音频时长：—", size=12, color=C_LABEL)
         seg_head.addWidget(self._audio_duration_label)
         seg_head.addSpacing(14)
+        self._auto_sort_check = QCheckBox("自动排序")
+        self._auto_sort_check.setChecked(True)
+        self._auto_sort_check.setStyleSheet(f"color: {C_TEXT2}; font-size: 12px; background: transparent; border: none;")
+        self._auto_sort_check.clicked.connect(self._on_auto_sort_changed)
+        seg_head.addWidget(self._auto_sort_check)
+        self._sort_mode_box = QComboBox()
+        self._sort_mode_box.addItem("时间优先", "time")
+        self._sort_mode_box.addItem("倍速优先", "speed")
+        self._sort_mode_box.addItem("手动顺序", "manual")
+        self._sort_mode_box.currentIndexChanged.connect(self._on_sort_mode_changed)
+        seg_head.addWidget(self._sort_mode_box)
+        seg_head.addSpacing(14)
         seg_head.addWidget(make_label("毫秒 · 对应 .aff 整数时间", size=12, color=C_LABEL))
         lay.addLayout(seg_head)
 
         self._waveform_panel = WaveformPanel()
         self._waveform_panel.segmentCreated.connect(self._add_waveform_segment)
         self._waveform_panel.segmentEndpointChanged.connect(self._update_waveform_segment_endpoint)
+        self._waveform_panel.segmentEndpointCommitted.connect(self._on_waveform_endpoint_committed)
+        self._waveform_panel.segmentHovered.connect(self._on_waveform_segment_hovered)
+        self._waveform_panel.segmentSelected.connect(self._on_waveform_segment_selected)
+        self._waveform_panel.emptySelected.connect(self._clear_selected_segment)
         lay.addWidget(self._waveform_panel)
         lay.addSpacing(12)
 
@@ -5026,6 +5220,187 @@ class MainWindow(QMainWindow):
 
     # ── 初始数据 ──────────────────────────────────────────────────────────────
 
+    def _next_segment_uid(self) -> str:
+        self._uid = int(self.__dict__.get("_uid", 0)) + 1
+        return f"seg_{self._uid:04d}_{uuid.uuid4().hex[:6]}"
+
+    def _next_segment_order(self) -> int:
+        self._segment_order = int(self.__dict__.get("_segment_order", 0)) + 1
+        return self._segment_order
+
+    def _connect_segment_row(self, row: SegmentRow) -> None:
+        row.deleted.connect(self._remove_segment)
+        row.changed.connect(self._refresh_seg_header)
+        row.changed.connect(self._refresh_waveform_segments)
+        row.changed.connect(self._schedule_arc_cut_warning_refresh)
+        if hasattr(self, "_schedule_segment_time_validation"):
+            row.changed.connect(self._schedule_segment_time_validation)
+        row.changed.connect(self._mark_current_export_dirty)
+        row.end_cap_requested.connect(self._set_row_end_to_audio_duration)
+        row.copy_requested.connect(self._copy_segment)
+        row.field_committed.connect(self._on_segment_field_committed)
+        row.enter_pressed.connect(self._on_segment_enter_pressed)
+        row.hovered.connect(self._on_segment_row_hovered)
+        row.unhovered.connect(self._on_segment_row_unhovered)
+        row.selected.connect(self._on_segment_row_selected)
+
+    def _row_by_uid(self, uid: str) -> SegmentRow | None:
+        for row in self._rows:
+            if getattr(row, "uid", "") == uid:
+                return row
+        return None
+
+    def _row_time_values(self, row) -> tuple[int | None, int | None]:
+        s_val = getattr(row, "s_val", None)
+        e_val = getattr(row, "e_val", None)
+        if s_val is None and hasattr(row, "start_text"):
+            try:
+                s_val = int(row.start_text())
+            except (TypeError, ValueError):
+                s_val = None
+        if e_val is None and hasattr(row, "end_text"):
+            try:
+                e_val = int(row.end_text())
+            except (TypeError, ValueError):
+                e_val = None
+        return s_val, e_val
+
+    def _set_selected_segment_uid(self, uid: str = "", *, scroll: bool = False) -> None:
+        self._selected_segment_uid = str(uid or "")
+        self._refresh_segment_interaction_state()
+        if scroll and self._selected_segment_uid:
+            row = self._row_by_uid(self._selected_segment_uid)
+            if row is not None:
+                try:
+                    self._scroll.ensureWidgetVisible(row)
+                except Exception:
+                    pass
+
+    def _set_hovered_segment_uid(self, uid: str = "") -> None:
+        self._hovered_segment_uid = str(uid or "")
+        self._refresh_segment_interaction_state()
+
+    def _clear_selected_segment(self) -> None:
+        self._set_selected_segment_uid("")
+
+    def _on_segment_row_hovered(self, row: SegmentRow) -> None:
+        self._set_hovered_segment_uid(row.uid if row in self._rows else "")
+
+    def _on_segment_row_unhovered(self, row: SegmentRow) -> None:
+        if self._hovered_segment_uid == row.uid:
+            self._set_hovered_segment_uid("")
+
+    def _on_segment_row_selected(self, row: SegmentRow) -> None:
+        if row in self._rows:
+            self._set_selected_segment_uid(row.uid)
+
+    def _on_waveform_segment_hovered(self, uid: str) -> None:
+        self._set_hovered_segment_uid(uid)
+
+    def _on_waveform_segment_selected(self, uid: str) -> None:
+        self._set_selected_segment_uid(uid, scroll=True)
+
+    def _refresh_segment_interaction_state(self) -> None:
+        selected = self.__dict__.get("_selected_segment_uid", "")
+        hovered = self.__dict__.get("_hovered_segment_uid", "")
+        for row in getattr(self, "_rows", []):
+            row.set_interaction_state(selected=row.uid == selected, hovered=row.uid == hovered)
+        panel = self.__dict__.get("_waveform_panel")
+        if panel is not None and hasattr(panel, "set_selection_state"):
+            panel.set_selection_state(selected, hovered)
+
+    def _complete_visual_groups(self) -> dict[tuple[int, int], list[SegmentRow]]:
+        groups: dict[tuple[int, int], list[SegmentRow]] = {}
+        for row in getattr(self, "_rows", []):
+            s_val, e_val = self._row_time_values(row)
+            if s_val is None or e_val is None or e_val <= s_val:
+                continue
+            groups.setdefault((int(s_val), int(e_val)), []).append(row)
+        return groups
+
+    def _refresh_visual_groups(self) -> None:
+        groups = self._complete_visual_groups()
+        group_index = {key: idx for idx, key in enumerate(groups)}
+        for row in getattr(self, "_rows", []):
+            s_val, e_val = self._row_time_values(row)
+            key = (int(s_val), int(e_val)) if s_val is not None and e_val is not None and e_val > s_val else None
+            members = groups.get(key, []) if key is not None else []
+            if hasattr(row, "set_visual_group"):
+                row.set_visual_group(group_index.get(key, 0), len(members) if len(members) > 1 else 1)
+
+    def _row_sort_key(self, row: SegmentRow):
+        s_val = getattr(row, "s_val", None)
+        e_val = getattr(row, "e_val", None)
+        if s_val is None and hasattr(row, "start_text"):
+            try:
+                s_val = int(row.start_text())
+            except (TypeError, ValueError):
+                s_val = None
+        if e_val is None and hasattr(row, "end_text"):
+            try:
+                e_val = int(row.end_text())
+            except (TypeError, ValueError):
+                e_val = None
+        complete = s_val is not None and e_val is not None and e_val > s_val
+        order = int(getattr(row, "created_order", 0))
+        if not complete:
+            return (1, order)
+        speed = row.effective_speed() if hasattr(row, "effective_speed") else self._current_default_speed()
+        if self.__dict__.get("_sort_mode", "time") == "speed":
+            return (0, speed, int(s_val), int(e_val), order)
+        return (0, int(s_val), int(e_val), speed, order)
+
+    def _auto_sort_active(self) -> bool:
+        return bool(self.__dict__.get("_auto_sort_enabled", True)) and self.__dict__.get("_sort_mode", "time") != "manual"
+
+    def _reorder_rows(self, rows: list[SegmentRow]) -> None:
+        self._rows = list(rows)
+        for row in self._rows:
+            try:
+                self._segs_layout.removeWidget(row)
+            except Exception:
+                pass
+        for index, row in enumerate(self._rows):
+            if hasattr(self._segs_layout, "insertWidget"):
+                self._segs_layout.insertWidget(index, row)
+            else:
+                self._segs_layout.addWidget(row)
+            row.update_index(index + 1)
+        self._refresh_visual_groups()
+        self._refresh_segment_interaction_state()
+        self._refresh_seg_header()
+        self._refresh_waveform_segments()
+
+    def _maybe_auto_sort_segments(self, *, force: bool = False) -> None:
+        if not force and not self._auto_sort_active():
+            self._refresh_visual_groups()
+            self._refresh_waveform_segments()
+            return
+        if self.__dict__.get("_sort_mode", "time") == "manual":
+            self._refresh_visual_groups()
+            self._refresh_waveform_segments()
+            return
+        sorted_rows = sorted(self._rows, key=self._row_sort_key)
+        if sorted_rows != self._rows:
+            self._reorder_rows(sorted_rows)
+        else:
+            self._refresh_visual_groups()
+            self._refresh_waveform_segments()
+
+    def _on_auto_sort_changed(self, *_args) -> None:
+        self._auto_sort_enabled = bool(self._auto_sort_check.isChecked())
+        if self._auto_sort_enabled:
+            self._maybe_auto_sort_segments(force=True)
+
+    def _on_sort_mode_changed(self, *_args) -> None:
+        self._sort_mode = self._sort_mode_box.currentData() or "time"
+        if self._sort_mode == "manual":
+            self._auto_sort_enabled = False
+            self._auto_sort_check.setChecked(False)
+        elif self._auto_sort_check.isChecked():
+            self._auto_sort_enabled = True
+            self._maybe_auto_sort_segments(force=True)
+
     def _load_initial_data(self):
         songs = self._get_songs()
         self._populate_songs(songs)
@@ -5081,7 +5456,8 @@ class MainWindow(QMainWindow):
                 speed_override = normalize_speed_override_value(seg.get("speed_override"))
             except (TypeError, ValueError):
                 speed_override = None
-            self._add_segment(s, e, speed_override)
+            uid = str(seg.get("uid") or "") or None
+            self._add_segment(s, e, speed_override, uid=uid)
             added_segment = True
         if not added_segment:
             self._add_segment(None, None)
@@ -5158,6 +5534,13 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_refresh_waveform_segments"):
             self._refresh_waveform_segments()
         self._mark_current_export_dirty()
+
+    def _on_default_speed_committed(self, *_args) -> None:
+        try:
+            parse_speed_text(self._speed_input.text())
+        except ValueError:
+            return
+        self._maybe_auto_sort_segments()
 
     def _mark_current_export_dirty(self, *_args):
         if getattr(self, "_suppress_source_reset", False):
@@ -5411,10 +5794,12 @@ class MainWindow(QMainWindow):
             row = self._rows.pop()
             self._segs_layout.removeWidget(row)
             row.deleteLater()
+        self._selected_segment_uid = ""
+        self._hovered_segment_uid = ""
         if hasattr(self, "_refresh_waveform_segments"):
             self._refresh_waveform_segments()
 
-    def _add_segment(self, s=_AUTO_SEGMENT, e=_AUTO_SEGMENT, speed_override=None):
+    def _add_segment(self, s=_AUTO_SEGMENT, e=_AUTO_SEGMENT, speed_override=None, uid: str | None = None):
         if s is _AUTO_SEGMENT and e is _AUTO_SEGMENT:
             s = None
             e = None
@@ -5427,18 +5812,10 @@ class MainWindow(QMainWindow):
             e,
             speed_override=speed_override,
             default_speed=self._current_default_speed() if hasattr(self, "_speed_input") else 1.0,
+            uid=uid or self._next_segment_uid(),
         )
-        row.deleted.connect(self._remove_segment)
-        row.changed.connect(self._refresh_seg_header)
-        row.changed.connect(self._refresh_waveform_segments)
-        row.changed.connect(self._schedule_arc_cut_warning_refresh)
-        if hasattr(self, "_schedule_segment_time_validation"):
-            row.changed.connect(self._schedule_segment_time_validation)
-        row.changed.connect(self._mark_current_export_dirty)
-        row.end_cap_requested.connect(self._set_row_end_to_audio_duration)
-        row.copy_requested.connect(self._copy_segment)
-        row.field_committed.connect(self._on_segment_field_committed)
-        row.enter_pressed.connect(self._on_segment_enter_pressed)
+        row.created_order = self._next_segment_order()
+        self._connect_segment_row(row)
         self._rows.append(row)
         self._segs_layout.addWidget(row)
         if hasattr(self, "_refresh_seg_header"):
@@ -5449,11 +5826,16 @@ class MainWindow(QMainWindow):
             self._schedule_segment_time_validation()
         if hasattr(self, "_schedule_arc_cut_warning_refresh"):
             self._schedule_arc_cut_warning_refresh()
+        self._maybe_auto_sort_segments()
 
     def _remove_segment(self, row: SegmentRow):
         self._rows.remove(row)
         self._segs_layout.removeWidget(row)
         row.deleteLater()
+        if self._selected_segment_uid == row.uid:
+            self._selected_segment_uid = ""
+        if self._hovered_segment_uid == row.uid:
+            self._hovered_segment_uid = ""
         for i, r in enumerate(self._rows):
             r.update_index(i + 1)
         if not self._rows:
@@ -5465,6 +5847,7 @@ class MainWindow(QMainWindow):
             self._schedule_segment_time_validation()
         if hasattr(self, "_schedule_arc_cut_warning_refresh"):
             self._schedule_arc_cut_warning_refresh()
+        self._maybe_auto_sort_segments()
         self._mark_current_export_dirty()
 
     def _copy_segment(self, row: SegmentRow):
@@ -5476,18 +5859,10 @@ class MainWindow(QMainWindow):
             row.e_val,
             speed_override=None,
             default_speed=self._current_default_speed() if hasattr(self, "_speed_input") else 1.0,
+            uid=self._next_segment_uid(),
         )
-        new_row.deleted.connect(self._remove_segment)
-        new_row.changed.connect(self._refresh_seg_header)
-        new_row.changed.connect(self._refresh_waveform_segments)
-        new_row.changed.connect(self._schedule_arc_cut_warning_refresh)
-        if hasattr(self, "_schedule_segment_time_validation"):
-            new_row.changed.connect(self._schedule_segment_time_validation)
-        new_row.changed.connect(self._mark_current_export_dirty)
-        new_row.end_cap_requested.connect(self._set_row_end_to_audio_duration)
-        new_row.copy_requested.connect(self._copy_segment)
-        new_row.field_committed.connect(self._on_segment_field_committed)
-        new_row.enter_pressed.connect(self._on_segment_enter_pressed)
+        new_row.created_order = self._next_segment_order()
+        self._connect_segment_row(new_row)
         insert_at = self._rows.index(row) + 1
         self._rows.insert(insert_at, new_row)
         if hasattr(self._segs_layout, "insertWidget"):
@@ -5502,6 +5877,7 @@ class MainWindow(QMainWindow):
             self._schedule_segment_time_validation()
         if hasattr(self, "_schedule_arc_cut_warning_refresh"):
             self._schedule_arc_cut_warning_refresh()
+        self._maybe_auto_sort_segments()
         self._mark_current_export_dirty()
 
     def _refresh_seg_header(self):
@@ -5535,12 +5911,14 @@ class MainWindow(QMainWindow):
         songs_dir = Path(raw_songs_dir)
         return songs_dir / song_id / "base.ogg"
 
-    def _waveform_segment_ranges(self) -> list[tuple[int, int]]:
-        ranges: list[tuple[int, int]] = []
+    def _waveform_segment_ranges(self) -> list[tuple[int, int, str, tuple[int, int]]]:
+        ranges: list[tuple[int, int, str, tuple[int, int]]] = []
         for row in getattr(self, "_rows", []):
             if row.s_val is None or row.e_val is None or row.e_val <= row.s_val:
                 continue
-            ranges.append((int(row.s_val), int(row.e_val)))
+            start = int(row.s_val)
+            end = int(row.e_val)
+            ranges.append((start, end, str(getattr(row, "uid", len(ranges))), (start, end)))
         return ranges
 
     def _waveform_draft_segments(self) -> list[dict]:
@@ -5572,7 +5950,7 @@ class MainWindow(QMainWindow):
             panel.set_draft_segments(self._waveform_draft_segments())
 
     def _validate_segment_row_hard(self, row: SegmentRow) -> SegmentValidationResult:
-        result = validate_segment_bounds(row.start_text(), row.end_text(), getattr(self, "_audio_duration_ms", None))
+        result = validate_segment_bounds(row.start_text(), row.end_text(), self.__dict__.get("_audio_duration_ms", None))
         row.set_time_errors(result.start_error, result.end_error, result.end_cap_ms)
         if hasattr(row, "set_speed_error"):
             row.set_speed_error(self._segment_speed_error(row))
@@ -5583,9 +5961,14 @@ class MainWindow(QMainWindow):
             return
         if field == "speed":
             if hasattr(row, "set_speed_error"):
-                row.set_speed_error(self._segment_speed_error(row))
+                speed_error = self._segment_speed_error(row)
+                row.set_speed_error(speed_error)
+                if not speed_error:
+                    self._maybe_auto_sort_segments()
             return
-        self._validate_segment_row_hard(row)
+        result = self._validate_segment_row_hard(row)
+        if result.ok:
+            self._maybe_auto_sort_segments()
 
     def _first_empty_field_after(self, row_index: int) -> tuple[SegmentRow, str] | None:
         for row in self._rows[row_index + 1:]:
@@ -5632,6 +6015,7 @@ class MainWindow(QMainWindow):
             if speed_error:
                 row.focus_time_field("speed")
                 return
+            self._maybe_auto_sort_segments()
         else:
             result = self._validate_segment_row_hard(row)
             if result.first_field == field:
@@ -5640,6 +6024,8 @@ class MainWindow(QMainWindow):
             if field == "end" and result.first_field == "start":
                 row.focus_time_field("start")
                 return
+            if result.ok:
+                self._maybe_auto_sort_segments()
         self._focus_next_segment_field(row, field)
 
     def _add_waveform_segment(self, start_ms: int, end_ms: int) -> None:
@@ -5655,10 +6041,13 @@ class MainWindow(QMainWindow):
 
     def _update_waveform_segment_endpoint(self, index: int, start_ms: int, end_ms: int) -> None:
         try:
-            row = self._rows[int(index)]
+            item = self._waveform_panel.segment_items()[int(index)]
+            row = self._row_by_uid(str(item.get("uid", "")))
             start = int(start_ms)
             end = int(end_ms)
         except (AttributeError, IndexError, TypeError, ValueError):
+            return
+        if row is None:
             return
         if end - start < WAVEFORM_MIN_SEGMENT_MS:
             return
@@ -5667,6 +6056,9 @@ class MainWindow(QMainWindow):
         self._schedule_segment_time_validation()
         self._schedule_arc_cut_warning_refresh()
         self._mark_current_export_dirty()
+
+    def _on_waveform_endpoint_committed(self) -> None:
+        self._maybe_auto_sort_segments()
 
     def _request_waveform_for_current_song(self) -> None:
         panel = getattr(self, "_waveform_panel", None)
@@ -5941,6 +6333,7 @@ class MainWindow(QMainWindow):
             self._push_log("✗ 请先选择曲目 Song ID", "err")
             return
         self._refresh_current_audio_duration()
+        self._maybe_auto_sort_segments(force=True)
         segment_error = self._first_segment_validation_error()
         if segment_error:
             self._show_segment_validation_error(*segment_error)

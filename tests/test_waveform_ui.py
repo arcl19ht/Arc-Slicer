@@ -4,10 +4,11 @@ import app
 
 
 class _Row:
-    def __init__(self, s, e, speed=1.0):
+    def __init__(self, s, e, speed=1.0, uid="row"):
         self.s_val = s
         self.e_val = e
         self._speed = speed
+        self.uid = uid
 
     def effective_speed(self):
         return self._speed
@@ -89,11 +90,15 @@ class WaveformUiTests(unittest.TestCase):
 
     def test_main_window_waveform_segment_ranges_ignore_speed(self):
         window = app.MainWindow.__new__(app.MainWindow)
-        window._rows = [_Row(1000, 2000, speed=0.5), _Row(3000, 5000, speed=2.0), _Row(None, 6000)]
+        window._rows = [
+            _Row(1000, 2000, speed=0.5, uid="a"),
+            _Row(3000, 5000, speed=2.0, uid="b"),
+            _Row(None, 6000, uid="draft"),
+        ]
         window._waveform_panel = app.WaveformPanel()
 
         ranges = app.MainWindow._waveform_segment_ranges(window)
-        self.assertEqual(ranges, [(1000, 2000), (3000, 5000)])
+        self.assertEqual(ranges, [(1000, 2000, "a", (1000, 2000)), (3000, 5000, "b", (3000, 5000))])
 
         app.MainWindow._refresh_waveform_segments(window)
         self.assertEqual(window._waveform_panel.segment_ranges(), [(1000, 2000), (3000, 5000)])
@@ -111,7 +116,7 @@ class WaveformUiTests(unittest.TestCase):
         ]
         window._waveform_panel = app.WaveformPanel()
 
-        self.assertEqual(app.MainWindow._waveform_segment_ranges(window), [(3000, 4000)])
+        self.assertEqual(app.MainWindow._waveform_segment_ranges(window), [(3000, 4000, "0", (3000, 4000))])
         self.assertEqual(
             app.MainWindow._waveform_draft_segments(window),
             [
