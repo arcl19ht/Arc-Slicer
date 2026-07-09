@@ -110,6 +110,7 @@ class WaveformCascadeTests(unittest.TestCase):
         items = panel.segment_items()
         self.assertEqual(items[0]["link_group_id"], "grp_a")
         self.assertTrue(items[2]["join_available"])
+        self.assertEqual(items[2]["join_mode"], "join_existing")
         self.assertTrue(panel._timeline_grip_rect().height() > 0)
 
         panel.ensure_segment_uid_visible(win._rows[2].uid)
@@ -120,6 +121,17 @@ class WaveformCascadeTests(unittest.TestCase):
         x_wave = panel._waveform_area_rect().left() + panel.time_ms_to_x(100000)
         y_wave = panel._waveform_area_rect().top() + 5
         self.assertFalse(panel._begin_interaction_at_pos(x_wave, y_wave))
+
+    def test_same_interval_unlinked_rows_are_hint_not_active_group(self):
+        win = _window(cascade=True)
+        app.MainWindow._add_segment(win, 1000, 3000, None)
+        app.MainWindow._add_segment(win, 1000, 3000, 0.8)
+        app.MainWindow._refresh_waveform_segments(win)
+
+        items = win._waveform_panel.segment_items()
+        self.assertIsNone(items[0]["link_group_id"])
+        self.assertTrue(items[0]["join_available"])
+        self.assertEqual(items[0]["join_mode"], "create_same_interval")
 
 
 if __name__ == "__main__":

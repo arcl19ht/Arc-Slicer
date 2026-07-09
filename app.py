@@ -3711,6 +3711,7 @@ class WaveformPanel(QFrame):
                 group_key = tuple(item[3]) if len(item) >= 4 and item[3] is not None else (s, e)
                 link_group_id = normalize_link_group_id(item[4]) if len(item) >= 5 else None
                 join_available = bool(item[5]) if len(item) >= 6 else False
+                join_mode = str(item[6] or "") if len(item) >= 7 else ("join_existing" if join_available else "")
             except (TypeError, ValueError, IndexError):
                 continue
             if e > s:
@@ -3723,6 +3724,7 @@ class WaveformPanel(QFrame):
                     "group_key": group_key,
                     "link_group_id": link_group_id,
                     "join_available": join_available,
+                    "join_mode": join_mode,
                 })
         self._segments = cleaned
         self._segment_items = items
@@ -4728,7 +4730,7 @@ class SegmentRow(QFrame):
         self._group_index = int(group_index)
         self._group_count = max(1, int(group_count))
         if self._group_count > 1:
-            self._group_label.setText(f"片段组 · {self._group_count} 个速度")
+            self._group_label.setText(f"同区间 · {self._group_count} 个速度")
             self._group_label.show()
         else:
             self._group_label.hide()
@@ -4740,19 +4742,25 @@ class SegmentRow(QFrame):
         member_count: int = 1,
         join_available: bool = False,
         join_preview: bool = False,
+        join_mode: str = "",
     ) -> None:
         self._link_group_active = bool(active)
         self._join_group_available = bool(join_available)
         self._join_preview = bool(join_preview)
+        self._join_mode = str(join_mode or "")
         if self._link_group_active:
-            self._group_label.setText(f"级联 · {max(2, int(member_count))} 段")
+            self._group_label.setText(f"已级联 · {max(2, int(member_count))} 个")
             self._group_label.show()
             self._link_action_btn.setText("断开")
             self._link_action_btn.setToolTip("从当前级联组断开")
             self._link_action_btn.show()
         elif self._join_group_available:
-            self._link_action_btn.setText("加入组")
-            self._link_action_btn.setToolTip("加入相同起止时间的级联组")
+            if self._join_mode == "create_same_interval":
+                self._link_action_btn.setText("级联同区间")
+                self._link_action_btn.setToolTip("将同区间未级联片段组成新的级联组")
+            else:
+                self._link_action_btn.setText("加入级联")
+                self._link_action_btn.setToolTip("加入相同起止时间的已有级联组")
             self._link_action_btn.show()
         else:
             self._link_action_btn.setText("")
@@ -5911,7 +5919,7 @@ class MainWindow(QMainWindow):
         self._set_selected_segment_uid(uid, scroll=True)
 
     def _on_join_group_previewed(self, row: SegmentRow) -> None:
-        if row in self._rows and self._row_join_target_group_id(row):
+        if row in self._rows and self._row_join_mode(row):
             self._join_preview_uid = row.uid
             self._refresh_visual_groups()
 
@@ -5937,9 +5945,14 @@ class MainWindow(QMainWindow):
         if row not in self._rows:
             return
         group_id = self._row_join_target_group_id(row)
+        target_rows = [row]
         if not group_id:
-            return
-        row.link_group_id = group_id
+            target_rows = self._same_interval_unlinked_rows(row)
+            if not target_rows:
+                return
+            group_id = new_link_group_id()
+        for target in target_rows:
+            target.link_group_id = group_id
         self._set_selected_segment_uid(row.uid)
         self._join_preview_uid = ""
         self._refresh_visual_groups()
@@ -5995,6 +6008,28 @@ class MainWindow(QMainWindow):
                 return group_id
         return None
 
+    def _same_interval_unlinked_rows(self, row: SegmentRow) -> list[SegmentRow]:
+        if normalize_link_group_id(getattr(row, "link_group_id", None)):
+            return []
+        s_val, e_val = self._row_time_values(row)
+        if s_val is None or e_val is None or e_val <= s_val:
+            return []
+        rows: list[SegmentRow] = []
+        for candidate in getattr(self, "_rows", []):
+            if normalize_link_group_id(getattr(candidate, "link_group_id", None)):
+                continue
+            c_s, c_e = self._row_time_values(candidate)
+            if c_s == s_val and c_e == e_val:
+                rows.append(candidate)
+        return rows if len(rows) >= 2 else []
+
+    def _row_join_mode(self, row: SegmentRow) -> str:
+        if self._row_join_target_group_id(row):
+            return "join_existing"
+        if self._same_interval_unlinked_rows(row):
+            return "create_same_interval"
+        return ""
+
     def _cleanup_single_member_link_groups(self) -> bool:
         changed = False
         groups = self._complete_link_groups()
@@ -6016,13 +6051,14 @@ class MainWindow(QMainWindow):
                 row.set_visual_group(group_index.get(key, 0), len(members) if len(members) > 1 else 1)
             group_id = normalize_link_group_id(getattr(row, "link_group_id", None))
             link_members = link_groups.get(group_id or "", [])
-            join_target = self._row_join_target_group_id(row)
+            join_mode = self._row_join_mode(row)
             if hasattr(row, "set_link_group_state"):
                 row.set_link_group_state(
                     active=bool(group_id and link_members),
                     member_count=len(link_members) if link_members else 1,
-                    join_available=bool(join_target),
+                    join_available=bool(join_mode),
                     join_preview=self.__dict__.get("_join_preview_uid", "") == getattr(row, "uid", ""),
+                    join_mode=join_mode,
                 )
 
     def _row_sort_key(self, row: SegmentRow):
@@ -6683,7 +6719,8 @@ class MainWindow(QMainWindow):
             end = int(row.e_val)
             group_id = normalize_link_group_id(getattr(row, "link_group_id", None))
             is_linked = bool(group_id and group_id in valid_groups)
-            can_join = bool(self._row_join_target_group_id(row))
+            join_mode = self._row_join_mode(row)
+            can_join = bool(join_mode)
             ranges.append((
                 start,
                 end,
@@ -6691,6 +6728,7 @@ class MainWindow(QMainWindow):
                 (group_id if is_linked else None) or (start, end),
                 group_id if is_linked else None,
                 can_join,
+                join_mode,
             ))
         return ranges
 

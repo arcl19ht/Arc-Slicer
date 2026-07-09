@@ -79,6 +79,22 @@ class SegmentLinkGroupTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             app.build_segment_export_plan("song", [first, dict(first, link_group_id="grp_b")], 1.0)
 
+    def test_visual_group_and_active_link_group_copy_are_distinct(self):
+        win = _window()
+        app.MainWindow._add_segment(win, 1000, 2000, None)
+        app.MainWindow._add_segment(win, 1000, 2000, 0.8)
+
+        self.assertIn("同区间", win._rows[0]._group_label.text())
+        self.assertNotIn("片段组", win._rows[0]._group_label.text())
+        self.assertNotIn("级联", win._rows[0]._group_label.text())
+
+        win._rows[0].link_group_id = "grp_a"
+        win._rows[1].link_group_id = "grp_a"
+        app.MainWindow._refresh_visual_groups(win)
+
+        self.assertIn("已级联", win._rows[0]._group_label.text())
+        self.assertEqual(win._rows[0]._link_action_btn.text(), "断开")
+
     def test_copy_creates_or_reuses_link_group_without_copying_speed(self):
         win = _window()
         app.MainWindow._add_segment(win, 1000, 2000, 1.5)
@@ -116,6 +132,45 @@ class SegmentLinkGroupTests(unittest.TestCase):
         app.MainWindow._unlink_segment_group(win, win._rows[0])
         self.assertIsNone(win._rows[0].link_group_id)
         self.assertIsNone(win._rows[2].link_group_id)
+
+    def test_two_member_unlink_can_relink_same_interval(self):
+        win = _window()
+        app.MainWindow._add_segment(win, 1000, 2000, None, link_group_id="grp_a")
+        app.MainWindow._add_segment(win, 1000, 2000, 0.8, link_group_id="grp_a")
+        selected_uid = win._rows[0].uid
+
+        app.MainWindow._unlink_segment_group(win, win._rows[0])
+
+        self.assertIsNone(win._rows[0].link_group_id)
+        self.assertIsNone(win._rows[1].link_group_id)
+        self.assertEqual(app.MainWindow._row_join_mode(win, win._rows[0]), "create_same_interval")
+        self.assertEqual(win._rows[0]._link_action_btn.text(), "级联同区间")
+        self.assertIn("同区间", win._rows[0]._group_label.text())
+        self.assertEqual(win._selected_segment_uid, selected_uid)
+
+        app.MainWindow._join_segment_group(win, win._rows[0])
+
+        self.assertTrue(win._rows[0].link_group_id)
+        self.assertEqual(win._rows[0].link_group_id, win._rows[1].link_group_id)
+        self.assertEqual(win._selected_segment_uid, selected_uid)
+        self.assertTrue(win._dirty_marked)
+
+    def test_three_member_unlink_prefers_join_existing_group(self):
+        win = _window()
+        for speed in (None, 0.8, 0.9):
+            app.MainWindow._add_segment(win, 1000, 2000, speed, link_group_id="grp_a")
+
+        app.MainWindow._unlink_segment_group(win, win._rows[1])
+
+        self.assertEqual(win._rows[0].link_group_id, "grp_a")
+        self.assertIsNone(win._rows[1].link_group_id)
+        self.assertEqual(win._rows[2].link_group_id, "grp_a")
+        self.assertEqual(app.MainWindow._row_join_mode(win, win._rows[1]), "join_existing")
+        self.assertEqual(win._rows[1]._link_action_btn.text(), "加入级联")
+
+        app.MainWindow._join_segment_group(win, win._rows[1])
+
+        self.assertEqual(win._rows[1].link_group_id, "grp_a")
 
     def test_join_uses_first_matching_valid_group_and_preview_is_clean(self):
         win = _window()
