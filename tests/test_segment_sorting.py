@@ -126,7 +126,8 @@ class SegmentSortingTests(unittest.TestCase):
         self.assertNotIn((5000, None), groups)
         for row in groups[(1000, 2000)]:
             self.assertEqual(row._group_count, 3)
-            self.assertNotIn("link_group_id", row.__dict__)
+            self.assertIsNone(row.link_group_id)
+        self.assertEqual(app.MainWindow._valid_link_groups(win), {})
 
     def test_waveform_lane_order_matches_sorted_rows(self):
         win = _window(auto_sort=True, sort_mode="time")

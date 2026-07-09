@@ -1113,6 +1113,17 @@ def normalize_speed_token(speed: float) -> str:
     return _speed_text(speed).replace(".", "p")
 
 
+def normalize_link_group_id(value) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+
+def new_link_group_id() -> str:
+    return f"grp_{uuid.uuid4().hex[:10]}"
+
+
 def build_segment_id(source_id: str, start_ms: int, end_ms: int, speed: float) -> str:
     if not source_id:
         raise ValueError("source_id 不能为空")
@@ -3698,6 +3709,8 @@ class WaveformPanel(QFrame):
                 e = int(end)
                 uid = str(item[2]) if len(item) >= 3 else str(index)
                 group_key = tuple(item[3]) if len(item) >= 4 and item[3] is not None else (s, e)
+                link_group_id = normalize_link_group_id(item[4]) if len(item) >= 5 else None
+                join_available = bool(item[5]) if len(item) >= 6 else False
             except (TypeError, ValueError, IndexError):
                 continue
             if e > s:
@@ -3708,6 +3721,8 @@ class WaveformPanel(QFrame):
                     "start": s,
                     "end": e,
                     "group_key": group_key,
+                    "link_group_id": link_group_id,
+                    "join_available": join_available,
                 })
         self._segments = cleaned
         self._segment_items = items
@@ -4120,10 +4135,14 @@ class WaveformPanel(QFrame):
     def _draw_complete_segments(self, painter: QPainter, rect) -> None:
         group_colors = (C_SEGMENT_FILL, C_SEGMENT_ALT_FILL, "#CCFBF1", "#EDE9FE")
         group_index: dict[tuple, int] = {}
+        link_index: dict[str, int] = {}
         for item in self._segment_items:
             group_key = item.get("group_key")
             if group_key not in group_index:
                 group_index[group_key] = len(group_index)
+            link_group_id = str(item.get("link_group_id") or "")
+            if link_group_id and link_group_id not in link_index:
+                link_index[link_group_id] = len(link_index)
             color = QColor(group_colors[group_index[group_key] % len(group_colors)])
             start_ms = item["start"]
             end_ms = item["end"]
@@ -4132,11 +4151,26 @@ class WaveformPanel(QFrame):
             selected = uid == self._selected_segment_uid
             hovered = uid == self._hovered_segment_uid
             fill_alpha = 98 if selected else 82 if hovered else 64
-            border_color = QColor(C_SELECTED) if selected else QColor(C_HOVERED) if hovered else QColor(C_SEGMENT_BORDER)
+            if selected:
+                border_color = QColor(C_SELECTED)
+            elif hovered:
+                border_color = QColor(C_HOVERED)
+            elif link_group_id:
+                link_colors = ("#2563EB", "#0F766E", "#7C3AED", "#0369A1")
+                border_color = QColor(link_colors[link_index[link_group_id] % len(link_colors)])
+            elif item.get("join_available"):
+                border_color = QColor("#38BDF8")
+            else:
+                border_color = QColor(C_SEGMENT_BORDER)
             border_width = 3 if selected else 2 if hovered else 1
             painter.fillRect(clip_rect.adjusted(1, 2, -1, -2), QColor(color.red(), color.green(), color.blue(), fill_alpha))
             painter.setPen(QPen(border_color, border_width))
             painter.drawRect(clip_rect.adjusted(1, 2, -2, -3))
+            if link_group_id:
+                painter.fillRect(QRect(clip_rect.left() + 2, clip_rect.top() + 2, 5, max(4, clip_rect.height() - 5)), border_color)
+            elif item.get("join_available"):
+                painter.setPen(QPen(border_color, 1))
+                painter.drawLine(clip_rect.left() + 6, clip_rect.top() + 4, clip_rect.left() + 18, clip_rect.top() + 4)
             handle_w = 4
             painter.fillRect(QRect(clip_rect.left() + 2, clip_rect.top() + 4, handle_w, max(4, clip_rect.height() - 8)), border_color)
             painter.fillRect(QRect(clip_rect.right() - handle_w - 1, clip_rect.top() + 4, handle_w, max(4, clip_rect.height() - 8)), border_color)
@@ -4302,6 +4336,10 @@ class SegmentRow(QFrame):
     hovered = pyqtSignal(object)
     unhovered = pyqtSignal(object)
     selected = pyqtSignal(object)
+    unlink_requested = pyqtSignal(object)
+    join_requested = pyqtSignal(object)
+    join_previewed = pyqtSignal(object)
+    join_unpreviewed = pyqtSignal(object)
 
     def __init__(
         self,
@@ -4312,16 +4350,21 @@ class SegmentRow(QFrame):
         speed_override: float | None = None,
         default_speed: float = 1.0,
         uid: str | None = None,
+        link_group_id=None,
     ):
         super().__init__(parent)
         self.s_val = s
         self.e_val = e
         self.uid = str(uid or f"seg_{uuid.uuid4().hex[:10]}")
+        self.link_group_id = normalize_link_group_id(link_group_id)
         self.created_order = 0
         self._is_hovered = False
         self._is_selected = False
         self._group_index = 0
         self._group_count = 1
+        self._link_group_active = False
+        self._join_group_available = False
+        self._join_preview = False
         self._default_speed = validate_speed_value(float(default_speed))
         self._initial_speed_override = normalize_speed_override_value(speed_override)
         self._setup_ui(index, s, e)
@@ -4475,6 +4518,25 @@ class SegmentRow(QFrame):
             f"background: {C_CARD2}; border: 1px solid {C_BORDER2}; border-radius: 6px; padding: 2px 7px;"
         )
         self._group_label.hide()
+        self._link_action_btn = QPushButton("")
+        self._link_action_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._link_action_btn.setFixedHeight(20)
+        self._link_action_btn.setStyleSheet(
+            "QPushButton {"
+            "background: #F8FAFC; "
+            f"border: 1px solid {C_BORDER2}; "
+            "border-radius: 6px; "
+            f"color: {C_TEXT2}; "
+            "font-size: 10px; "
+            "font-weight: 700; "
+            "padding: 1px 7px;"
+            "}"
+            f"QPushButton:hover {{ background: #EFF6FF; border-color: {C_ACCENT}; color: {C_ACCENT_H}; }}"
+        )
+        self._link_action_btn.hide()
+        self._link_action_btn.clicked.connect(self._on_link_action_clicked)
+        self._link_action_btn.enterEvent = self._link_action_enter
+        self._link_action_btn.leaveEvent = self._link_action_leave
         self._end_cap_btn = QPushButton("")
         self._end_cap_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._end_cap_btn.setFixedHeight(20)
@@ -4505,6 +4567,7 @@ class SegmentRow(QFrame):
         status_row.addWidget(self._end_cap_btn)
         status_row.addWidget(self._speed_error)
         status_row.addWidget(self._group_label)
+        status_row.addWidget(self._link_action_btn)
 
         self._arc_indicator_box = QWidget()
         self._arc_indicator_box.setStyleSheet("background: transparent; border: none;")
@@ -4577,6 +4640,14 @@ class SegmentRow(QFrame):
         elif getattr(self, "_group_count", 1) > 1:
             bg = "#F8FAFC"
             border = C_BORDER
+            width = 1
+        elif getattr(self, "_link_group_active", False):
+            bg = "#F8FAFC"
+            border = C_ACCENT
+            width = 1
+        elif getattr(self, "_join_preview", False):
+            bg = "#F0F9FF"
+            border = C_HOVERED
             width = 1
         else:
             bg = C_CARD
@@ -4662,6 +4733,58 @@ class SegmentRow(QFrame):
         else:
             self._group_label.hide()
         self._refresh_card_style()
+
+    def set_link_group_state(
+        self,
+        active: bool = False,
+        member_count: int = 1,
+        join_available: bool = False,
+        join_preview: bool = False,
+    ) -> None:
+        self._link_group_active = bool(active)
+        self._join_group_available = bool(join_available)
+        self._join_preview = bool(join_preview)
+        if self._link_group_active:
+            self._group_label.setText(f"级联 · {max(2, int(member_count))} 段")
+            self._group_label.show()
+            self._link_action_btn.setText("断开")
+            self._link_action_btn.setToolTip("从当前级联组断开")
+            self._link_action_btn.show()
+        elif self._join_group_available:
+            self._link_action_btn.setText("加入组")
+            self._link_action_btn.setToolTip("加入相同起止时间的级联组")
+            self._link_action_btn.show()
+        else:
+            self._link_action_btn.setText("")
+            self._link_action_btn.setToolTip("")
+            self._link_action_btn.hide()
+        self._refresh_card_style()
+
+    def _on_link_action_clicked(self) -> None:
+        if getattr(self, "_link_group_active", False):
+            self.unlink_requested.emit(self)
+        elif getattr(self, "_join_group_available", False):
+            self.join_requested.emit(self)
+
+    def _link_action_enter(self, event) -> None:
+        if getattr(self, "_join_group_available", False):
+            self._join_preview = True
+            self._refresh_card_style()
+            self.join_previewed.emit(self)
+        try:
+            QPushButton.enterEvent(self._link_action_btn, event)
+        except Exception:
+            pass
+
+    def _link_action_leave(self, event) -> None:
+        if getattr(self, "_join_group_available", False):
+            self._join_preview = False
+            self._refresh_card_style()
+            self.join_unpreviewed.emit(self)
+        try:
+            QPushButton.leaveEvent(self._link_action_btn, event)
+        except Exception:
+            pass
 
     def start_text(self) -> str:
         return self._start.text()
@@ -4755,7 +4878,13 @@ class SegmentRow(QFrame):
         if self.s_val is None or self.e_val is None:
             return None
         override = self.speed_override_value()
-        return {"uid": self.uid, "s": self.s_val, "e": self.e_val, "speed_override": override}
+        return {
+            "uid": self.uid,
+            "s": self.s_val,
+            "e": self.e_val,
+            "speed_override": override,
+            "link_group_id": normalize_link_group_id(getattr(self, "link_group_id", None)),
+        }
 
     def enterEvent(self, event):
         self.hovered.emit(self)
@@ -5364,6 +5493,8 @@ class MainWindow(QMainWindow):
         self._hovered_segment_uid = ""
         self._auto_sort_enabled = True
         self._sort_mode = "time"
+        self._cascade_edit_enabled = True
+        self._join_preview_uid = ""
         self._arc_warning_timer = QTimer(self)
         self._arc_warning_timer.setSingleShot(True)
         self._arc_warning_timer.timeout.connect(self._refresh_arc_cut_warnings)
@@ -5510,6 +5641,11 @@ class MainWindow(QMainWindow):
         self._auto_sort_check.setStyleSheet(f"color: {C_TEXT2}; font-size: 12px; background: transparent; border: none;")
         self._auto_sort_check.clicked.connect(self._on_auto_sort_changed)
         seg_head.addWidget(self._auto_sort_check)
+        self._cascade_edit_check = QCheckBox("级联编辑")
+        self._cascade_edit_check.setChecked(True)
+        self._cascade_edit_check.setStyleSheet(f"color: {C_TEXT2}; font-size: 12px; background: transparent; border: none;")
+        self._cascade_edit_check.clicked.connect(self._on_cascade_edit_changed)
+        seg_head.addWidget(self._cascade_edit_check)
         self._sort_mode_box = QComboBox()
         self._sort_mode_box.addItem("时间优先", "time")
         self._sort_mode_box.addItem("倍速优先", "speed")
@@ -5707,6 +5843,10 @@ class MainWindow(QMainWindow):
         row.hovered.connect(self._on_segment_row_hovered)
         row.unhovered.connect(self._on_segment_row_unhovered)
         row.selected.connect(self._on_segment_row_selected)
+        row.unlink_requested.connect(self._unlink_segment_group)
+        row.join_requested.connect(self._join_segment_group)
+        row.join_previewed.connect(self._on_join_group_previewed)
+        row.join_unpreviewed.connect(self._on_join_group_unpreviewed)
 
     def _row_by_uid(self, uid: str) -> SegmentRow | None:
         for row in self._rows:
@@ -5770,6 +5910,42 @@ class MainWindow(QMainWindow):
     def _on_waveform_segment_selected(self, uid: str) -> None:
         self._set_selected_segment_uid(uid, scroll=True)
 
+    def _on_join_group_previewed(self, row: SegmentRow) -> None:
+        if row in self._rows and self._row_join_target_group_id(row):
+            self._join_preview_uid = row.uid
+            self._refresh_visual_groups()
+
+    def _on_join_group_unpreviewed(self, row: SegmentRow) -> None:
+        if self.__dict__.get("_join_preview_uid", "") == getattr(row, "uid", ""):
+            self._join_preview_uid = ""
+            self._refresh_visual_groups()
+
+    def _unlink_segment_group(self, row: SegmentRow) -> None:
+        if row not in self._rows:
+            return
+        if not normalize_link_group_id(getattr(row, "link_group_id", None)):
+            return
+        row.link_group_id = None
+        self._cleanup_single_member_link_groups()
+        self._set_selected_segment_uid(row.uid)
+        self._join_preview_uid = ""
+        self._refresh_visual_groups()
+        self._maybe_auto_sort_segments()
+        self._mark_current_export_dirty()
+
+    def _join_segment_group(self, row: SegmentRow) -> None:
+        if row not in self._rows:
+            return
+        group_id = self._row_join_target_group_id(row)
+        if not group_id:
+            return
+        row.link_group_id = group_id
+        self._set_selected_segment_uid(row.uid)
+        self._join_preview_uid = ""
+        self._refresh_visual_groups()
+        self._maybe_auto_sort_segments()
+        self._mark_current_export_dirty()
+
     def _refresh_segment_interaction_state(self) -> None:
         selected = self.__dict__.get("_selected_segment_uid", "")
         hovered = self.__dict__.get("_hovered_segment_uid", "")
@@ -5788,8 +5964,49 @@ class MainWindow(QMainWindow):
             groups.setdefault((int(s_val), int(e_val)), []).append(row)
         return groups
 
+    def _complete_link_groups(self) -> dict[str, list[SegmentRow]]:
+        groups: dict[str, list[SegmentRow]] = {}
+        for row in getattr(self, "_rows", []):
+            group_id = normalize_link_group_id(getattr(row, "link_group_id", None))
+            if not group_id:
+                continue
+            s_val, e_val = self._row_time_values(row)
+            if s_val is None or e_val is None or e_val <= s_val:
+                continue
+            groups.setdefault(group_id, []).append(row)
+        return groups
+
+    def _valid_link_groups(self) -> dict[str, list[SegmentRow]]:
+        return {group_id: members for group_id, members in self._complete_link_groups().items() if len(members) >= 2}
+
+    def _row_join_target_group_id(self, row: SegmentRow) -> str | None:
+        if normalize_link_group_id(getattr(row, "link_group_id", None)):
+            return None
+        s_val, e_val = self._row_time_values(row)
+        if s_val is None or e_val is None or e_val <= s_val:
+            return None
+        valid_groups = self._valid_link_groups()
+        for candidate in getattr(self, "_rows", []):
+            group_id = normalize_link_group_id(getattr(candidate, "link_group_id", None))
+            if not group_id or group_id not in valid_groups:
+                continue
+            c_s, c_e = self._row_time_values(candidate)
+            if c_s == s_val and c_e == e_val:
+                return group_id
+        return None
+
+    def _cleanup_single_member_link_groups(self) -> bool:
+        changed = False
+        groups = self._complete_link_groups()
+        for group_id, members in groups.items():
+            if len(members) == 1:
+                members[0].link_group_id = None
+                changed = True
+        return changed
+
     def _refresh_visual_groups(self) -> None:
         groups = self._complete_visual_groups()
+        link_groups = self._valid_link_groups()
         group_index = {key: idx for idx, key in enumerate(groups)}
         for row in getattr(self, "_rows", []):
             s_val, e_val = self._row_time_values(row)
@@ -5797,6 +6014,16 @@ class MainWindow(QMainWindow):
             members = groups.get(key, []) if key is not None else []
             if hasattr(row, "set_visual_group"):
                 row.set_visual_group(group_index.get(key, 0), len(members) if len(members) > 1 else 1)
+            group_id = normalize_link_group_id(getattr(row, "link_group_id", None))
+            link_members = link_groups.get(group_id or "", [])
+            join_target = self._row_join_target_group_id(row)
+            if hasattr(row, "set_link_group_state"):
+                row.set_link_group_state(
+                    active=bool(group_id and link_members),
+                    member_count=len(link_members) if link_members else 1,
+                    join_available=bool(join_target),
+                    join_preview=self.__dict__.get("_join_preview_uid", "") == getattr(row, "uid", ""),
+                )
 
     def _row_sort_key(self, row: SegmentRow):
         s_val = getattr(row, "s_val", None)
@@ -5819,6 +6046,50 @@ class MainWindow(QMainWindow):
         if self.__dict__.get("_sort_mode", "time") == "speed":
             return (0, speed, int(s_val), int(e_val), order)
         return (0, int(s_val), int(e_val), speed, order)
+
+    def _row_effective_speed(self, row) -> float:
+        if hasattr(row, "effective_speed"):
+            return row.effective_speed()
+        if hasattr(row, "speed_override_value"):
+            return effective_segment_speed(self._current_default_speed(), row.speed_override_value())
+        return self._current_default_speed()
+
+    def _group_aware_sorted_rows(self) -> list[SegmentRow]:
+        valid_groups = self._valid_link_groups()
+        seen_groups: set[str] = set()
+        blocks: list[list[SegmentRow]] = []
+        for row in self._rows:
+            group_id = normalize_link_group_id(getattr(row, "link_group_id", None))
+            if group_id and group_id in valid_groups:
+                if group_id in seen_groups:
+                    continue
+                seen_groups.add(group_id)
+                members = list(valid_groups[group_id])
+                members.sort(key=lambda item: (self._row_effective_speed(item), int(getattr(item, "created_order", 0))))
+                blocks.append(members)
+            else:
+                blocks.append([row])
+
+        def block_key(block: list[SegmentRow]):
+            complete_rows = []
+            for item in block:
+                s_val, e_val = self._row_time_values(item)
+                if s_val is not None and e_val is not None and e_val > s_val:
+                    complete_rows.append((item, int(s_val), int(e_val)))
+            if not complete_rows:
+                return (1, min(int(getattr(item, "created_order", 0)) for item in block))
+            start = min(s for _item, s, _e in complete_rows)
+            end = max(e for _item, _s, e in complete_rows)
+            min_speed = min(self._row_effective_speed(item) for item, _s, _e in complete_rows)
+            order = min(int(getattr(item, "created_order", 0)) for item in block)
+            if self.__dict__.get("_sort_mode", "time") == "speed":
+                return (0, min_speed, start, end, order)
+            return (0, start, end, min_speed, order)
+
+        sorted_rows: list[SegmentRow] = []
+        for block in sorted(blocks, key=block_key):
+            sorted_rows.extend(block)
+        return sorted_rows
 
     def _auto_sort_active(self) -> bool:
         return bool(self.__dict__.get("_auto_sort_enabled", True)) and self.__dict__.get("_sort_mode", "time") != "manual"
@@ -5850,7 +6121,7 @@ class MainWindow(QMainWindow):
             self._refresh_visual_groups()
             self._refresh_waveform_segments()
             return
-        sorted_rows = sorted(self._rows, key=self._row_sort_key)
+        sorted_rows = self._group_aware_sorted_rows()
         if sorted_rows != self._rows:
             self._reorder_rows(sorted_rows)
         else:
@@ -5870,6 +6141,9 @@ class MainWindow(QMainWindow):
         elif self._auto_sort_check.isChecked():
             self._auto_sort_enabled = True
             self._maybe_auto_sort_segments(force=True)
+
+    def _on_cascade_edit_changed(self, *_args) -> None:
+        self._cascade_edit_enabled = bool(self._cascade_edit_check.isChecked())
 
     def _load_initial_data(self):
         songs = self._get_songs()
@@ -5927,7 +6201,8 @@ class MainWindow(QMainWindow):
             except (TypeError, ValueError):
                 speed_override = None
             uid = str(seg.get("uid") or "") or None
-            self._add_segment(s, e, speed_override, uid=uid)
+            link_group_id = normalize_link_group_id(seg.get("link_group_id"))
+            self._add_segment(s, e, speed_override, uid=uid, link_group_id=link_group_id)
             added_segment = True
         if not added_segment:
             self._add_segment(None, None)
@@ -6270,7 +6545,14 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_refresh_waveform_segments"):
             self._refresh_waveform_segments()
 
-    def _add_segment(self, s=_AUTO_SEGMENT, e=_AUTO_SEGMENT, speed_override=None, uid: str | None = None):
+    def _add_segment(
+        self,
+        s=_AUTO_SEGMENT,
+        e=_AUTO_SEGMENT,
+        speed_override=None,
+        uid: str | None = None,
+        link_group_id=None,
+    ):
         if s is _AUTO_SEGMENT and e is _AUTO_SEGMENT:
             s = None
             e = None
@@ -6284,6 +6566,7 @@ class MainWindow(QMainWindow):
             speed_override=speed_override,
             default_speed=self._current_default_speed() if hasattr(self, "_speed_input") else 1.0,
             uid=uid or self._next_segment_uid(),
+            link_group_id=link_group_id,
         )
         row.created_order = self._next_segment_order()
         self._connect_segment_row(row)
@@ -6303,6 +6586,7 @@ class MainWindow(QMainWindow):
         self._rows.remove(row)
         self._segs_layout.removeWidget(row)
         row.deleteLater()
+        self._cleanup_single_member_link_groups()
         if self._selected_segment_uid == row.uid:
             self._selected_segment_uid = ""
         if self._hovered_segment_uid == row.uid:
@@ -6324,6 +6608,12 @@ class MainWindow(QMainWindow):
     def _copy_segment(self, row: SegmentRow):
         if row not in self._rows:
             return
+        source_group_id = normalize_link_group_id(getattr(row, "link_group_id", None))
+        if source_group_id:
+            link_group_id = source_group_id
+        else:
+            link_group_id = new_link_group_id()
+            row.link_group_id = link_group_id
         new_row = SegmentRow(
             self._rows.index(row) + 2,
             row.s_val,
@@ -6331,6 +6621,7 @@ class MainWindow(QMainWindow):
             speed_override=None,
             default_speed=self._current_default_speed() if hasattr(self, "_speed_input") else 1.0,
             uid=self._next_segment_uid(),
+            link_group_id=link_group_id,
         )
         new_row.created_order = self._next_segment_order()
         self._connect_segment_row(new_row)
@@ -6382,14 +6673,25 @@ class MainWindow(QMainWindow):
         songs_dir = Path(raw_songs_dir)
         return songs_dir / song_id / "base.ogg"
 
-    def _waveform_segment_ranges(self) -> list[tuple[int, int, str, tuple[int, int]]]:
-        ranges: list[tuple[int, int, str, tuple[int, int]]] = []
+    def _waveform_segment_ranges(self) -> list[tuple]:
+        ranges: list[tuple] = []
+        valid_groups = self._valid_link_groups()
         for row in getattr(self, "_rows", []):
             if row.s_val is None or row.e_val is None or row.e_val <= row.s_val:
                 continue
             start = int(row.s_val)
             end = int(row.e_val)
-            ranges.append((start, end, str(getattr(row, "uid", len(ranges))), (start, end)))
+            group_id = normalize_link_group_id(getattr(row, "link_group_id", None))
+            is_linked = bool(group_id and group_id in valid_groups)
+            can_join = bool(self._row_join_target_group_id(row))
+            ranges.append((
+                start,
+                end,
+                str(getattr(row, "uid", len(ranges))),
+                (group_id if is_linked else None) or (start, end),
+                group_id if is_linked else None,
+                can_join,
+            ))
         return ranges
 
     def _waveform_draft_segments(self) -> list[dict]:
@@ -6510,6 +6812,21 @@ class MainWindow(QMainWindow):
         self._add_segment(start, end, None)
         self._mark_current_export_dirty()
 
+    def _cascade_edit_active(self) -> bool:
+        if "_cascade_edit_check" in self.__dict__:
+            try:
+                return bool(self._cascade_edit_check.isChecked())
+            except Exception:
+                pass
+        return bool(self.__dict__.get("_cascade_edit_enabled", True))
+
+    def _cascade_rows_for_endpoint_drag(self, row: SegmentRow) -> list[SegmentRow]:
+        group_id = normalize_link_group_id(getattr(row, "link_group_id", None))
+        valid_groups = self._valid_link_groups()
+        if self._cascade_edit_active() and group_id and group_id in valid_groups:
+            return list(valid_groups[group_id])
+        return [row]
+
     def _update_waveform_segment_endpoint(self, index: int, start_ms: int, end_ms: int) -> None:
         try:
             item = self._waveform_panel.segment_items()[int(index)]
@@ -6520,9 +6837,31 @@ class MainWindow(QMainWindow):
             return
         if row is None:
             return
-        if end - start < WAVEFORM_MIN_SEGMENT_MS:
-            return
-        row.set_time_range(start, end)
+        old_start, old_end = self._row_time_values(row)
+        start_changed = old_start is not None and start != int(old_start)
+        end_changed = old_end is not None and end != int(old_end)
+        cascade_rows = self._cascade_rows_for_endpoint_drag(row)
+        if start_changed and end_changed:
+            if end - start < WAVEFORM_MIN_SEGMENT_MS:
+                return
+            for member in cascade_rows:
+                member.set_time_range(start, end)
+        elif start_changed:
+            limit = min(int(member.e_val) - WAVEFORM_MIN_SEGMENT_MS for member in cascade_rows if member.e_val is not None)
+            start = max(0, min(start, limit))
+            for member in cascade_rows:
+                member.set_time_range(start, int(member.e_val))
+        else:
+            duration_ms = int(self.__dict__.get("_audio_duration_ms") or 0)
+            if duration_ms <= 0 and hasattr(self._waveform_panel, "_duration_ms"):
+                duration_ms = int(self._waveform_panel._duration_ms())
+            limit = max(int(member.s_val) + WAVEFORM_MIN_SEGMENT_MS for member in cascade_rows if member.s_val is not None)
+            end = max(limit, end)
+            if duration_ms > 0:
+                end = min(duration_ms, end)
+            for member in cascade_rows:
+                member.set_time_range(int(member.s_val), end)
+        self._set_selected_segment_uid(row.uid)
         self._refresh_waveform_segments()
         self._schedule_segment_time_validation()
         self._schedule_arc_cut_warning_refresh()

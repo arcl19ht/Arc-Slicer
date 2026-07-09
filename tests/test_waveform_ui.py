@@ -201,7 +201,7 @@ class WaveformUiTests(unittest.TestCase):
         window._waveform_panel = app.WaveformPanel()
 
         ranges = app.MainWindow._waveform_segment_ranges(window)
-        self.assertEqual(ranges, [(1000, 2000, "a", (1000, 2000)), (3000, 5000, "b", (3000, 5000))])
+        self.assertEqual([item[:4] for item in ranges], [(1000, 2000, "a", (1000, 2000)), (3000, 5000, "b", (3000, 5000))])
 
         app.MainWindow._refresh_waveform_segments(window)
         self.assertEqual(window._waveform_panel.segment_ranges(), [(1000, 2000), (3000, 5000)])
@@ -219,7 +219,7 @@ class WaveformUiTests(unittest.TestCase):
         ]
         window._waveform_panel = app.WaveformPanel()
 
-        self.assertEqual(app.MainWindow._waveform_segment_ranges(window), [(3000, 4000, "0", (3000, 4000))])
+        self.assertEqual([item[:4] for item in app.MainWindow._waveform_segment_ranges(window)], [(3000, 4000, "0", (3000, 4000))])
         self.assertEqual(
             app.MainWindow._waveform_draft_segments(window),
             [
