@@ -38,903 +38,114 @@ try:
     from PyQt6.QtWidgets import QScrollBar
 except ImportError:  # Older headless tests install a small fake PyQt surface.
     QScrollBar = None
+# ----- Extracted core modules -------------------------------------------------
+from arc_slicer import aff as _aff_core
+from arc_slicer import audio as _audio_core
+from arc_slicer import waveform as _waveform_core
+from arc_slicer.paths import (
+    APP_DATA_DIRNAME, APP_DIR, BASE_DIR, RES_DIR, DATA_ROOT, DEFAULT_SONGS_DIR,
+    OUT_DIR, CURRENT_EXPORT_ROOT, CURRENT_EXPORT_SONGS_DIR, LIBRARY_EXPORT_ROOT,
+    LIBRARY_EXPORT_SONGS_DIR, EXTERNAL_MERGE_BACKUP_ROOT,
+    EXTERNAL_MERGE_TARGET_CONFIG_KEY, WAVEFORM_CACHE_DIR, CONFIG_PATH,
+    SLIDES_PATH, SONGLIST_EXAMPLE_PATH, _FFMPEG_BUNDLED,
+    _app_dir, _res_dir, _data_root_for_app_dir, resolve_runtime_paths,
+)
+from arc_slicer.theme import (
+    C_BG, C_CARD, C_CARD2, C_BORDER, C_BORDER2, C_ACCENT, C_ACCENT_H, C_TEXT,
+    C_TEXT2, C_MUTED, C_LABEL, C_INPUT_BG, C_INPUT_BD, C_OK, C_ERR,
+    C_BADGE_BG, C_WAVEFORM, C_TIMELINE_BG, C_TIMELINE_TRACK, C_LANE_SEPARATOR,
+    C_SEGMENT_FILL, C_SEGMENT_ALT_FILL, C_SEGMENT_BORDER, C_SELECTED,
+    C_HOVERED, C_DRAFT_START, C_DRAFT_END,
+)
+from arc_slicer.segments import (
+    TIME_INPUT_PATTERN, SegmentValidationResult, effective_segment_speed,
+    format_duration_ms, is_time_input_text_allowed, new_link_group_id,
+    normalize_link_group_id, normalize_speed_override_value, normalize_speed_token,
+    parse_duration_to_ms, parse_speed_text, validate_segment_bounds,
+    validate_speed_value, _parse_non_negative_time_text,
+)
+from arc_slicer.aff import (
+    AUDIO_OFFSET_WARNING, ARC_CUT_EASING_ORDER, CAMERA_SCENE_WARNING,
+    NONLINEAR_ARC_EASINGS, arc_position_at, _arc_cut_info_content,
+    _extract_header_and_body, _parse_outer_timings, _scale_bpm_string,
+)
+from arc_slicer.waveform import (
+    DEFAULT_WAVEFORM_SAMPLES_PER_SECOND, WAVEFORM_CACHE_VERSION,
+    WAVEFORM_DECODE_SAMPLE_RATE, WAVEFORM_HANDLE_PX, WAVEFORM_MIN_SEGMENT_MS,
+    WaveformData, aggregate_pcm_waveform, read_waveform_cache,
+    waveform_cache_key, waveform_cache_path, write_waveform_cache,
+)
 
-import external_merge
-
-# ─── 路径 ─────────────────────────────────────────────────────────────────────
-
-APP_DATA_DIRNAME = "ArcSlicerData"
-
-def _app_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).parent
-
-
-def _res_dir() -> Path:
-    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        return Path(sys._MEIPASS)
-    return Path(__file__).parent
-
-
-def _data_root_for_app_dir(app_dir: Path, frozen: bool | None = None) -> Path:
-    frozen = getattr(sys, "frozen", False) if frozen is None else frozen
-    if frozen and app_dir.name.lower() == "dist":
-        return app_dir.parent / APP_DATA_DIRNAME
-    return app_dir / APP_DATA_DIRNAME
-
-
-def resolve_runtime_paths(
-    app_file: Path | None = None,
-    executable_path: Path | None = None,
-    frozen: bool | None = None,
-) -> dict[str, Path]:
-    frozen = getattr(sys, "frozen", False) if frozen is None else frozen
-    if frozen:
-        app_dir = Path(executable_path or sys.executable).parent
-    else:
-        app_dir = Path(app_file or __file__).parent
-    res_dir = _res_dir() if app_file is None and executable_path is None else app_dir
-    data_root = _data_root_for_app_dir(app_dir, frozen)
-    return {
-        "app_dir": app_dir,
-        "res_dir": res_dir,
-        "data_root": data_root,
-        "songs_dir": data_root / "songs",
-        "out_dir": data_root / "out",
-        "config_path": data_root / "config.json",
-        "slides_path": data_root / "slides.json",
-    }
-
-
-APP_DIR     = _app_dir()
-BASE_DIR    = APP_DIR
-RES_DIR     = _res_dir()
-DATA_ROOT   = _data_root_for_app_dir(APP_DIR)
-DEFAULT_SONGS_DIR = DATA_ROOT / "songs"
-OUT_DIR     = DATA_ROOT / "out"
-CURRENT_EXPORT_ROOT = OUT_DIR / "current_export"
-CURRENT_EXPORT_SONGS_DIR = CURRENT_EXPORT_ROOT / "songs"
-LIBRARY_EXPORT_ROOT = OUT_DIR / "library_export"
-LIBRARY_EXPORT_SONGS_DIR = LIBRARY_EXPORT_ROOT / "songs"
-EXTERNAL_MERGE_BACKUP_ROOT = DATA_ROOT / "backups" / "external_merge"
-EXTERNAL_MERGE_TARGET_CONFIG_KEY = "external_merge_target_songs_dir"
-WAVEFORM_CACHE_DIR = DATA_ROOT / "cache" / "waveforms"
-CONFIG_PATH = DATA_ROOT / "config.json"
-SLIDES_PATH = DATA_ROOT / "slides.json"
-SONGLIST_EXAMPLE_PATH = APP_DIR / "songlist_example.json"
-_FFMPEG_BUNDLED = RES_DIR / "ffmpeg.exe"
 _AUTO_SEGMENT = object()
-WAVEFORM_CACHE_VERSION = 1
-WAVEFORM_DECODE_SAMPLE_RATE = 8000
-DEFAULT_WAVEFORM_SAMPLES_PER_SECOND = 100
-WAVEFORM_MIN_SEGMENT_MS = 100
-WAVEFORM_HANDLE_PX = 8
 
-# ─── 颜色常量 ─────────────────────────────────────────────────────────────────
 
-C_BG       = "#F3F4F6"
-C_CARD     = "#FFFFFF"
-C_CARD2    = "#F9FAFB"
-C_BORDER   = "#D1D5DB"
-C_BORDER2  = "#E5E7EB"
-C_ACCENT   = "#2563EB"
-C_ACCENT_H = "#1D4ED8"
-C_TEXT     = "#111827"
-C_TEXT2    = "#374151"
-C_MUTED    = "#6B7280"
-C_LABEL    = "#9CA3AF"
-C_INPUT_BG = "#FFFFFF"
-C_INPUT_BD = "#D1D5DB"
-C_OK       = "#0F766E"
-C_ERR      = "#DC2626"
-C_BADGE_BG = "#E5E7EB"
-C_WAVEFORM = "#4B5563"
-C_TIMELINE_BG = "#F8FAFC"
-C_TIMELINE_TRACK = "#F3F4F6"
-C_LANE_SEPARATOR = "#DADDE1"
-C_SEGMENT_FILL = "#DBEAFE"
-C_SEGMENT_ALT_FILL = "#E0E7FF"
-C_SEGMENT_BORDER = "#64748B"
-C_SELECTED = "#2563EB"
-C_HOVERED = "#60A5FA"
-C_DRAFT_START = "#0F766E"
-C_DRAFT_END = "#7C3AED"
+def current_export_root(out_dir: Path | None = None) -> Path:
+    return Path(out_dir or OUT_DIR) / "current_export"
 
-# ─── AFF 切片逻辑 ─────────────────────────────────────────────────────────────
 
-_TIMING_RE = re.compile(
-    r"^\s*timing\(([+-]?\d+),([+-]?\d+(?:\.\d+)?),([+-]?\d+(?:\.\d+)?)\);\s*$",
-    re.IGNORECASE,
-)
-_AUDIO_OFFSET_RE = re.compile(r"^\s*AudioOffset\s*:\s*([+-]?\d+)\s*$", re.IGNORECASE)
-CAMERA_SCENE_WARNING = (
-    "当前切片已缩放事件起始时间，但部分 Camera/Scenecontrol 持续时间参数尚未随倍速缩放，"
-    "演出效果可能不完全一致。"
-)
-AUDIO_OFFSET_WARNING = (
-    "检测到非零 AudioOffset；当前版本未对音频裁切时间与 AFF Offset 做专门换算，"
-    "切片边界可能需要后续人工核验。"
-)
-NONLINEAR_ARC_EASINGS = {"b", "si", "so", "sisi", "siso", "sosi", "soso"}
-ARC_CUT_EASING_ORDER = ("si", "so", "b", "sisi", "siso", "sosi", "soso")
-_ARC_LINE_RE = re.compile(
-    r"\s*arc\(([+-]?\d+),([+-]?\d+),(.*)\)\s*(\[(.*)\])?;\s*$",
-    re.IGNORECASE,
-)
+def current_export_songs_dir(out_dir: Path | None = None) -> Path:
+    return current_export_root(out_dir) / "songs"
 
 
-def parse_speed_text(text: str) -> float:
-    raw = text.strip()
-    if not raw:
-        raise ValueError("速度不能为空")
-    try:
-        speed = float(raw)
-    except ValueError as ex:
-        raise ValueError("速度必须是数字") from ex
-    return validate_speed_value(speed)
+def library_export_root(out_dir: Path | None = None) -> Path:
+    return Path(out_dir or OUT_DIR) / "library_export"
 
 
-def validate_speed_value(speed: float) -> float:
-    if not math.isfinite(speed):
-        raise ValueError("速度必须是有限数字")
-    if speed <= 0:
-        raise ValueError("速度必须大于 0")
-    return speed
+def library_export_songs_dir(out_dir: Path | None = None) -> Path:
+    return library_export_root(out_dir) / "songs"
 
-
-def normalize_speed_override_value(value) -> float | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        if not value.strip():
-            return None
-        return parse_speed_text(value)
-    return validate_speed_value(float(value))
-
-
-def effective_segment_speed(default_speed: float, speed_override=None) -> float:
-    default_speed = validate_speed_value(float(default_speed))
-    override = normalize_speed_override_value(speed_override)
-    return override if override is not None else default_speed
-
-
-def is_sliceable_song_dir(path: Path) -> bool:
-    return path.is_dir() and (path / "base.ogg").is_file() and (path / "2.aff").is_file()
-
-
-def _extract_header_and_body(text: str) -> tuple[list[str], list[str]]:
-    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    header, body, found = [], [], False
-    for line in lines:
-        if not found and line.strip() == "-":
-            found = True
-            header.append("-")
-        elif not found:
-            header.append(line)
-        else:
-            body.append(line)
-    return (header, body) if found else (["-"], lines)
-
-
-def _parse_timings(lines: list[str]) -> list[tuple[int, float, float]]:
-    out = []
-    for ln in lines:
-        parsed = _parse_timing_line(ln)
-        if parsed:
-            out.append(parsed)
-    out.sort(key=lambda x: x[0])
-    return out
-
-
-def _parse_timing_line(line: str) -> tuple[int, float, float] | None:
-    m = _TIMING_RE.match(line.replace(" ", ""))
-    if not m:
-        return None
-    return int(m.group(1)), float(m.group(2)), float(m.group(3))
-
-
-def _parse_outer_timings(lines: list[str]) -> list[tuple[int, float, float]]:
-    out, i = [], 0
-    while i < len(lines):
-        stripped = lines[i].strip()
-        if stripped.lower().startswith("timinggroup"):
-            hdr = stripped
-            if "{" not in hdr and i + 1 < len(lines) and "{" in lines[i + 1]:
-                i += 1
-                hdr = hdr + " " + lines[i].strip()
-            if "{" in hdr:
-                brace = hdr.count("{") - hdr.count("}")
-                i += 1
-                while i < len(lines) and brace > 0:
-                    brace += lines[i].count("{") - lines[i].count("}")
-                    i += 1
-                continue
-        parsed = _parse_timing_line(stripped)
-        if parsed:
-            out.append(parsed)
-        i += 1
-    out.sort(key=lambda x: x[0])
-    return out
-
-
-def _choose_effective_timing(timings: list[tuple[int, float, float]], start_ms: int) -> tuple[int, float, float] | None:
-    if not timings:
-        return None
-    chosen = None
-    for timing in timings:
-        if timing[0] <= start_ms:
-            chosen = timing
-        else:
-            break
-    return chosen or timings[0]
-
-
-def _timing_line(t: int, bpm: float, beats: float, speed: float) -> str:
-    # Gate 0 rule: event time scales by 1/speed, Timing BPM scales by speed.
-    return f"timing({t},{bpm * speed:.2f},{beats:.2f});"
-
-
-def _has_timing_zero(lines: list[str]) -> bool:
-    return any(re.match(r"\s*timing\(0,", ln.replace(" ", ""), re.IGNORECASE) for ln in lines)
-
-
-def _has_outer_timing_zero(lines: list[str]) -> bool:
-    return any(timing[0] == 0 for timing in _parse_outer_timings(lines))
-
-
-def _has_nonempty_statement(lines: list[str]) -> bool:
-    return any(ln.strip() for ln in lines)
-
-
-def _audio_offset_value(header: list[str]) -> int | None:
-    for line in header:
-        m = _AUDIO_OFFSET_RE.match(line)
-        if m:
-            return int(m.group(1))
-    return None
-
-
-def _linear(p: float) -> float:
-    return p
-
-
-def _sine_out(p: float) -> float:
-    return math.sin(math.pi * p / 2.0)
-
-
-def _sine_in(p: float) -> float:
-    return 1.0 - math.cos(math.pi * p / 2.0)
-
-
-def _bezier(p: float) -> float:
-    return 3.0 * p * p - 2.0 * p * p * p
-
-
-def _axis_easing(easing: str):
-    # AFF shorthand is axis-specific: si=(Sine Out, Linear), so=(Sine In, Linear).
-    table = {
-        "b": (_bezier, _bezier),
-        "s": (_linear, _linear),
-        "si": (_sine_out, _linear),
-        "so": (_sine_in, _linear),
-        "sisi": (_sine_out, _sine_out),
-        "siso": (_sine_out, _sine_in),
-        "sosi": (_sine_in, _sine_out),
-        "soso": (_sine_in, _sine_in),
-    }
-    return table.get(easing.lower(), (_linear, _linear))
-
-
-def _clamp01(v: float) -> float:
-    return max(0.0, min(1.0, v))
-
-
-def arc_position_at(
-    t: float,
-    t1: float,
-    t2: float,
-    x1: float,
-    x2: float,
-    y1: float,
-    y2: float,
-    easing: str,
-) -> tuple[float, float]:
-    if t1 == t2:
-        raise ValueError("zero-duration Arc has no continuous progress")
-    # Preserve declared direction. For t1 > t2 this denominator is negative by design.
-    p = _clamp01((t - t1) / (t2 - t1))
-    fx, fy = _axis_easing(easing)
-    return x1 + (x2 - x1) * fx(p), y1 + (y2 - y1) * fy(p)
-
-
-def _fmt_float(v: float) -> str:
-    if abs(v) < 0.0000005:
-        v = 0.0
-    s = f"{v:.6f}".rstrip("0").rstrip(".")
-    return s or "0"
-
-
-def _fmt_arc_coord(v: float) -> str:
-    if abs(v) < 0.0000005:
-        v = 0.0
-    return f"{v:.6f}"
-
-
-def _split_arc_fields(body_inside: str) -> list[str]:
-    return [part.strip() for part in body_inside.split(",")]
-
-
-def _scale_bpm_string(value: str, speed: float) -> str:
-    # Only scale a single numeric display BPM. Ranges like "120-180" stay untouched.
-    raw = value.strip()
-    if not re.fullmatch(r"[+-]?\d+(?:\.\d+)?", raw):
-        return value
-    scaled = round(float(raw) * speed, 2)
-    return str(int(scaled) if scaled == int(scaled) else scaled)
-
-
-def _tt(t: int, start: int, speed: float) -> int:
-    return int(round((t - start) / speed))
-
-
-def _clamp(v: int, lo: int, hi: int) -> int:
-    return max(lo, min(hi, v))
-
-
-def _overlap(t1: int, t2: int, s: int, e: int) -> bool:
-    a, b = (t1, t2) if t1 <= t2 else (t2, t1)
-    return not (b < s or a > e)
-
-
-def _parse_arc_cut_candidate(line: str) -> dict | None:
-    m = _ARC_LINE_RE.match(line.strip())
-    if not m:
-        return None
-
-    t1, t2 = int(m.group(1)), int(m.group(2))
-    if t1 == t2:
-        return None
-
-    fields = _split_arc_fields(m.group(3))
-    if len(fields) < 5:
-        return None
-
-    easing = fields[2].strip().lower()
-    if easing not in NONLINEAR_ARC_EASINGS:
-        return None
-
-    low, high = min(t1, t2), max(t1, t2)
-    return {"t1": t1, "t2": t2, "low": low, "high": high, "easing": easing}
-
-
-def find_nonlinear_arc_cut_warnings(aff_text: str, segments: list[dict]) -> dict[int, dict[str, list[dict]]]:
-    _, body = _extract_header_and_body(aff_text)
-    arcs = []
-    for line in body:
-        arc = _parse_arc_cut_candidate(line)
-        if arc:
-            arcs.append(arc)
-
-    warnings: dict[int, dict[str, list[dict]]] = {}
-    for index, seg in enumerate(segments):
-        warnings[index] = {"start": [], "end": []}
-        try:
-            start_ms = int(seg["s"])
-            end_ms = int(seg["e"])
-        except (KeyError, TypeError, ValueError):
-            continue
-
-        for arc in arcs:
-            # Boundary equality is intentionally not a warning; only mid-arc cuts are approximate.
-            if arc["low"] < start_ms < arc["high"]:
-                warnings[index]["start"].append(dict(arc))
-            if arc["low"] < end_ms < arc["high"]:
-                warnings[index]["end"].append(dict(arc))
-    return warnings
-
-
-def _arc_cut_easing_summary(hits: list[dict]) -> str:
-    counts: dict[str, int] = {}
-    for hit in hits:
-        easing = str(hit.get("easing", "?"))
-        counts[easing] = counts.get(easing, 0) + 1
-
-    ordered = [easing for easing in ARC_CUT_EASING_ORDER if easing in counts]
-    ordered.extend(sorted(easing for easing in counts if easing not in ARC_CUT_EASING_ORDER))
-    return " · ".join(f"{easing} × {counts[easing]}" for easing in ordered)
-
-
-def _arc_cut_info_content(hits: list[dict], boundary: str) -> dict[str, str]:
-    if boundary == "start":
-        return {
-            "title": f"起点截断 · {len(hits)} 条",
-            "body": (
-                "当前片段从非线性 Arc 的中间开始。\n"
-                "切片器已按原谱缓动计算新的起点坐标，\n"
-                "因此切片边界不会突跳。\n\n"
-                "但 AFF 无法表示被截取后的局部缓动曲线，\n"
-                "所以 Arc 在片段内部只能近似原谱，\n"
-                "可能存在轻微轨迹偏差。"
-            ),
-            "summary": _arc_cut_easing_summary(hits),
-            "footer": "线性 s Arc 不受此限制，因此不会显示该标记。",
-        }
-    else:
-        return {
-            "title": f"终点截断 · {len(hits)} 条",
-            "body": (
-                "当前片段在非线性 Arc 的中间结束。\n"
-                "切片器已按原谱缓动计算新的终点坐标，\n"
-                "因此切片边界不会突跳。\n\n"
-                "但 AFF 无法表示被截取后的局部缓动曲线，\n"
-                "所以 Arc 在片段内部只能近似原谱，\n"
-                "可能存在轻微轨迹偏差。"
-            ),
-            "summary": _arc_cut_easing_summary(hits),
-            "footer": "线性 s Arc 不受此限制，因此不会显示该标记。",
-        }
-
-
-def _slice_arc_line(stripped: str, s: int, e: int, start: int, speed: float) -> str | None:
-    m = _ARC_LINE_RE.match(stripped)
-    if not m:
-        return None
-
-    t1, t2 = int(m.group(1)), int(m.group(2))
-    low, high = min(t1, t2), max(t1, t2)
-    if not _overlap(t1, t2, s, e):
-        return ""
-
-    fields = _split_arc_fields(m.group(3))
-    if len(fields) < 8:
-        return stripped
-
-    if t1 == t2:
-        if not (s <= t1 <= e):
-            return ""
-        ot = _tt(t1, start, speed)
-        try:
-            new_fields = [
-                _fmt_arc_coord(float(fields[0])),
-                _fmt_arc_coord(float(fields[1])),
-                fields[2],
-                _fmt_arc_coord(float(fields[3])),
-                _fmt_arc_coord(float(fields[4])),
-                *fields[5:],
-            ]
-        except (ValueError, IndexError):
-            return stripped
-        result = f"arc({ot},{ot},{','.join(new_fields)})"
-    else:
-        try:
-            x1, x2 = float(fields[0]), float(fields[1])
-            easing = fields[2]
-            y1, y2 = float(fields[3]), float(fields[4])
-        except (ValueError, IndexError):
-            return stripped
-
-        # Clamp each declared endpoint independently to keep t1 > t2 direction intact.
-        nt1, nt2 = _clamp(t1, s, e), _clamp(t2, s, e)
-        nx1, ny1 = arc_position_at(nt1, t1, t2, x1, x2, y1, y2, easing)
-        nx2, ny2 = arc_position_at(nt2, t1, t2, x1, x2, y1, y2, easing)
-        new_fields = [
-            _fmt_arc_coord(nx1),
-            _fmt_arc_coord(nx2),
-            fields[2],
-            _fmt_arc_coord(ny1),
-            _fmt_arc_coord(ny2),
-            *fields[5:],
-        ]
-        result = f"arc({_tt(nt1,start,speed)},{_tt(nt2,start,speed)},{','.join(new_fields)})"
-
-    taps_blob = m.group(5)
-    if taps_blob:
-        kept = [
-            f"arctap({_tt(int(tm.group(1)),start,speed)})"
-            for tm in re.finditer(r"arctap\(([+-]?\d+)\)", taps_blob, re.IGNORECASE)
-            if max(low, s) <= int(tm.group(1)) <= min(high, e)
-        ]
-        result += ("[" + ",".join(kept) + "]") if kept else "[]"
-    return result + ";"
-
-
-def _slice_line(line: str, s: int, e: int, start: int, speed: float, warnings: set[str] | None = None) -> str | None:
-    stripped = line.strip()
-    if not stripped:
-        return ""
-
-    # timing
-    m = re.match(
-        r"timing\(([+-]?\d+),([+-]?\d+(?:\.\d+)?),([+-]?\d+(?:\.\d+)?)\);\s*$",
-        stripped, re.IGNORECASE,
-    )
-    if m:
-        t = int(m.group(1))
-        if not (s <= t <= e):
-            return None
-        return _timing_line(_tt(t, start, speed), float(m.group(2)), float(m.group(3)), speed)
-
-    for pat, prefix in [
-        (r"\s*camera\((\d+),(.*)\);\s*", "camera"),
-        (r"\s*scenecontrol\((\d+),(.*)\);\s*", "scenecontrol"),
-    ]:
-        m = re.match(pat, stripped, re.IGNORECASE)
-        if m:
-            if warnings is not None:
-                warnings.add(CAMERA_SCENE_WARNING)
-            t = int(m.group(1))
-            if not (s <= t <= e):
-                return None
-            return re.sub(rf"{prefix}\(\d+,", f"{prefix}({_tt(t,start,speed)},", stripped, flags=re.IGNORECASE)
-
-    m = re.match(r"\s*\((\d+),(.*)\);\s*", stripped)
-    if m:
-        t = int(m.group(1))
-        if not (s <= t <= e):
-            return None
-        return re.sub(r"\(\d+,", f"({_tt(t,start,speed)},", stripped)
-
-    m = re.match(r"\s*hold\((\d+),(\d+),(.*)\);\s*", stripped, re.IGNORECASE)
-    if m:
-        t1, t2 = int(m.group(1)), int(m.group(2))
-        if not _overlap(t1, t2, s, e):
-            return None
-        nt1, nt2 = _clamp(t1, s, e), _clamp(t2, s, e)
-        return re.sub(r"hold\(\d+,\d+,", f"hold({_tt(nt1,start,speed)},{_tt(nt2,start,speed)},", stripped, flags=re.IGNORECASE)
-
-    sliced_arc = _slice_arc_line(stripped, s, e, start, speed)
-    if sliced_arc == "":
-        return None
-    if sliced_arc is not None:
-        return sliced_arc
-
-    return stripped
-
-
-def _slice_block(lines: list[str], s: int, e: int, start: int, speed: float, warnings: set[str] | None = None) -> list[str]:
-    out, i = [], 0
-    while i < len(lines):
-        line    = lines[i]
-        stripped = line.strip()
-        if stripped.lower().startswith("timinggroup"):
-            hdr = stripped
-            if "{" not in hdr and i + 1 < len(lines) and "{" in lines[i + 1]:
-                i += 1
-                hdr = hdr + " " + lines[i].strip()
-            if "{" in hdr:
-                brace, inner = hdr.count("{") - hdr.count("}"), []
-                i += 1
-                while i < len(lines) and brace > 0:
-                    l2 = lines[i]
-                    brace += l2.count("{") - l2.count("}")
-                    if brace > 0:
-                        inner.append(l2)
-                    i += 1
-                inner_timings = _parse_timings(inner)
-                sliced_inner = _slice_block(inner, s, e, start, speed, warnings)
-                if _has_nonempty_statement(sliced_inner):
-                    if not _has_timing_zero(sliced_inner):
-                        chosen = _choose_effective_timing(inner_timings, s)
-                        if chosen:
-                            sliced_inner.insert(0, _timing_line(0, chosen[1], chosen[2], speed))
-                    out.append(hdr.split("{", 1)[0].rstrip() + "{")
-                    out.extend(sliced_inner)
-                    out.append("};")
-                continue
-        sliced = _slice_line(line, s, e, start, speed, warnings)
-        if sliced is not None:
-            out.append(sliced)
-        i += 1
-    while out and out[-1] == "":
-        out.pop()
-    return out
-
-
-def slice_aff(aff_text: str, start_ms: int, end_ms: int, speed: float, warnings: list[str] | None = None) -> str:
-    validate_speed_value(speed)
-    header, body = _extract_header_and_body(aff_text)
-    warning_set: set[str] = set()
-    audio_offset = _audio_offset_value(header)
-    if audio_offset not in (None, 0):
-        # AudioOffset is intentionally preserved for Gate 0; no timing conversion is applied yet.
-        warning_set.add(AUDIO_OFFSET_WARNING)
-
-    timings = _parse_outer_timings(body)
-    base_line: str | None = None
-    chosen = _choose_effective_timing(timings, start_ms)
-    if chosen:
-        base_line = _timing_line(0, chosen[1], chosen[2], speed)
-
-    out_body = _slice_block(body, start_ms, end_ms, start_ms, speed, warning_set)
-    if base_line:
-        if not _has_outer_timing_zero(out_body):
-            out_body.insert(0, base_line)
-    if warnings is not None:
-        warnings.extend(sorted(warning_set))
-    return "\n".join(header + out_body).rstrip() + "\n"
-
-
-# ─── ffmpeg ───────────────────────────────────────────────────────────────────
 
 def _get_ffmpeg() -> str:
-    if _FFMPEG_BUNDLED.exists():
-        return str(_FFMPEG_BUNDLED)
-    found = shutil.which("ffmpeg")
-    if found:
-        return found
-    raise RuntimeError(
-        "找不到 ffmpeg。请将 ffmpeg.exe 放在应用同目录，或将其加入系统 PATH。"
-    )
-
-
-TIME_INPUT_PATTERN = r"^-?\d*$"
-_TIME_INPUT_RE = re.compile(r"^-?\d*$")
-_FFMPEG_DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)")
-
-
-@dataclass
-class SegmentValidationResult:
-    start_error: str = ""
-    end_error: str = ""
-    end_cap_ms: int | None = None
-    first_field: str | None = None
-    first_message: str = ""
-
-    @property
-    def ok(self) -> bool:
-        return not self.start_error and not self.end_error
-
-
-def is_time_input_text_allowed(text: str) -> bool:
-    return bool(_TIME_INPUT_RE.fullmatch(str(text)))
-
-
-def parse_duration_to_ms(value: str | int | float | Decimal) -> int:
-    try:
-        duration = Decimal(str(value).strip())
-    except Exception as ex:
-        raise ValueError("invalid duration") from ex
-    if not duration.is_finite() or duration < 0:
-        raise ValueError("invalid duration")
-    return int((duration * Decimal(1000)).to_integral_value(rounding=ROUND_FLOOR))
-
-
-def parse_ffmpeg_duration_to_ms(text: str) -> int:
-    m = _FFMPEG_DURATION_RE.search(text or "")
-    if not m:
-        raise ValueError("ffmpeg duration not found")
-    hours = int(m.group(1))
-    minutes = int(m.group(2))
-    seconds = Decimal(m.group(3))
-    total = Decimal(hours * 3600 + minutes * 60) + seconds
-    return parse_duration_to_ms(total)
-
-
-def format_duration_ms(duration_ms: int) -> str:
-    duration_ms = max(0, int(duration_ms))
-    total_seconds, ms = divmod(duration_ms, 1000)
-    minutes, seconds = divmod(total_seconds, 60)
-    hours, minutes = divmod(minutes, 60)
-    if hours:
-        return f"{hours}:{minutes:02d}:{seconds:02d}.{ms:03d}"
-    return f"{minutes}:{seconds:02d}.{ms:03d}"
+    return _audio_core._get_ffmpeg()
 
 
 def _get_ffprobe() -> str:
-    candidates = []
-    bundled = RES_DIR / ("ffprobe.exe" if sys.platform == "win32" else "ffprobe")
-    candidates.append(bundled)
-    try:
-        ffmpeg_path = Path(_get_ffmpeg())
-        candidates.append(ffmpeg_path.with_name("ffprobe.exe" if sys.platform == "win32" else "ffprobe"))
-    except RuntimeError:
-        pass
-    for candidate in candidates:
-        if candidate.exists():
-            return str(candidate)
-    found = shutil.which("ffprobe")
-    if found:
-        return found
-    raise RuntimeError("找不到 ffprobe")
+    return _audio_core._get_ffprobe()
 
 
 def _subprocess_no_window_flag() -> int:
-    return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    return _audio_core._subprocess_no_window_flag()
+
+
+def parse_ffmpeg_duration_to_ms(text: str) -> int:
+    return _audio_core.parse_ffmpeg_duration_to_ms(text)
+
+
+def _atempo(speed: float) -> str:
+    return _audio_core._atempo(speed)
 
 
 def probe_audio_duration_ms(audio_path: Path) -> int:
-    audio_path = Path(audio_path)
-    if not audio_path.is_file():
-        raise RuntimeError(f"音频文件不存在: {audio_path}")
-
-    errors: list[str] = []
-    try:
-        ffprobe = _get_ffprobe()
-        cp = subprocess.run(
-            [
-                ffprobe, "-v", "error", "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path),
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=_subprocess_no_window_flag(),
-        )
-        if cp.stdout.strip():
-            return parse_duration_to_ms(cp.stdout.strip().splitlines()[0])
-        errors.append((cp.stderr or "ffprobe 未返回时长").strip())
-    except Exception as ex:
-        errors.append(f"ffprobe: {ex}")
-
-    try:
-        ffmpeg = _get_ffmpeg()
-        cp = subprocess.run(
-            [ffmpeg, "-hide_banner", "-i", str(audio_path)],
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=_subprocess_no_window_flag(),
-        )
-        return parse_ffmpeg_duration_to_ms((cp.stderr or "") + "\n" + (cp.stdout or ""))
-    except Exception as ex:
-        errors.append(f"ffmpeg: {ex}")
-
-    raise RuntimeError("; ".join(err for err in errors if err) or "无法读取音频时长")
-
-
-@dataclass
-class WaveformData:
-    duration_ms: int
-    samples_per_second: int
-    peaks: list[tuple[float, float]]
-
-
-def aggregate_pcm_waveform(
-    pcm_bytes: bytes,
-    sample_rate: int = WAVEFORM_DECODE_SAMPLE_RATE,
-    samples_per_second: int = DEFAULT_WAVEFORM_SAMPLES_PER_SECOND,
-) -> WaveformData:
-    if sample_rate <= 0:
-        raise ValueError("sample_rate must be positive")
-    if samples_per_second <= 0:
-        raise ValueError("samples_per_second must be positive")
-    if not pcm_bytes:
-        return WaveformData(duration_ms=0, samples_per_second=int(samples_per_second), peaks=[])
-
-    sample_count = len(pcm_bytes) // 2
-    if sample_count <= 0:
-        return WaveformData(duration_ms=0, samples_per_second=int(samples_per_second), peaks=[])
-
-    samples = array.array("h")
-    samples.frombytes(pcm_bytes[: sample_count * 2])
-    if sys.byteorder != "little":
-        samples.byteswap()
-
-    samples_per_bucket = max(1, int(round(sample_rate / samples_per_second)))
-    peaks: list[tuple[float, float]] = []
-    for start in range(0, sample_count, samples_per_bucket):
-        bucket = samples[start:start + samples_per_bucket]
-        if not bucket:
-            continue
-        min_amp = max(-1.0, min(1.0, min(bucket) / 32768.0))
-        max_amp = max(-1.0, min(1.0, max(bucket) / 32767.0))
-        peaks.append((float(min_amp), float(max_amp)))
-
-    duration_ms = int(round(sample_count * 1000 / sample_rate))
-    return WaveformData(
-        duration_ms=duration_ms,
-        samples_per_second=int(samples_per_second),
-        peaks=peaks,
+    return _audio_core.probe_audio_duration_ms(
+        audio_path,
+        ffprobe_getter=_get_ffprobe,
+        ffmpeg_getter=_get_ffmpeg,
+        run=subprocess.run,
     )
 
 
-def waveform_cache_key(audio_path: Path, samples_per_second: int = DEFAULT_WAVEFORM_SAMPLES_PER_SECOND) -> str:
-    path = Path(audio_path)
-    stat = path.stat()
-    payload = json.dumps(
-        {
-            "path": str(path.resolve(strict=False)),
-            "size": int(stat.st_size),
-            "mtime_ns": int(stat.st_mtime_ns),
-            "samples_per_second": int(samples_per_second),
-        },
-        ensure_ascii=False,
-        sort_keys=True,
+def slice_ogg(in_path: Path, out_path: Path, start_ms: int, end_ms: int, speed: float) -> None:
+    return _audio_core.slice_ogg(
+        in_path,
+        out_path,
+        start_ms,
+        end_ms,
+        speed,
+        ffmpeg_getter=_get_ffmpeg,
+        run=subprocess.run,
     )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def waveform_cache_path(
-    audio_path: Path,
-    samples_per_second: int = DEFAULT_WAVEFORM_SAMPLES_PER_SECOND,
-    cache_dir: Path | None = None,
-) -> Path:
-    return Path(cache_dir or WAVEFORM_CACHE_DIR) / f"{waveform_cache_key(audio_path, samples_per_second)}.json"
-
-
-def _coerce_waveform_peaks(raw_peaks) -> list[tuple[float, float]]:
-    if not isinstance(raw_peaks, list):
-        raise ValueError("invalid peaks")
-    peaks: list[tuple[float, float]] = []
-    for item in raw_peaks:
-        if not isinstance(item, (list, tuple)) or len(item) != 2:
-            raise ValueError("invalid peak")
-        lo = max(-1.0, min(1.0, float(item[0])))
-        hi = max(-1.0, min(1.0, float(item[1])))
-        peaks.append((lo, hi))
-    return peaks
-
-
-def read_waveform_cache(path: Path) -> WaveformData | None:
-    try:
-        raw = json.loads(Path(path).read_text(encoding="utf-8"))
-        if not isinstance(raw, dict) or raw.get("version") != WAVEFORM_CACHE_VERSION:
-            return None
-        duration_ms = int(raw.get("duration_ms", 0))
-        samples_per_second = int(raw.get("samples_per_second", 0))
-        if duration_ms < 0 or samples_per_second <= 0:
-            return None
-        return WaveformData(
-            duration_ms=duration_ms,
-            samples_per_second=samples_per_second,
-            peaks=_coerce_waveform_peaks(raw.get("peaks")),
-        )
-    except Exception:
-        return None
-
-
-def write_waveform_cache(path: Path, data: WaveformData) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f".{path.name}.tmp_{uuid.uuid4().hex}"
-    payload = {
-        "version": WAVEFORM_CACHE_VERSION,
-        "duration_ms": int(data.duration_ms),
-        "samples_per_second": int(data.samples_per_second),
-        "peaks": [[float(lo), float(hi)] for lo, hi in data.peaks],
-    }
-    try:
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-        os.replace(tmp, path)
-    finally:
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
 
 
 def decode_audio_waveform(
     audio_path: Path,
     samples_per_second: int = DEFAULT_WAVEFORM_SAMPLES_PER_SECOND,
 ) -> WaveformData:
-    ffmpeg = _get_ffmpeg()
-    cp = subprocess.run(
-        [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            str(audio_path),
-            "-ac",
-            "1",
-            "-ar",
-            str(WAVEFORM_DECODE_SAMPLE_RATE),
-            "-f",
-            "s16le",
-            "pipe:1",
-        ],
-        check=True,
-        capture_output=True,
-        creationflags=_subprocess_no_window_flag(),
+    return _waveform_core.decode_audio_waveform(
+        audio_path,
+        samples_per_second,
+        ffmpeg_getter=_get_ffmpeg,
+        run=subprocess.run,
     )
-    return aggregate_pcm_waveform(cp.stdout or b"", WAVEFORM_DECODE_SAMPLE_RATE, samples_per_second)
 
 
 def load_or_generate_waveform(
@@ -942,127 +153,146 @@ def load_or_generate_waveform(
     samples_per_second: int = DEFAULT_WAVEFORM_SAMPLES_PER_SECOND,
     cache_dir: Path | None = None,
 ) -> WaveformData:
-    cache_path = waveform_cache_path(audio_path, samples_per_second, cache_dir)
-    cached = read_waveform_cache(cache_path)
-    if cached is not None:
-        return cached
-    data = decode_audio_waveform(audio_path, samples_per_second)
-    try:
-        write_waveform_cache(cache_path, data)
-    except Exception:
-        pass
-    return data
+    return _waveform_core.load_or_generate_waveform(
+        audio_path,
+        samples_per_second,
+        cache_dir,
+        ffmpeg_getter=_get_ffmpeg,
+        run=subprocess.run,
+    )
 
 
-def _parse_non_negative_time_text(text: str, field_name: str) -> tuple[int | None, str]:
-    raw = str(text)
-    if raw == "":
-        return None, f"{field_name}不能为空"
-    if not is_time_input_text_allowed(raw) or raw == "-":
-        return None, f"{field_name}必须为非负整数毫秒"
-    value = int(raw)
-    if value < 0:
-        return None, f"{field_name}必须为非负整数毫秒"
-    return value, ""
+def find_nonlinear_arc_cut_warnings(aff_text: str, segments: list[dict]) -> dict[int, dict[str, list[dict]]]:
+    return _aff_core.find_nonlinear_arc_cut_warnings(aff_text, segments)
 
 
-def validate_segment_bounds(
-    start_text: str,
-    end_text: str,
-    audio_duration_ms: int | None,
-    *,
-    allow_draft: bool = False,
-) -> SegmentValidationResult:
-    if allow_draft:
-        start_raw = str(start_text)
-        end_raw = str(end_text)
-        if not start_raw and not end_raw:
-            return SegmentValidationResult()
-        if not start_raw or not end_raw:
-            value_text = start_raw or end_raw
-            field_name = "起点" if start_raw else "终点"
-            value, error = _parse_non_negative_time_text(value_text, field_name)
-            result = SegmentValidationResult(
-                start_error=error if start_raw else "",
-                end_error=error if end_raw else "",
-            )
-            if error:
-                result.first_field = "start" if start_raw else "end"
-                result.first_message = error
-                return result
-            if value is not None and audio_duration_ms is not None:
-                if start_raw and value >= audio_duration_ms:
-                    result.start_error = f"起点不能超过音频时长：{format_duration_ms(audio_duration_ms)}"
-                elif end_raw and value > audio_duration_ms:
-                    result.end_error = f"终点不能超过音频时长：{format_duration_ms(audio_duration_ms)}"
-                    result.end_cap_ms = int(audio_duration_ms)
-            if result.start_error:
-                result.first_field = "start"
-                result.first_message = result.start_error
-            elif result.end_error:
-                result.first_field = "end"
-                result.first_message = result.end_error
-            return result
-
-    start, start_error = _parse_non_negative_time_text(start_text, "起点")
-    end, end_error = _parse_non_negative_time_text(end_text, "终点")
-    result = SegmentValidationResult(start_error=start_error, end_error=end_error)
-
-    if result.start_error:
-        result.first_field = "start"
-        result.first_message = result.start_error
-        return result
-    if result.end_error:
-        result.first_field = "end"
-        result.first_message = result.end_error
-        return result
-
-    assert start is not None and end is not None
-    if end <= start:
-        result.end_error = "终点必须大于起点"
-    elif audio_duration_ms is None:
-        result.end_error = "无法读取当前曲目的音频时长"
-    elif start >= audio_duration_ms:
-        result.start_error = f"起点不能超过音频时长：{format_duration_ms(audio_duration_ms)}"
-    elif end > audio_duration_ms:
-        result.end_error = f"终点不能超过音频时长：{format_duration_ms(audio_duration_ms)}"
-        result.end_cap_ms = int(audio_duration_ms)
-
-    if result.start_error:
-        result.first_field = "start"
-        result.first_message = result.start_error
-    elif result.end_error:
-        result.first_field = "end"
-        result.first_message = result.end_error
-    return result
+def slice_aff(aff_text: str, start_ms: int, end_ms: int, speed: float, warnings: list[str] | None = None) -> str:
+    return _aff_core.slice_aff(aff_text, start_ms, end_ms, speed, warnings)
 
 
-def _atempo(speed: float) -> str:
-    validate_speed_value(speed)
-    parts, rem = [], speed
-    while rem > 2.0:
-        parts.append(2.0)
-        rem /= 2.0
-    while rem < 0.5:
-        parts.append(0.5)
-        rem /= 0.5
-    parts.append(rem)
-    return ",".join(f"atempo={p:.6f}" for p in parts)
 
 
-def slice_ogg(in_path: Path, out_path: Path, start_ms: int, end_ms: int, speed: float) -> None:
-    validate_speed_value(speed)
-    ffmpeg = _get_ffmpeg()
-    cmd = [
-        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
-        "-ss", f"{start_ms/1000:.3f}", "-t", f"{(end_ms-start_ms)/1000:.3f}",
-        "-i", str(in_path),
-    ]
-    if abs(speed - 1.0) > 1e-9:
-        cmd += ["-filter:a", _atempo(speed)]
-    cmd += ["-c:a", "libvorbis", "-q:a", "6", str(out_path)]
-    flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-    subprocess.run(cmd, check=True, creationflags=flags)
+
+
+
+
+
+
+
+def is_sliceable_song_dir(path: Path) -> bool:
+    return path.is_dir() and (path / "base.ogg").is_file() and (path / "2.aff").is_file()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ─── ffmpeg ───────────────────────────────────────────────────────────────────
+
+
+
+TIME_INPUT_PATTERN = r"^-?\d*$"
+_TIME_INPUT_RE = re.compile(r"^-?\d*$")
+_FFMPEG_DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # ─── V2.1 导出路径底座 ───────────────────────────────────────────────────────
@@ -1083,20 +313,12 @@ PACK_SECTION_OPTIONS = (
 )
 
 
-def current_export_root(out_dir: Path | None = None) -> Path:
-    return Path(out_dir or OUT_DIR) / "current_export"
 
 
-def current_export_songs_dir(out_dir: Path | None = None) -> Path:
-    return current_export_root(out_dir) / "songs"
 
 
-def library_export_root(out_dir: Path | None = None) -> Path:
-    return Path(out_dir or OUT_DIR) / "library_export"
 
 
-def library_export_songs_dir(out_dir: Path | None = None) -> Path:
-    return library_export_root(out_dir) / "songs"
 
 
 def _speed_text(speed: float) -> str:
@@ -1108,20 +330,6 @@ def _speed_text(speed: float) -> str:
         out = out.rstrip("0").rstrip(".")
     return out or "0"
 
-
-def normalize_speed_token(speed: float) -> str:
-    return _speed_text(speed).replace(".", "p")
-
-
-def normalize_link_group_id(value) -> str | None:
-    if not isinstance(value, str):
-        return None
-    value = value.strip()
-    return value or None
-
-
-def new_link_group_id() -> str:
-    return f"grp_{uuid.uuid4().hex[:10]}"
 
 
 def build_segment_id(source_id: str, start_ms: int, end_ms: int, speed: float) -> str:
