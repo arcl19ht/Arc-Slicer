@@ -250,6 +250,9 @@ class SonglistPanel(QFrame):
         super().__init__(parent)
         self._expanded = False
         self._pack_expanded = False
+        self._songlist_enabled_state = False
+        self._packlist_enabled_state = False
+        self._packlist_checkbox_enabled_state = False
         self._syncing_shared_pack_id = False
         self._resetting_source = False
         self._last_shared_pack_id = ""
@@ -473,29 +476,75 @@ class SonglistPanel(QFrame):
         pack_body_lay.addWidget(pack_frame)
         self._refresh_packlist_state()
 
+    def _widget_bool(self, widget, fallback: bool, getter_name: str) -> bool:
+        getter = getattr(widget, getter_name, None)
+        if callable(getter):
+            try:
+                value = getter()
+                if isinstance(value, bool):
+                    return value
+            except Exception:
+                pass
+        return bool(fallback)
+
+    def _sync_fake_bool_getter(self, widget, attr_name: str, getter_name: str) -> None:
+        getter = getattr(widget, getter_name, None)
+        try:
+            value = getter() if callable(getter) else None
+        except Exception:
+            value = None
+        if isinstance(value, bool):
+            return
+        try:
+            setattr(widget, getter_name, lambda attr_name=attr_name: bool(getattr(self, attr_name)))
+        except Exception:
+            pass
+
+    def _set_checked_state(self, widget, attr_name: str, value: bool) -> None:
+        setattr(self, attr_name, bool(value))
+        try:
+            widget.setChecked(bool(value))
+        except Exception:
+            pass
+        self._sync_fake_bool_getter(widget, attr_name, "isChecked")
+
+    def _set_enabled_state(self, widget, attr_name: str, value: bool) -> None:
+        setattr(self, attr_name, bool(value))
+        try:
+            widget.setEnabled(bool(value))
+        except Exception:
+            pass
+        self._sync_fake_bool_getter(widget, attr_name, "isEnabled")
+
+    def _songlist_checked(self) -> bool:
+        return self._widget_bool(self._enabled, self._songlist_enabled_state, "isChecked")
+
+    def _packlist_checked(self) -> bool:
+        return self._widget_bool(self._packlist_enabled, self._packlist_enabled_state, "isChecked")
+
     # ── 折叠 / 展开 ───────────────────────────────────────────────────────────
 
     def _toggle(self):
-        if not self._enabled.isChecked():
+        if not self._songlist_checked():
             return
         self._expanded = not self._expanded
         self._refresh_packlist_state()
 
     def _toggle_pack(self):
-        if not (self._enabled.isChecked() and self._packlist_enabled.isChecked()):
+        if not (self._songlist_checked() and self._packlist_checked()):
             return
         self._pack_expanded = not self._pack_expanded
         self._refresh_packlist_state()
 
     def _on_songlist_enabled_changed(self):
-        if not self._enabled.isChecked():
+        if not self._songlist_checked():
             self._expanded = False
             self._pack_expanded = False
         self._refresh_packlist_state()
         self.enabled_changed.emit()
 
     def _on_packlist_enabled_changed(self):
-        if not self._packlist_enabled.isChecked():
+        if not self._packlist_checked():
             self._pack_expanded = False
         self._refresh_packlist_state()
         self.enabled_changed.emit()
@@ -592,6 +641,14 @@ class SonglistPanel(QFrame):
 
     def _set_section_button_state(self, button: QPushButton, active: bool, expanded: bool):
         button.setEnabled(bool(active))
+        try:
+            button._section_button_enabled_state = bool(active)
+        except Exception:
+            pass
+        try:
+            button.isEnabled = lambda button=button: bool(getattr(button, "_section_button_enabled_state", False))
+        except Exception:
+            pass
         button.setText("▾" if expanded and active else "▸")
         color = C_TEXT2 if active else C_LABEL
         button.setStyleSheet(
@@ -602,27 +659,27 @@ class SonglistPanel(QFrame):
     # ── 读 / 写 ───────────────────────────────────────────────────────────────
 
     def is_songlist_enabled(self) -> bool:
-        return self._enabled.isChecked()
+        return self._songlist_checked()
 
     def set_songlist_enabled(self, enabled: bool):
-        self._enabled.setChecked(bool(enabled))
+        self._set_checked_state(self._enabled, "_songlist_enabled_state", bool(enabled))
         if not enabled:
             self._expanded = False
             self._pack_expanded = False
         self._refresh_packlist_state()
 
     def is_packlist_enabled(self) -> bool:
-        return self._packlist_enabled.isChecked()
+        return self._packlist_checked()
 
     def set_packlist_enabled(self, enabled: bool):
-        self._packlist_enabled.setChecked(bool(enabled))
+        self._set_checked_state(self._packlist_enabled, "_packlist_enabled_state", bool(enabled))
         if not enabled:
             self._pack_expanded = False
         self._refresh_packlist_state()
 
     def _refresh_packlist_state(self):
-        songlist_enabled = self._enabled.isChecked()
-        packlist_checked = self._packlist_enabled.isChecked()
+        songlist_enabled = self._songlist_checked()
+        packlist_checked = self._packlist_checked()
         packlist_enabled = packlist_checked and songlist_enabled
         self._expanded = bool(self._expanded and songlist_enabled)
         self._pack_expanded = bool(self._pack_expanded and packlist_enabled)
@@ -640,7 +697,7 @@ class SonglistPanel(QFrame):
             self._set_section_button_state(self._toggle_btn, songlist_enabled, self._expanded)
         if hasattr(self, "_pack_toggle_btn"):
             self._set_section_button_state(self._pack_toggle_btn, packlist_enabled, self._pack_expanded)
-        self._packlist_enabled.setEnabled(songlist_enabled)
+        self._set_enabled_state(self._packlist_enabled, "_packlist_checkbox_enabled_state", songlist_enabled)
         for widget in getattr(self, "_pack_controls", []):
             widget.setEnabled(packlist_enabled)
 

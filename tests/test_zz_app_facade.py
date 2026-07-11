@@ -12,6 +12,13 @@ class AppFacadeTests(unittest.TestCase):
         self.assertTrue(hasattr(app, "MainWindow"))
         self.assertTrue(hasattr(app, "SegmentRow"))
         self.assertTrue(hasattr(app, "WaveformPanel"))
+        self.assertTrue(callable(app.build_segment_id))
+        self.assertTrue(callable(app.build_segment_export_plan))
+        self.assertTrue(callable(app.build_packlist_entry))
+        self.assertTrue(callable(app.build_packlist_document))
+        self.assertTrue(callable(app.default_pack_form_for_song))
+        self.assertTrue(callable(app.do_slice))
+        self.assertTrue(callable(app.load_config))
 
 
 if __name__ == "__main__":
