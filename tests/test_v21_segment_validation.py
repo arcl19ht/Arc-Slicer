@@ -294,7 +294,7 @@ class SegmentValidationUiFlowTests(unittest.TestCase):
         self.assertFalse(row._end_cap_btn.isVisible())
 
     def test_end_cap_button_has_button_like_style(self):
-        source = Path("app.py").read_text(encoding="utf-8")
+        source = Path("arc_slicer/ui/segment_row.py").read_text(encoding="utf-8")
         self.assertIn("self._end_cap_btn.setCursor(Qt.CursorShape.PointingHandCursor)", source)
         self.assertIn("QPushButton:hover", source)
         self.assertIn("border-radius: 6px", source)
