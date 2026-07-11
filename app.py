@@ -20,7 +20,7 @@ from decimal import Decimal, ROUND_FLOOR
 from pathlib import Path
 
 from PyQt6.QtCore import (
-    Qt, QThread, pyqtSignal, QTimer, QSize, QMimeData,
+    Qt, QTimer, QSize, QMimeData,
     QPoint, QRect, QEvent,
 )
 from PyQt6.QtGui import (
@@ -87,6 +87,7 @@ from arc_slicer.ui.waveform_panel import WaveformPanel
 
 from arc_slicer import exports as _exports_core
 from arc_slicer import persistence as _persistence_core
+from arc_slicer import workers as _workers_core
 from arc_slicer.exports import (
     JACKET_FILENAMES, PACK_COVER_SIZE, PACK_COVER_UPLOAD_SUFFIXES, PACK_DEFAULT_SECTION,
     PACK_ID_RE, PACK_SECTION_OPTIONS, PackTemplate, SongTemplate, build_ftr_compat_difficulties,
@@ -845,44 +846,10 @@ def external_merge_log_line(result: external_merge.ExternalMergeResult) -> tuple
     return (f"[外部合并] 未执行：{result.status}", "err")
 
 
-class ExternalMergeWorker(QThread):
-    done_signal = pyqtSignal(str, int, object, str)
-
-    def __init__(
-        self,
-        mode: str,
-        generation: int,
-        current_songs_dir: Path,
-        target_songs_dir: Path,
-        backup_root: Path | None = None,
-        plan: external_merge.ExternalMergePlan | None = None,
-    ):
-        super().__init__()
-        self.mode = mode
-        self.generation = int(generation)
-        self.current_songs_dir = Path(current_songs_dir)
-        self.target_songs_dir = Path(target_songs_dir)
-        self.backup_root = Path(backup_root or EXTERNAL_MERGE_BACKUP_ROOT)
-        self.plan = plan
-
-    def run(self):
-        try:
-            if self.mode == "check":
-                payload = external_merge.build_external_merge_plan(self.current_songs_dir, self.target_songs_dir)
-            elif self.mode == "execute":
-                if self.plan is None:
-                    raise RuntimeError("missing external merge plan")
-                payload = external_merge.execute_external_merge(self.plan, backup_root=self.backup_root)
-            else:
-                raise RuntimeError(f"unknown external merge worker mode: {self.mode}")
-            self.done_signal.emit(self.mode, self.generation, payload, "")
-        except Exception as ex:
-            self.done_signal.emit(self.mode, self.generation, None, str(ex))
+ExternalMergeWorker = _workers_core.ExternalMergeWorker
 
 
-class WaveformWorker(QThread):
-    done_signal = pyqtSignal(int, str, object, str)
-
+class WaveformWorker(_workers_core.WaveformWorker):
     def __init__(
         self,
         generation: int,
@@ -890,28 +857,16 @@ class WaveformWorker(QThread):
         samples_per_second: int = DEFAULT_WAVEFORM_SAMPLES_PER_SECOND,
         cache_dir: Path | None = None,
     ):
-        super().__init__()
-        self.generation = int(generation)
-        self.audio_path = Path(audio_path)
-        self.samples_per_second = int(samples_per_second)
-        self.cache_dir = Path(cache_dir) if cache_dir is not None else None
-
-    def run(self):
-        try:
-            data = load_or_generate_waveform(
-                self.audio_path,
-                self.samples_per_second,
-                self.cache_dir,
-            )
-            self.done_signal.emit(self.generation, str(self.audio_path), data, "")
-        except Exception as ex:
-            self.done_signal.emit(self.generation, str(self.audio_path), None, str(ex))
+        super().__init__(
+            generation,
+            audio_path,
+            samples_per_second,
+            cache_dir,
+            waveform_loader=load_or_generate_waveform,
+        )
 
 
-class SlicerWorker(QThread):
-    log_signal  = pyqtSignal(str, str)  # text, kind
-    done_signal = pyqtSignal(int)       # return code
-
+class SlicerWorker(_workers_core.SlicerWorker):
     def __init__(
         self, songs_dir: Path, song_id: str, segments: list,
         speed: float, songlist_meta: dict | None = None,
@@ -922,46 +877,22 @@ class SlicerWorker(QThread):
         packlist_enabled: bool = False,
         pack_template: PackTemplate | None = None,
     ):
-        super().__init__()
-        self.songs_dir     = songs_dir
-        self.song_id       = song_id
-        self.segments      = segments
-        self.speed         = speed
-        self.songlist_meta = songlist_meta
-        self.songlist_enabled = songlist_enabled
-        self.song_template = song_template
-        self.current_export_enabled = current_export_enabled
-        self.library_export_enabled = library_export_enabled
-        self.packlist_enabled = packlist_enabled
-        self.pack_template = pack_template
-
-    def run(self):
-        def log(text, kind="normal"):
-            self.log_signal.emit(text, kind)
-
-        log(f"  songs 目录: {self.songs_dir}", "muted")
-        log(f"  曲目: {self.song_id}  默认速度: {self.speed}  段数: {len(self.segments)}", "muted")
-        if self.songlist_enabled:
-            log("  songlist 生成: 开启", "muted")
-        if effective_packlist_export_enabled(self.packlist_enabled, self.songlist_enabled):
-            log("  packlist 生成: 开启", "muted")
-        log(
-            f"  导出目标: current={'开' if self.current_export_enabled else '关'} "
-            f"library={'开' if effective_library_export_enabled(self.library_export_enabled, self.songlist_enabled) else '关'}",
-            "muted",
+        super().__init__(
+            songs_dir,
+            song_id,
+            segments,
+            speed,
+            songlist_meta,
+            songlist_enabled,
+            song_template,
+            current_export_enabled,
+            library_export_enabled,
+            packlist_enabled,
+            pack_template,
+            slice_fn=do_slice,
+            packlist_enabled_fn=effective_packlist_export_enabled,
+            library_enabled_fn=effective_library_export_enabled,
         )
-        code = do_slice(
-            self.songs_dir, self.song_id, self.segments, self.speed, log,
-            self.songlist_meta, self.songlist_enabled, self.song_template,
-            self.current_export_enabled, self.library_export_enabled,
-            self.packlist_enabled, self.pack_template,
-        )
-        if code == 0:
-            log("✓ 全部完成！输出目录: out/current_export/songs/", "ok")
-        self.done_signal.emit(code)
-
-
-# ─── 样式表 ───────────────────────────────────────────────────────────────────
 
 QSS = f"""
 QWidget {{
