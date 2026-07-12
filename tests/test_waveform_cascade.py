@@ -23,7 +23,7 @@ class _Speed:
         return "1.0"
 
 
-def _window(cascade=True):
+def _window():
     win = app.MainWindow.__new__(app.MainWindow)
     win._uid = 0
     win._segment_order = 0
@@ -35,7 +35,6 @@ def _window(cascade=True):
     win._selected_segment_uid = ""
     win._hovered_segment_uid = ""
     win._join_preview_uid = ""
-    win._cascade_edit_enabled = cascade
     win._audio_duration_ms = 200000
     win._auto_sort_enabled = False
     win._sort_mode = "manual"
@@ -66,7 +65,7 @@ class WaveformCascadeTests(unittest.TestCase):
         app.MainWindow._refresh_waveform_segments(win)
 
     def test_cascade_endpoint_drag_updates_linked_members_only(self):
-        win = _window(cascade=True)
+        win = _window()
         self._add_fixture_rows(win)
 
         app.MainWindow._update_waveform_segment_endpoint(win, 0, 20000, 139500)
@@ -80,17 +79,17 @@ class WaveformCascadeTests(unittest.TestCase):
         self.assertTrue(win._dirty_marked)
         self.assertTrue(win._invalidated)
 
-    def test_cascade_off_updates_only_dragged_member(self):
-        win = _window(cascade=False)
+    def test_endpoint_drag_always_updates_linked_members(self):
+        win = _window()
         self._add_fixture_rows(win)
 
         app.MainWindow._update_waveform_segment_endpoint(win, 0, 20000, 139500)
 
         self.assertEqual(win._rows[0].e_val, 139500)
-        self.assertEqual(win._rows[1].e_val, 140000)
+        self.assertEqual(win._rows[1].e_val, 139500)
 
     def test_cascade_left_endpoint_uses_common_clamp(self):
-        win = _window(cascade=True)
+        win = _window()
         app.MainWindow._add_segment(win, 20000, 21050, None, link_group_id="grp_a")
         app.MainWindow._add_segment(win, 20000, 22000, 0.8, link_group_id="grp_a")
         app.MainWindow._refresh_waveform_segments(win)
@@ -101,7 +100,7 @@ class WaveformCascadeTests(unittest.TestCase):
         self.assertEqual(win._rows[1].s_val, 20950)
 
     def test_timeline_metadata_keeps_resize_scroll_and_selection_available(self):
-        win = _window(cascade=True)
+        win = _window()
         self._add_fixture_rows(win)
         panel = win._waveform_panel
         panel.set_timeline_expanded(False)
@@ -123,7 +122,7 @@ class WaveformCascadeTests(unittest.TestCase):
         self.assertFalse(panel._begin_interaction_at_pos(x_wave, y_wave))
 
     def test_same_interval_unlinked_rows_are_hint_not_active_group(self):
-        win = _window(cascade=True)
+        win = _window()
         app.MainWindow._add_segment(win, 1000, 3000, None)
         app.MainWindow._add_segment(win, 1000, 3000, 0.8)
         app.MainWindow._refresh_waveform_segments(win)

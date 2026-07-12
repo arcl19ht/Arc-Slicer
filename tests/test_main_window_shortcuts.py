@@ -64,7 +64,6 @@ def _window(auto_sort=False, sort_mode="manual"):
     win._join_preview_uid = ""
     win._auto_sort_enabled = auto_sort
     win._sort_mode = sort_mode
-    win._cascade_edit_enabled = True
     win._audio_duration_ms = 200000
     win._refresh_seg_header = lambda: None
     win._schedule_segment_time_validation = lambda: None

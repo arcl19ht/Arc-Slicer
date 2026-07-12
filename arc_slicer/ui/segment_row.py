@@ -264,6 +264,7 @@ class SegmentRow(QFrame):
         self._group_index = 0
         self._group_count = 1
         self._link_group_active = False
+        self._link_group_inconsistent = False
         self._join_group_available = False
         self._join_preview = False
         self._default_speed = validate_speed_value(float(default_speed))
@@ -670,21 +671,32 @@ class SegmentRow(QFrame):
         self,
         active: bool = False,
         member_count: int = 1,
+        inconsistent: bool = False,
         join_available: bool = False,
         join_preview: bool = False,
         join_mode: str = "",
     ) -> None:
         self._link_group_active = bool(active)
+        self._link_group_inconsistent = bool(inconsistent)
         self._join_group_available = bool(join_available)
         self._join_preview = bool(join_preview)
         self._join_mode = str(join_mode or "")
-        if self._link_group_active:
+        if self._link_group_inconsistent:
+            self._group_label.setText(f"级联异常 · {max(2, int(member_count))} 个")
+            self._group_label.setToolTip("同一级联组的区间不一致。修改任一成员的起点或终点以同步整组，或先断开级联。")
+            self._group_label.show()
+            self._link_action_btn.setText("断开")
+            self._link_action_btn.setToolTip("从当前级联组断开")
+            self._link_action_btn.show()
+        elif self._link_group_active:
             self._group_label.setText(f"已级联 · {max(2, int(member_count))} 个")
+            self._group_label.setToolTip("")
             self._group_label.show()
             self._link_action_btn.setText("断开")
             self._link_action_btn.setToolTip("从当前级联组断开")
             self._link_action_btn.show()
         elif self._join_group_available:
+            self._group_label.setToolTip("")
             if self._join_mode == "create_same_interval":
                 self._link_action_btn.setText("级联同区间")
                 self._link_action_btn.setToolTip("将同区间未级联片段组成新的级联组")
@@ -693,13 +705,14 @@ class SegmentRow(QFrame):
                 self._link_action_btn.setToolTip("加入相同起止时间的已有级联组")
             self._link_action_btn.show()
         else:
+            self._group_label.setToolTip("")
             self._link_action_btn.setText("")
             self._link_action_btn.setToolTip("")
             self._link_action_btn.hide()
         self._refresh_card_style()
 
     def _on_link_action_clicked(self) -> None:
-        if getattr(self, "_link_group_active", False):
+        if getattr(self, "_link_group_active", False) or getattr(self, "_link_group_inconsistent", False):
             self.unlink_requested.emit(self)
         elif getattr(self, "_join_group_available", False):
             self.join_requested.emit(self)

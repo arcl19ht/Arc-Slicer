@@ -125,7 +125,7 @@ from arc_slicer.theme import (
 )
 from arc_slicer.segments import (
     TIME_INPUT_PATTERN, SegmentValidationResult, effective_segment_speed,
-    format_duration_ms, is_time_input_text_allowed, new_link_group_id,
+    find_inconsistent_link_groups, format_duration_ms, is_time_input_text_allowed, new_link_group_id,
     normalize_link_group_id, normalize_speed_override_value, normalize_speed_token,
     parse_duration_to_ms, parse_speed_text, validate_segment_bounds,
     validate_speed_value, _parse_non_negative_time_text,
@@ -1244,7 +1244,6 @@ class MainWindow(QMainWindow):
         self._hovered_segment_uid = ""
         self._auto_sort_enabled = True
         self._sort_mode = "time"
-        self._cascade_edit_enabled = True
         self._join_preview_uid = ""
         self._segment_history_suspended = False
         self._segment_restore_in_progress = False
@@ -1412,11 +1411,6 @@ class MainWindow(QMainWindow):
         self._auto_sort_check.setStyleSheet(f"color: {C_TEXT2}; font-size: 12px; background: transparent; border: none;")
         self._auto_sort_check.clicked.connect(self._on_auto_sort_changed)
         seg_head.addWidget(self._auto_sort_check)
-        self._cascade_edit_check = QCheckBox("级联编辑")
-        self._cascade_edit_check.setChecked(True)
-        self._cascade_edit_check.setStyleSheet(f"color: {C_TEXT2}; font-size: 12px; background: transparent; border: none;")
-        self._cascade_edit_check.clicked.connect(self._on_cascade_edit_changed)
-        seg_head.addWidget(self._cascade_edit_check)
         self._sort_mode_box = QComboBox()
         self._sort_mode_box.addItem("时间优先", "time")
         self._sort_mode_box.addItem("倍速优先", "speed")
@@ -1955,7 +1949,21 @@ class MainWindow(QMainWindow):
         return groups
 
     def _valid_link_groups(self) -> dict[str, list[SegmentRow]]:
-        return {group_id: members for group_id, members in self._complete_link_groups().items() if len(members) >= 2}
+        inconsistent = self._inconsistent_link_groups()
+        return {
+            group_id: members for group_id, members in self._complete_link_groups().items()
+            if len(members) >= 2 and group_id not in inconsistent
+        }
+
+    def _inconsistent_link_groups(self) -> dict[str, dict]:
+        return find_inconsistent_link_groups(getattr(self, "_rows", []))
+
+    def _linked_interval_rows(self, row: SegmentRow) -> list[SegmentRow]:
+        group_id = normalize_link_group_id(getattr(row, "link_group_id", None))
+        if not group_id:
+            return [row]
+        members = self._complete_link_groups().get(group_id, [])
+        return list(members) if row in members else [row]
 
     def _row_join_target_group_id(self, row: SegmentRow) -> str | None:
         if normalize_link_group_id(getattr(row, "link_group_id", None)):
@@ -2007,6 +2015,7 @@ class MainWindow(QMainWindow):
     def _refresh_visual_groups(self) -> None:
         groups = self._complete_visual_groups()
         link_groups = self._valid_link_groups()
+        inconsistent_groups = self._inconsistent_link_groups()
         group_index = {key: idx for idx, key in enumerate(groups)}
         for row in getattr(self, "_rows", []):
             s_val, e_val = self._row_visual_time_values(row)
@@ -2016,11 +2025,14 @@ class MainWindow(QMainWindow):
                 row.set_visual_group(group_index.get(key, 0), len(members) if len(members) > 1 else 1)
             group_id = normalize_link_group_id(getattr(row, "link_group_id", None))
             link_members = link_groups.get(group_id or "", [])
+            inconsistent = inconsistent_groups.get(group_id or "")
+            inconsistent_members = self._complete_link_groups().get(group_id or "", [])
             join_mode = self._row_join_mode(row)
             if hasattr(row, "set_link_group_state"):
                 row.set_link_group_state(
                     active=bool(group_id and link_members),
-                    member_count=len(link_members) if link_members else 1,
+                    member_count=len(link_members) if link_members else len(inconsistent_members) or 1,
+                    inconsistent=bool(inconsistent),
                     join_available=bool(join_mode),
                     join_preview=self.__dict__.get("_join_preview_uid", "") == getattr(row, "uid", ""),
                     join_mode=join_mode,
@@ -2056,7 +2068,7 @@ class MainWindow(QMainWindow):
         return self._current_default_speed()
 
     def _group_aware_sorted_rows(self) -> list[SegmentRow]:
-        valid_groups = self._valid_link_groups()
+        valid_groups = self._complete_link_groups()
         seen_groups: set[str] = set()
         blocks: list[list[SegmentRow]] = []
         for row in self._rows:
@@ -2142,9 +2154,6 @@ class MainWindow(QMainWindow):
         elif self._auto_sort_check.isChecked():
             self._auto_sort_enabled = True
             self._maybe_auto_sort_segments(force=True)
-
-    def _on_cascade_edit_changed(self, *_args) -> None:
-        self._cascade_edit_enabled = bool(self._cascade_edit_check.isChecked())
 
     def _load_initial_data(self):
         songs = self._get_songs()
@@ -2672,7 +2681,6 @@ class MainWindow(QMainWindow):
             self._delete_segment_by_uid(uid)
 
     def _save_from_shortcut(self) -> None:
-        self._commit_active_segment_edits_for_save()
         self._save_slides()
 
     def _copy_segment(self, row: SegmentRow, record_history: bool = True):
@@ -2682,6 +2690,10 @@ class MainWindow(QMainWindow):
             return
         source_group_id = normalize_link_group_id(getattr(row, "link_group_id", None))
         if source_group_id:
+            if source_group_id in self._inconsistent_link_groups():
+                start, end = self._row_time_values(row)
+                if start is not None and end is not None and end > start:
+                    self._set_linked_interval_values(self._linked_interval_rows(row), start, end)
             link_group_id = source_group_id
         else:
             link_group_id = new_link_group_id()
@@ -2775,7 +2787,7 @@ class MainWindow(QMainWindow):
 
     def _waveform_segment_ranges(self) -> list[tuple]:
         ranges: list[tuple] = []
-        valid_groups = self._valid_link_groups()
+        valid_groups = self._complete_link_groups()
         for row in getattr(self, "_rows", []):
             start_value, end_value = self._row_visual_time_values(row)
             if start_value is None or end_value is None or end_value <= start_value:
@@ -2835,16 +2847,43 @@ class MainWindow(QMainWindow):
             row.set_speed_error(self._segment_speed_error(row))
         return result
 
-    def _on_segment_field_committed(self, row: SegmentRow, field: str) -> None:
+    def _on_segment_field_committed(self, row: SegmentRow, field: str) -> bool:
         if row not in self._rows:
-            return
+            return False
         if field == "speed":
             if hasattr(row, "set_speed_error"):
                 speed_error = self._segment_speed_error(row)
                 row.set_speed_error(speed_error)
+                if speed_error:
+                    return False
         else:
-            self._validate_segment_row_hard(row)
+            if not self._commit_linked_interval_field(row, field):
+                return False
         self._commit_segment_edit(row, field)
+        return True
+
+    def _set_linked_interval_values(self, rows: list[SegmentRow], start: int, end: int) -> None:
+        for member in rows:
+            member.restore_history_texts(str(start), str(end), member.speed_override_text())
+
+    def _commit_linked_interval_field(self, row: SegmentRow, field: str) -> bool:
+        sync_values = getattr(row, "_sync_values_from_inputs", None)
+        if callable(sync_values):
+            sync_values()
+        result = self._validate_segment_row_hard(row)
+        if not result.ok:
+            return False
+        start, end = self._row_time_values(row)
+        if start is None or end is None:
+            return False
+        if end - start < WAVEFORM_MIN_SEGMENT_MS:
+            row.set_time_errors("", f"片段至少需要 {WAVEFORM_MIN_SEGMENT_MS}ms")
+            return False
+
+        # A valid edit of a legacy inconsistent group adopts this row's full interval.
+        if field in {"start", "end"}:
+            self._set_linked_interval_values(self._linked_interval_rows(row), int(start), int(end))
+        return True
 
     def _commit_segment_edit(self, row: SegmentRow, field: str) -> None:
         if row not in self._rows:
@@ -2863,17 +2902,33 @@ class MainWindow(QMainWindow):
         self._schedule_segment_time_validation()
         self._schedule_arc_cut_warning_refresh()
 
-    def _commit_active_segment_edits_for_save(self) -> None:
+    def _pending_segment_edit_fields(self) -> list[tuple[SegmentRow, str]]:
+        transactions = self.__dict__.get("_segment_history_transactions", {})
+        pending: list[tuple[SegmentRow, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for row in getattr(self, "_rows", []):
+            uid = str(getattr(row, "uid", "") or "")
+            for field in ("start", "end", "speed"):
+                key = (uid, field)
+                if f"input:{uid}:{field}" in transactions:
+                    pending.append((row, field))
+                    seen.add(key)
+
         focus_getter = getattr(QApplication, "focusWidget", None)
         focused = focus_getter() if callable(focus_getter) else None
         row = self._segment_row_ancestor(focused)
-        if row not in getattr(self, "_rows", []):
-            return
-        field = row.active_field_name() if hasattr(row, "active_field_name") else ""
-        uid = str(getattr(row, "uid", "") or "")
-        transactions = self.__dict__.get("_segment_history_transactions", {})
-        if field and (self._row_display_snapshot(row) is not None or f"input:{uid}:{field}" in transactions):
-            self._on_segment_field_committed(row, field)
+        if row in getattr(self, "_rows", []):
+            field = row.active_field_name() if hasattr(row, "active_field_name") else ""
+            key = (str(getattr(row, "uid", "") or ""), field)
+            if field and key not in seen and self._row_display_snapshot(row) is not None:
+                pending.append((row, field))
+        return pending
+
+    def _commit_active_segment_edits_for_save(self) -> bool:
+        for row, field in self._pending_segment_edit_fields():
+            if row in getattr(self, "_rows", []) and not self._on_segment_field_committed(row, field):
+                return False
+        return True
 
     def _on_segment_edit_started(self, row: SegmentRow, field: str) -> None:
         if row in self._rows:
@@ -2953,21 +3008,6 @@ class MainWindow(QMainWindow):
         self._run_segment_history_action("新增片段", lambda: self._add_segment(start, end, None))
         self._mark_current_export_dirty()
 
-    def _cascade_edit_active(self) -> bool:
-        if "_cascade_edit_check" in self.__dict__:
-            try:
-                return bool(self._cascade_edit_check.isChecked())
-            except Exception:
-                pass
-        return bool(self.__dict__.get("_cascade_edit_enabled", True))
-
-    def _cascade_rows_for_endpoint_drag(self, row: SegmentRow) -> list[SegmentRow]:
-        group_id = normalize_link_group_id(getattr(row, "link_group_id", None))
-        valid_groups = self._valid_link_groups()
-        if self._cascade_edit_active() and group_id and group_id in valid_groups:
-            return list(valid_groups[group_id])
-        return [row]
-
     def _update_waveform_segment_endpoint(self, index: int, start_ms: int, end_ms: int) -> None:
         try:
             item = self._waveform_panel.segment_items()[int(index)]
@@ -2981,27 +3021,24 @@ class MainWindow(QMainWindow):
         old_start, old_end = self._row_time_values(row)
         start_changed = old_start is not None and start != int(old_start)
         end_changed = old_end is not None and end != int(old_end)
-        cascade_rows = self._cascade_rows_for_endpoint_drag(row)
+        cascade_rows = self._linked_interval_rows(row)
         if start_changed and end_changed:
             if end - start < WAVEFORM_MIN_SEGMENT_MS:
                 return
-            for member in cascade_rows:
-                member.set_time_range(start, end)
+            self._set_linked_interval_values(cascade_rows, start, end)
         elif start_changed:
-            limit = min(int(member.e_val) - WAVEFORM_MIN_SEGMENT_MS for member in cascade_rows if member.e_val is not None)
+            limit = int(old_end) - WAVEFORM_MIN_SEGMENT_MS
             start = max(0, min(start, limit))
-            for member in cascade_rows:
-                member.set_time_range(start, int(member.e_val))
+            self._set_linked_interval_values(cascade_rows, start, int(old_end))
         else:
             duration_ms = int(self.__dict__.get("_audio_duration_ms") or 0)
             if duration_ms <= 0 and hasattr(self._waveform_panel, "_duration_ms"):
                 duration_ms = int(self._waveform_panel._duration_ms())
-            limit = max(int(member.s_val) + WAVEFORM_MIN_SEGMENT_MS for member in cascade_rows if member.s_val is not None)
+            limit = int(old_start) + WAVEFORM_MIN_SEGMENT_MS
             end = max(limit, end)
             if duration_ms > 0:
                 end = min(duration_ms, end)
-            for member in cascade_rows:
-                member.set_time_range(int(member.s_val), end)
+            self._set_linked_interval_values(cascade_rows, int(old_start), end)
         self._set_selected_segment_uid(row.uid)
         self._refresh_waveform_segments()
         self._schedule_segment_time_validation()
@@ -3265,7 +3302,16 @@ class MainWindow(QMainWindow):
 
     def _save_slides(self):
         try:
-            self._commit_active_segment_edits_for_save()
+            if not self._commit_active_segment_edits_for_save():
+                return False
+            segment_error = self._first_segment_validation_error()
+            if segment_error:
+                _index, _row, result = segment_error
+                raise ValueError(result.first_message)
+            inconsistent = self._inconsistent_link_groups()
+            if inconsistent:
+                group_id = next(iter(inconsistent))
+                raise ValueError(f"级联异常：组 {group_id} 的区间不一致，请先同步或断开。")
             data = self._collect()
             slides_path = _window_dep(self, "slides_path", SLIDES_PATH)
             slides_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -3273,10 +3319,14 @@ class MainWindow(QMainWindow):
             self._push_log(f"💾 已保存 → {slides_path}", "ok")
             self._saved_lbl.show()
             QTimer.singleShot(1900, self._saved_lbl.hide)
+            return True
         except ValueError as ex:
-            self._push_log(f"✗ 保存失败：速度无效: {ex}", "err")
+            prefix = "速度无效: " if str(ex).startswith("速度") else ""
+            self._push_log(f"✗ 保存失败：{prefix}{ex}", "err")
+            return False
         except Exception as ex:
             self._push_log(f"✗ 保存失败: {ex}", "err")
+            return False
 
     def _run_slicer(self):
         if self._slicer_is_running():

@@ -185,3 +185,36 @@ def normalize_link_group_id(value) -> str | None:
 
 def new_link_group_id() -> str:
     return f"grp_{uuid.uuid4().hex[:10]}"
+
+
+def find_inconsistent_link_groups(rows) -> dict[str, dict]:
+    """Return complete link groups whose members do not share one interval."""
+    groups: dict[str, list[tuple[str, int, int]]] = {}
+    for row in rows:
+        if isinstance(row, dict):
+            group_id = normalize_link_group_id(row.get("link_group_id"))
+            uid = str(row.get("uid", ""))
+            start, end = row.get("s"), row.get("e")
+        else:
+            group_id = normalize_link_group_id(getattr(row, "link_group_id", None))
+            uid = str(getattr(row, "uid", ""))
+            start, end = getattr(row, "s_val", None), getattr(row, "e_val", None)
+        if not group_id:
+            continue
+        try:
+            start, end = int(start), int(end)
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        groups.setdefault(group_id, []).append((uid, start, end))
+
+    inconsistent: dict[str, dict] = {}
+    for group_id, members in groups.items():
+        intervals = {(start, end) for _uid, start, end in members}
+        if len(members) >= 2 and len(intervals) > 1:
+            inconsistent[group_id] = {
+                "member_uids": tuple(uid for uid, _start, _end in members),
+                "intervals": frozenset(intervals),
+            }
+    return inconsistent

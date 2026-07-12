@@ -26,7 +26,7 @@ def _window():
     win._segs_layout = _Layout(); win._speed_input = _Speed(); win._scroll = _Scroll()
     win._waveform_panel = app.WaveformPanel(); win._selected_segment_uid = ""; win._hovered_segment_uid = ""
     win._join_preview_uid = ""; win._current_source_id = "song_a"; win._auto_sort_enabled = False; win._sort_mode = "manual"
-    win._cascade_edit_enabled = True; win._audio_duration_ms = 200000
+    win._audio_duration_ms = 200000
     win._refresh_seg_header = lambda: None; win._schedule_segment_time_validation = lambda: None
     win._schedule_arc_cut_warning_refresh = lambda: None; win._mark_current_export_dirty = lambda *args: None
     win._segment_history_suspended = False; win._segment_history_transactions = {}
@@ -196,7 +196,7 @@ class SegmentHistoryTests(unittest.TestCase):
         finally:
             host.close()
 
-    def test_preview_refresh_is_debounced_and_commit_flushes_once(self):
+    def test_invalid_preview_commit_keeps_the_existing_stable_interval(self):
         win = _window()
         refreshes = []
         win._refresh_seg_header = lambda: refreshes.append("header")
@@ -218,9 +218,10 @@ class SegmentHistoryTests(unittest.TestCase):
         self.assertEqual(refreshes, ["header", "waveform"])
 
         app.MainWindow._on_segment_edit_committed(win, row, "start")
-        self.assertEqual(refreshes, ["header", "waveform", "waveform"])
+        self.assertEqual(refreshes, ["header", "waveform"])
         self.assertEqual(row.start_text(), "123456")
-        self.assertEqual(win._segment_undo_stack.count(), 1)
+        self.assertEqual(win._segment_undo_stack.count(), 0)
+        self.assertIn(row.uid, win._segment_edit_display_snapshots)
 
     def test_complete_start_and_end_edits_keep_timeline_values_until_commit(self):
         self._require_real_qt()

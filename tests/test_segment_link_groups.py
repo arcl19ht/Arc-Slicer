@@ -37,7 +37,6 @@ def _window(auto_sort=False, sort_mode="manual"):
     win._selected_segment_uid = ""
     win._hovered_segment_uid = ""
     win._join_preview_uid = ""
-    win._cascade_edit_enabled = True
     win._audio_duration_ms = 200000
     win._auto_sort_enabled = auto_sort
     win._sort_mode = sort_mode
