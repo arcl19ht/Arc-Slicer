@@ -89,6 +89,7 @@ Use these modules as the current source of truth:
 - `arc_slicer/ui/main_window.py`: real `MainWindow`, high-level UI orchestration
 - `arc_slicer/ui/segment_row.py`: segment card widgets and row-level UI behavior
 - `arc_slicer/ui/waveform_panel.py`: waveform/timeline painting and interactions
+- `arc_slicer/playback.py`: selected-segment audition controller; never imports `app` or UI classes
 - `arc_slicer/ui/segment_history.py`: immutable segment snapshots and undo/redo commands
 - `arc_slicer/ui/metadata_panel.py`: songlist / packlist metadata UI
 - `arc_slicer/segments.py`: segment parsing, validation, ids, speed tokens, group helpers
@@ -104,6 +105,9 @@ Do not import `app` from inside `arc_slicer/`. If compatibility behavior is need
 Segment edits must enter history through `MainWindow` transactions. Do not push history from
 `textChanged` or timeline `mouseMove`; input and endpoint drags each commit one snapshot command.
 Loading, source switching, and snapshot restoration suspend and reset segment history.
+Playback state, position, and loop state are runtime-only: they do not enter segment history or
+mark the current export dirty. Extend audition behavior in `playback.py`, with main-window
+selection coordination and waveform-panel playhead drawing kept separate.
 
 ## 3. Important project rules
 

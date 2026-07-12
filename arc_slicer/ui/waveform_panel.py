@@ -11,7 +11,7 @@ except ImportError:
 
 from arc_slicer.segments import format_duration_ms, normalize_link_group_id
 from arc_slicer.theme import (
-    C_BORDER, C_BORDER2, C_CARD2, C_DRAFT_END, C_DRAFT_START, C_HOVERED,
+    C_ACCENT, C_BORDER, C_BORDER2, C_CARD2, C_DRAFT_END, C_DRAFT_START, C_HOVERED,
     C_LABEL, C_LANE_SEPARATOR, C_MUTED, C_SEGMENT_ALT_FILL, C_SEGMENT_BORDER,
     C_SEGMENT_FILL, C_SELECTED, C_TEXT, C_TEXT2, C_TIMELINE_BG,
     C_TIMELINE_TRACK, C_WAVEFORM,
@@ -109,6 +109,7 @@ class WaveformPanel(QFrame):
         self._segment_items: list[dict] = []
         self._draft_segments: list[dict] = []
         self._quick_draft_anchor_ms: int | None = None
+        self._playback_position_ms: int | None = None
         self._hover_time_ms: int | None = None
         self._hovered_segment_uid = ""
         self._selected_segment_uid = ""
@@ -168,6 +169,12 @@ class WaveformPanel(QFrame):
 
     def quick_draft_anchor_ms(self) -> int | None:
         return self._quick_draft_anchor_ms
+
+    def playback_position_ms(self) -> int | None: return self._playback_position_ms
+    def set_playback_position_ms(self, position_ms: int | None) -> None:
+        duration = self._duration_ms()
+        value = None if position_ms is None or duration <= 0 else max(0, min(duration, int(position_ms)))
+        if value != self._playback_position_ms: self._playback_position_ms = value; self.update()
 
     def set_quick_draft_anchor(self, time_ms: int | None) -> None:
         if time_ms is None:
@@ -1170,6 +1177,13 @@ class WaveformPanel(QFrame):
             format_duration_ms(self._hover_time_ms),
         )
 
+    def _draw_playback_head(self, painter: QPainter, waveform_rect, timeline_rect) -> None:
+        if self._playback_position_ms is None: return
+        x = waveform_rect.left() + self.time_ms_to_x(self._playback_position_ms)
+        painter.setPen(QPen(QColor(C_ACCENT), 2))
+        painter.drawLine(x, waveform_rect.top(), x, waveform_rect.bottom())
+        painter.drawLine(x, timeline_rect.top(), x, timeline_rect.bottom())
+
     def _draw_duration_label(self, painter: QPainter, rect, duration_ms: int) -> None:
         painter.setPen(QColor(C_LABEL))
         painter.drawText(
@@ -1224,4 +1238,5 @@ class WaveformPanel(QFrame):
         except Exception:
             pass
         self._draw_hover_cursor(painter, waveform_rect)
+        self._draw_playback_head(painter, waveform_rect, timeline_rect)
         self._draw_duration_label(painter, waveform_rect, duration_ms)
