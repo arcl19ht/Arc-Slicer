@@ -6,9 +6,20 @@ This file is for a new coding agent that has not seen the prior conversation. Re
 
 Arc Slicer is a PyQt6 desktop tool for slicing Arcaea song folders into practice clips.
 
-Main runtime file:
+Main runtime entry/facade:
 
 - `app.py`
+
+Real PyQt main-window implementation:
+
+- `arc_slicer/ui/main_window.py`
+
+`app.py` intentionally remains as the compatibility facade and startup entry:
+
+- re-exports legacy public names used by tests and older scripts
+- provides `main()` / `if __name__ == "__main__"`
+- keeps `app.MainWindow` as a thin subclass that injects facade dependencies
+- should not grow a second real `MainWindow` implementation
 
 External shell merge engine:
 
@@ -60,11 +71,34 @@ Known V2.3 completed or in progress:
 
 - `WaveformData`
 - waveform cache
-- read-only `WaveformPanel`
-- waveform segment overlays
-- likely waveform drag selection / endpoint editing, depending on latest branch state
+- split waveform area and timeline lanes
+- waveform drag selection / endpoint editing
+- draft segment preview
+- segment uid, selected / hovered linkage
+- auto sorting and visual groups
+- explicit `link_group_id` cascade groups with break / rejoin UX
+- modularization into `arc_slicer/` core, UI component, export, persistence, worker, and main-window modules
 
 Before coding, inspect current implementation and tests.
+
+## 2.1 Module routing
+
+Use these modules as the current source of truth:
+
+- `app.py`: compatibility facade, re-exports, startup only
+- `arc_slicer/ui/main_window.py`: real `MainWindow`, high-level UI orchestration
+- `arc_slicer/ui/segment_row.py`: segment card widgets and row-level UI behavior
+- `arc_slicer/ui/waveform_panel.py`: waveform/timeline painting and interactions
+- `arc_slicer/ui/metadata_panel.py`: songlist / packlist metadata UI
+- `arc_slicer/segments.py`: segment parsing, validation, ids, speed tokens, group helpers
+- `arc_slicer/waveform.py`: waveform data, cache, decoding helpers
+- `arc_slicer/aff.py`: AFF slicing / warning helpers
+- `arc_slicer/audio.py`: ffmpeg / ffprobe and audio slicing helpers
+- `arc_slicer/exports.py`: current/library export, songlist/packlist, cover rendering helpers
+- `arc_slicer/persistence.py`: config and runtime data migration
+- `arc_slicer/workers.py`: Qt worker classes
+
+Do not import `app` from inside `arc_slicer/`. If compatibility behavior is needed, pass dependencies from `app.py` into `MainWindowDependencies`.
 
 ## 3. Important project rules
 
@@ -116,7 +150,7 @@ or:
 
 Old data without `speed_override` is treated as `null`.
 
-Future V2.3 work may add non-export UI fields such as `uid` and `link_group_id`, but do not add them unless the task explicitly asks.
+V2.3 stores UI-only fields such as `uid` and `link_group_id` for selection, sorting, and cascade editing. They must not change the exported song id or `build_segment_id` output.
 
 ### 3.3 External merge
 
@@ -497,11 +531,11 @@ Please complete a context audit:
 1. Confirm current branch, HEAD, and working tree state.
 2. Read AGENTS.md.
 3. Read docs/plans/v2.3-timeline-interaction.md if it exists.
-4. Read these areas in app.py:
+4. Read these areas in the current modules:
    - SegmentRow
    - WaveformData
    - WaveformPanel
-   - MainWindow segment / waveform related methods
+   - MainWindow segment / waveform related methods in `arc_slicer/ui/main_window.py`
    - do_slice
    - build_segment_export_plan
 5. Read these tests if present:

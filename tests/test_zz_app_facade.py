@@ -1,6 +1,7 @@
 import unittest
 
 import app
+from arc_slicer.ui.main_window import MainWindow as RealMainWindow, MainWindowDependencies
 
 
 class AppFacadeTests(unittest.TestCase):
@@ -19,6 +20,9 @@ class AppFacadeTests(unittest.TestCase):
         self.assertTrue(callable(app.default_pack_form_for_song))
         self.assertTrue(callable(app.do_slice))
         self.assertTrue(callable(app.load_config))
+        self.assertTrue(issubclass(app.MainWindow, RealMainWindow))
+        self.assertTrue(hasattr(app, "MainWindowDependencies"))
+        self.assertIs(app.MainWindowDependencies, MainWindowDependencies)
 
 
 if __name__ == "__main__":

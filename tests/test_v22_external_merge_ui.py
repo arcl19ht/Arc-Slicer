@@ -156,7 +156,7 @@ def _plan(*, blockers=None, warnings=None, actions=True):
 
 
 def _songlist_panel_for_pack_placeholder(pack_id="source_song"):
-    panel = object.__new__(app.SonglistPanel)
+    panel = app.SonglistPanel.__new__(app.SonglistPanel)
     panel._inputs = {"set": _Fake(pack_id)}
     panel._pack_inputs = {
         "pack_id": _Fake(pack_id),
@@ -325,7 +325,7 @@ class ExternalMergeUiStateTests(unittest.TestCase):
         self.assertIn(str(Path("backup/root")), view["detail"])
 
     def test_external_merge_card_is_before_run_and_log_sections(self):
-        source = Path("app.py").read_text(encoding="utf-8")
+        source = Path("arc_slicer/ui/main_window.py").read_text(encoding="utf-8")
         self.assertLess(
             source.index("外部目标壳合并 EXTERNAL MERGE"),
             source.index("self._btn_run = QPushButton"),
@@ -403,19 +403,14 @@ class ExternalMergeUiStateTests(unittest.TestCase):
         panel = _Panel()
         _FakeWorker.created = []
         old_worker = app.ExternalMergeWorker
-        widgets = sys.modules["PyQt6.QtWidgets"]
-        had_msg = hasattr(widgets, "QMessageBox")
-        old_msg = getattr(widgets, "QMessageBox", None)
+        old_msg = app.QMessageBox
         try:
             app.ExternalMergeWorker = _FakeWorker
-            widgets.QMessageBox = _MessageBoxOk
+            app.QMessageBox = _MessageBoxOk
             app.MainWindow._confirm_external_merge(panel)
         finally:
             app.ExternalMergeWorker = old_worker
-            if had_msg:
-                widgets.QMessageBox = old_msg
-            else:
-                delattr(widgets, "QMessageBox")
+            app.QMessageBox = old_msg
 
         self.assertEqual(panel._external_merge_phase, "executing")
         self.assertEqual(panel._external_merge_generation, 1)
