@@ -147,6 +147,7 @@ from arc_slicer.ui.metadata_panel import (
 )
 from arc_slicer.ui.segment_row import ArcCutIndicator, ArcCutInfoCard, ArcCutStatus, SegmentRow
 from arc_slicer.ui.waveform_panel import WaveformPanel
+from arc_slicer.playback import AudioPlaybackController
 from arc_slicer.ui.segment_history import (
     QUndoStack, SegmentHistoryItem, SegmentHistoryState, SegmentSnapshotCommand,
 )
@@ -1264,6 +1265,7 @@ class MainWindow(QMainWindow):
         self._segment_validation_timer.timeout.connect(self._refresh_segment_time_validation)
         self._audio_duration_ms: int | None = None
         self._audio_duration_error = ""
+        self._playback_controller = AudioPlaybackController(self)
 
         self.setWindowTitle("Arc Slicer")
         self.setMinimumSize(620, 580)
@@ -1433,6 +1435,21 @@ class MainWindow(QMainWindow):
         self._waveform_panel.emptySelected.connect(self._clear_selected_segment)
         self._waveform_panel.timeline_quick_draft_requested.connect(self._on_timeline_quick_draft_requested)
         lay.addWidget(self._waveform_panel)
+        audition = QHBoxLayout()
+        self._play_pause_button = QPushButton("播放")
+        self._play_pause_button.clicked.connect(self._toggle_selected_segment_playback)
+        self._loop_check = QCheckBox("循环")
+        self._loop_check.setChecked(True)
+        self._loop_check.toggled.connect(self._playback_controller.set_loop_enabled)
+        self._audition_time_label = make_label("0:00.000 / 0:00.000", size=12, color=C_MUTED)
+        self._audition_speed_label = make_label("1×", size=12, color=C_MUTED)
+        self._audition_status_label = make_label("请选择完整片段", size=12, color=C_LABEL)
+        audition.addWidget(self._play_pause_button); audition.addWidget(self._loop_check); audition.addWidget(self._audition_time_label); audition.addWidget(self._audition_speed_label); audition.addWidget(self._audition_status_label); audition.addStretch()
+        lay.addLayout(audition)
+        self._playback_controller.position_changed.connect(self._on_playback_position_changed)
+        self._playback_controller.state_changed.connect(self._on_playback_state_changed)
+        self._playback_controller.error_changed.connect(self._on_playback_error)
+        self._refresh_selected_segment_audition()
         lay.addSpacing(12)
 
         # ── 段落列表
@@ -1608,6 +1625,11 @@ class MainWindow(QMainWindow):
         self._duplicate_shortcut.setContext(context)
         self._duplicate_shortcut.setAutoRepeat(False)
         self._duplicate_shortcut.activated.connect(self._duplicate_selected_segment_from_shortcut)
+
+        self._play_pause_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
+        self._play_pause_shortcut.setContext(context)
+        self._play_pause_shortcut.setAutoRepeat(False)
+        self._play_pause_shortcut.activated.connect(self._toggle_selected_segment_playback)
 
         self._escape_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
         self._escape_shortcut.setContext(context)
@@ -1860,6 +1882,41 @@ class MainWindow(QMainWindow):
                     self._scroll.ensureWidgetVisible(row)
                 except Exception:
                     pass
+        self._refresh_selected_segment_audition()
+
+    def _refresh_selected_segment_audition(self) -> None:
+        controller = self.__dict__.get("_playback_controller")
+        if controller is None: return
+        row = self._row_by_uid(self.__dict__.get("_selected_segment_uid", ""))
+        start, end = self._row_time_values(row) if row is not None else (None, None)
+        try: speed = effective_segment_speed(self._current_default_speed(), row.speed_override_value()) if row is not None else 0
+        except (TypeError, ValueError): speed = 0
+        duration = self.__dict__.get("_audio_duration_ms")
+        valid = start is not None and end is not None and end - start >= WAVEFORM_MIN_SEGMENT_MS and (duration is None or end <= duration) and speed > 0
+        if not valid:
+            controller.clear_audition_range(); self._waveform_panel.set_playback_position_ms(None)
+            if hasattr(self, "_play_pause_button"): self._play_pause_button.setEnabled(False); self._audition_status_label.setText("请选择完整片段")
+            return
+        controller.stop(); controller.set_audition_range(start, end, speed)
+        if hasattr(self, "_play_pause_button"):
+            self._play_pause_button.setEnabled(controller.is_available()); self._audition_speed_label.setText(f"{speed:g}×"); self._audition_time_label.setText(f"{format_duration_ms(0)} / {format_duration_ms(end-start)}"); self._audition_status_label.setText("就绪")
+        self._waveform_panel.set_playback_position_ms(start)
+
+    def _toggle_selected_segment_playback(self) -> None:
+        if self._is_text_editing_focus(): return
+        controller = self.__dict__.get("_playback_controller")
+        if controller and controller.toggle_play_pause(): pass
+
+    def _on_playback_position_changed(self, position: int) -> None:
+        if hasattr(self, "_waveform_panel"): self._waveform_panel.set_playback_position_ms(position)
+        audition = self._playback_controller.audition_range()
+        if audition and hasattr(self, "_audition_time_label"): self._audition_time_label.setText(f"{format_duration_ms(max(0, position-audition[0]))} / {format_duration_ms(audition[1]-audition[0])}")
+
+    def _on_playback_state_changed(self, state: str) -> None:
+        if hasattr(self, "_play_pause_button"): self._play_pause_button.setText("暂停" if state == "playing" else "播放")
+
+    def _on_playback_error(self, text: str) -> None:
+        if hasattr(self, "_audition_status_label"): self._audition_status_label.setText(text or "音频播放失败")
 
     def _set_hovered_segment_uid(self, uid: str = "") -> None:
         self._hovered_segment_uid = str(uid or "")
@@ -3152,6 +3209,7 @@ class MainWindow(QMainWindow):
         generation = self._waveform_generation
         self._refresh_waveform_segments()
         audio_path = self._current_audio_path()
+        self._playback_controller.set_source(audio_path if audio_path is not None and audio_path.is_file() else None)
         if audio_path is None or not audio_path.is_file():
             self._waveform_audio_path = ""
             panel.set_empty()
@@ -3554,6 +3612,8 @@ class MainWindow(QMainWindow):
         self._log_widget.moveCursor(QTextCursor.MoveOperation.End)
 
     def closeEvent(self, event):
+        self._playback_controller.stop(reset_to_start=False)
+        self._playback_controller.clear_audition_range()
         self._waveform_generation += 1
         for worker in list(getattr(self, "_waveform_workers", [])):
             try:
