@@ -982,7 +982,6 @@ QPushButton {{
     font-family: "Segoe UI", sans-serif;
     font-weight: 600;
     border-radius: 11px;
-    cursor: pointer;
 }}
 QPushButton#btnRun {{
     background: {C_ACCENT};

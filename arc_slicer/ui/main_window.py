@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from decimal import Decimal, ROUND_FLOOR
 from pathlib import Path
@@ -55,6 +56,7 @@ except ImportError:  # Older headless tests expose a deliberately small Qt surfa
         def __init__(self, key, _parent=None):
             self._key = key
             self._context = None
+            self._auto_repeat = True
             self.activated = _ShortcutSignal()
 
         def setContext(self, context):
@@ -65,6 +67,12 @@ except ImportError:  # Older headless tests expose a deliberately small Qt surfa
 
         def key(self):
             return self._key
+
+        def setAutoRepeat(self, value):
+            self._auto_repeat = bool(value)
+
+        def autoRepeat(self):
+            return self._auto_repeat
 
 try:
     from PyQt6.QtWidgets import QPlainTextEdit, QAbstractSpinBox
@@ -139,6 +147,9 @@ from arc_slicer.ui.metadata_panel import (
 )
 from arc_slicer.ui.segment_row import ArcCutIndicator, ArcCutInfoCard, ArcCutStatus, SegmentRow
 from arc_slicer.ui.waveform_panel import WaveformPanel
+from arc_slicer.ui.segment_history import (
+    QUndoStack, SegmentHistoryItem, SegmentHistoryState, SegmentSnapshotCommand,
+)
 
 from arc_slicer import exports as _exports_core
 from arc_slicer import persistence as _persistence_core
@@ -1027,7 +1038,6 @@ QPushButton {{
     font-family: "Segoe UI", sans-serif;
     font-weight: 600;
     border-radius: 11px;
-    cursor: pointer;
 }}
 QPushButton#btnRun {{
     background: {C_ACCENT};
@@ -1194,6 +1204,16 @@ def _window_dep(owner, name: str, fallback=None):
     return getattr(deps, name, fallback)
 
 
+@dataclass(frozen=True)
+class SegmentEditDisplaySnapshot:
+    uid: str
+    start_value: int | None
+    end_value: int | None
+    speed_override_text: str
+    effective_speed: float
+    was_complete: bool
+
+
 class MainWindow(QMainWindow):
     def __init__(self, dependencies: MainWindowDependencies | None = None):
         super().__init__()
@@ -1226,6 +1246,16 @@ class MainWindow(QMainWindow):
         self._sort_mode = "time"
         self._cascade_edit_enabled = True
         self._join_preview_uid = ""
+        self._segment_history_suspended = False
+        self._segment_restore_in_progress = False
+        self._segment_edit_display_snapshots: dict[str, SegmentEditDisplaySnapshot] = {}
+        self._segment_history_transactions: dict[str, tuple[str, SegmentHistoryState]] = {}
+        self._segment_undo_stack = QUndoStack(self)
+        self._segment_undo_stack.setUndoLimit(100)
+        self._segment_preview_refresh_timer = QTimer(self)
+        self._segment_preview_refresh_timer.setSingleShot(True)
+        self._segment_preview_refresh_timer.setInterval(100)
+        self._segment_preview_refresh_timer.timeout.connect(self._flush_segment_preview_refresh)
         self._arc_warning_timer = QTimer(self)
         self._arc_warning_timer.setSingleShot(True)
         self._arc_warning_timer.timeout.connect(self._refresh_arc_cut_warnings)
@@ -1254,6 +1284,9 @@ class MainWindow(QMainWindow):
         self._request_waveform_for_current_song()
         if self._current_export_dirty:
             self._invalidate_external_merge_plan()
+        reset_history = getattr(self, "_reset_segment_history", None)
+        if callable(reset_history):
+            reset_history()
 
     # ── UI 构建 ───────────────────────────────────────────────────────────────
 
@@ -1398,6 +1431,8 @@ class MainWindow(QMainWindow):
         self._waveform_panel.segmentCreated.connect(self._add_waveform_segment)
         self._waveform_panel.segmentEndpointChanged.connect(self._update_waveform_segment_endpoint)
         self._waveform_panel.segmentEndpointCommitted.connect(self._on_waveform_endpoint_committed)
+        self._waveform_panel.segmentEndpointDragStarted.connect(self._on_waveform_endpoint_drag_started)
+        self._waveform_panel.segmentEndpointDragFinished.connect(self._on_waveform_endpoint_drag_finished)
         self._waveform_panel.segmentHovered.connect(self._on_waveform_segment_hovered)
         self._waveform_panel.segmentSelected.connect(self._on_waveform_segment_selected)
         self._waveform_panel.emptySelected.connect(self._clear_selected_segment)
@@ -1416,7 +1451,7 @@ class MainWindow(QMainWindow):
         # ── 添加按钮
         btn_add = QPushButton("＋ 添加时间段")
         btn_add.setObjectName("btnAdd")
-        btn_add.clicked.connect(lambda: self._add_segment())
+        btn_add.clicked.connect(self._on_add_segment_clicked)
         lay.addWidget(btn_add)
         lay.addSpacing(20)
 
@@ -1560,15 +1595,165 @@ class MainWindow(QMainWindow):
         context = Qt.ShortcutContext.WidgetWithChildrenShortcut
         self._save_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.Save), self)
         self._save_shortcut.setContext(context)
+        self._save_shortcut.setAutoRepeat(False)
         self._save_shortcut.activated.connect(self._save_from_shortcut)
 
         self._delete_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Delete), self)
         self._delete_shortcut.setContext(context)
+        self._delete_shortcut.setAutoRepeat(False)
         self._delete_shortcut.activated.connect(self._delete_selected_segment_from_shortcut)
 
         self._backspace_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Backspace), self)
         self._backspace_shortcut.setContext(context)
+        self._backspace_shortcut.setAutoRepeat(False)
         self._backspace_shortcut.activated.connect(self._delete_selected_segment_from_shortcut)
+
+        self._undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
+        self._undo_shortcut.setContext(context)
+        self._undo_shortcut.activated.connect(self._route_undo_shortcut)
+        self._redo_shortcut = QShortcut(QKeySequence("Ctrl+Y"), self)
+        self._redo_shortcut.setContext(context)
+        self._redo_shortcut.activated.connect(self._route_redo_shortcut)
+        self._alternate_redo_shortcut = QShortcut(QKeySequence("Ctrl+Shift+Z"), self)
+        self._alternate_redo_shortcut.setContext(context)
+        self._alternate_redo_shortcut.activated.connect(self._route_redo_shortcut)
+
+    def _segment_history_source_key(self) -> str:
+        return str(getattr(self, "_current_source_id", "") or "")
+
+    def _capture_segment_history_state(self) -> SegmentHistoryState:
+        return SegmentHistoryState(
+            self._segment_history_source_key(),
+            tuple(SegmentHistoryItem(
+                str(row.uid), int(getattr(row, "created_order", 0)), row.start_text(),
+                row.end_text(), row.speed_override_text(),
+                normalize_link_group_id(getattr(row, "link_group_id", None)),
+            ) for row in self._rows),
+            str(getattr(self, "_selected_segment_uid", "") or ""),
+        )
+
+    @contextmanager
+    def _suspend_segment_history(self):
+        previous = self._segment_history_suspended
+        self._segment_history_suspended = True
+        try:
+            yield
+        finally:
+            self._segment_history_suspended = previous
+
+    def _restore_segment_history_state(self, state: SegmentHistoryState) -> None:
+        if state.source_key != self._segment_history_source_key():
+            return
+        with self._batch_restore_segment_history():
+            self._move_focus_from_segment_rows()
+            timer = self.__dict__.get("_segment_preview_refresh_timer")
+            if timer is not None:
+                timer.stop()
+            self._clear_segments(refresh=False)
+            self._uid = 0
+            self._segment_order = 0
+            for item in state.rows:
+                row = self._add_segment(
+                    None, None, None, uid=item.uid, link_group_id=item.link_group_id,
+                    created_order=item.created_order, refresh=False, sort=False,
+                )
+                row.restore_history_texts(item.start_text, item.end_text, item.speed_override_text)
+            self._cleanup_single_member_link_groups()
+            self._maybe_auto_sort_segments()
+            self._set_selected_segment_uid(state.selected_uid)
+            self._hovered_segment_uid = ""
+            self._join_preview_uid = ""
+            self._refresh_seg_header()
+            self._schedule_segment_time_validation()
+            self._schedule_arc_cut_warning_refresh()
+        self._mark_current_export_dirty()
+
+    @contextmanager
+    def _batch_restore_segment_history(self):
+        previous = self.__dict__.get("_segment_restore_in_progress", False)
+        self._segment_restore_in_progress = True
+        try:
+            with self._suspend_segment_history():
+                yield
+        finally:
+            self._segment_restore_in_progress = previous
+
+    def _segment_row_ancestor(self, widget):
+        current = widget
+        visited: set[int] = set()
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            if isinstance(current, SegmentRow):
+                return current
+            parent = getattr(current, "parentWidget", None)
+            current = parent() if callable(parent) else None
+        return None
+
+    def _move_focus_from_segment_rows(self) -> None:
+        focus_getter = getattr(QApplication, "focusWidget", None)
+        focused = focus_getter() if callable(focus_getter) else None
+        if self._segment_row_ancestor(focused) not in self.__dict__.get("_rows", []):
+            return
+        try:
+            focused.clearFocus()
+        except (AttributeError, RuntimeError):
+            pass
+        try:
+            self.setFocus(Qt.FocusReason.OtherFocusReason)
+        except RuntimeError:
+            pass
+
+    def _push_segment_history_command(self, text: str, before: SegmentHistoryState, after: SegmentHistoryState) -> None:
+        if self.__dict__.get("_segment_undo_stack") is not None and not self.__dict__.get("_segment_history_suspended", False) and before != after:
+            self._segment_undo_stack.push(SegmentSnapshotCommand(text, before, after, self._restore_segment_history_state))
+
+    def _run_segment_history_action(self, text: str, callback):
+        if self.__dict__.get("_segment_undo_stack") is None or self.__dict__.get("_segment_history_suspended", False):
+            return callback()
+        before = self._capture_segment_history_state()
+        result = callback()
+        self._push_segment_history_command(text, before, self._capture_segment_history_state())
+        return result
+
+    def _begin_segment_history_transaction(self, key: str, text: str) -> None:
+        if hasattr(self, "_segment_history_transactions") and not self._segment_history_suspended and key not in self._segment_history_transactions:
+            self._segment_history_transactions[key] = (text, self._capture_segment_history_state())
+
+    def _commit_segment_history_transaction(self, key: str) -> None:
+        transaction = self.__dict__.get("_segment_history_transactions", {}).pop(key, None)
+        if transaction:
+            text, before = transaction
+            self._push_segment_history_command(text, before, self._capture_segment_history_state())
+
+    def _reset_segment_history(self) -> None:
+        self._segment_history_transactions.clear()
+        self._segment_undo_stack.clear()
+        self._segment_undo_stack.setClean()
+
+    def _focused_text_editor(self):
+        focus_getter = getattr(QApplication, "focusWidget", None)
+        widget = focus_getter() if callable(focus_getter) else None
+        while widget is not None:
+            if isinstance(widget, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)) and hasattr(widget, "undo"):
+                row = self._segment_row_ancestor(widget)
+                if row is not None and row not in self.__dict__.get("_rows", []):
+                    return None
+                return widget
+            if isinstance(widget, QComboBox) and widget.isEditable() and hasattr(widget, "lineEdit"):
+                return widget.lineEdit()
+            parent = getattr(widget, "parentWidget", None)
+            widget = parent() if callable(parent) else None
+        return None
+
+    def _route_undo_shortcut(self) -> None:
+        editor = self._focused_text_editor()
+        if editor is not None: editor.undo()
+        else: self._segment_undo_stack.undo()
+
+    def _route_redo_shortcut(self) -> None:
+        editor = self._focused_text_editor()
+        if editor is not None: editor.redo()
+        else: self._segment_undo_stack.redo()
 
     # ── 初始数据 ──────────────────────────────────────────────────────────────
 
@@ -1582,12 +1767,7 @@ class MainWindow(QMainWindow):
 
     def _connect_segment_row(self, row: SegmentRow) -> None:
         row.deleted.connect(self._remove_segment)
-        row.changed.connect(self._refresh_seg_header)
-        row.changed.connect(self._refresh_waveform_segments)
-        row.changed.connect(self._schedule_arc_cut_warning_refresh)
-        if hasattr(self, "_schedule_segment_time_validation"):
-            row.changed.connect(self._schedule_segment_time_validation)
-        row.changed.connect(self._mark_current_export_dirty)
+        row.changed.connect(lambda row=row: self._on_segment_row_changed(row))
         row.end_cap_requested.connect(self._set_row_end_to_audio_duration)
         row.copy_requested.connect(self._copy_segment)
         row.field_committed.connect(self._on_segment_field_committed)
@@ -1599,6 +1779,8 @@ class MainWindow(QMainWindow):
         row.join_requested.connect(self._join_segment_group)
         row.join_previewed.connect(self._on_join_group_previewed)
         row.join_unpreviewed.connect(self._on_join_group_unpreviewed)
+        row.segment_edit_started.connect(self._on_segment_edit_started)
+        row.segment_edit_committed.connect(self._on_segment_edit_committed)
 
     def _row_by_uid(self, uid: str) -> SegmentRow | None:
         for row in self._rows:
@@ -1620,6 +1802,41 @@ class MainWindow(QMainWindow):
             except (TypeError, ValueError):
                 e_val = None
         return s_val, e_val
+
+    def _row_display_snapshot(self, row) -> SegmentEditDisplaySnapshot | None:
+        uid = str(getattr(row, "uid", "") or "")
+        return self.__dict__.get("_segment_edit_display_snapshots", {}).get(uid)
+
+    def _row_visual_time_values(self, row) -> tuple[int | None, int | None]:
+        snapshot = self._row_display_snapshot(row)
+        if snapshot is not None:
+            return snapshot.start_value, snapshot.end_value
+        return self._row_time_values(row)
+
+    def _row_visual_effective_speed(self, row) -> float:
+        snapshot = self._row_display_snapshot(row)
+        if snapshot is not None:
+            return snapshot.effective_speed
+        return self._row_effective_speed(row)
+
+    def _capture_segment_edit_display_snapshot(self, row) -> None:
+        uid = str(getattr(row, "uid", "") or "")
+        snapshots = self.__dict__.setdefault("_segment_edit_display_snapshots", {})
+        if not uid or uid in snapshots:
+            return
+        start, end = self._row_time_values(row)
+        try:
+            effective_speed = self._row_effective_speed(row)
+        except ValueError:
+            effective_speed = self._current_default_speed()
+        snapshots[uid] = SegmentEditDisplaySnapshot(
+            uid=uid,
+            start_value=start,
+            end_value=end,
+            speed_override_text=row.speed_override_text() if hasattr(row, "speed_override_text") else "",
+            effective_speed=effective_speed,
+            was_complete=bool(start is not None and end is not None and end > start),
+        )
 
     def _set_selected_segment_uid(self, uid: str = "", *, scroll: bool = False) -> None:
         self._selected_segment_uid = str(uid or "")
@@ -1672,7 +1889,9 @@ class MainWindow(QMainWindow):
             self._join_preview_uid = ""
             self._refresh_visual_groups()
 
-    def _unlink_segment_group(self, row: SegmentRow) -> None:
+    def _unlink_segment_group(self, row: SegmentRow, record_history: bool = True) -> None:
+        if record_history:
+            return self._run_segment_history_action("断开级联", lambda: self._unlink_segment_group(row, False))
         if row not in self._rows:
             return
         if not normalize_link_group_id(getattr(row, "link_group_id", None)):
@@ -1685,7 +1904,9 @@ class MainWindow(QMainWindow):
         self._maybe_auto_sort_segments()
         self._mark_current_export_dirty()
 
-    def _join_segment_group(self, row: SegmentRow) -> None:
+    def _join_segment_group(self, row: SegmentRow, record_history: bool = True) -> None:
+        if record_history:
+            return self._run_segment_history_action("加入级联", lambda: self._join_segment_group(row, False))
         if row not in self._rows:
             return
         group_id = self._row_join_target_group_id(row)
@@ -1715,7 +1936,7 @@ class MainWindow(QMainWindow):
     def _complete_visual_groups(self) -> dict[tuple[int, int], list[SegmentRow]]:
         groups: dict[tuple[int, int], list[SegmentRow]] = {}
         for row in getattr(self, "_rows", []):
-            s_val, e_val = self._row_time_values(row)
+            s_val, e_val = self._row_visual_time_values(row)
             if s_val is None or e_val is None or e_val <= s_val:
                 continue
             groups.setdefault((int(s_val), int(e_val)), []).append(row)
@@ -1727,7 +1948,7 @@ class MainWindow(QMainWindow):
             group_id = normalize_link_group_id(getattr(row, "link_group_id", None))
             if not group_id:
                 continue
-            s_val, e_val = self._row_time_values(row)
+            s_val, e_val = self._row_visual_time_values(row)
             if s_val is None or e_val is None or e_val <= s_val:
                 continue
             groups.setdefault(group_id, []).append(row)
@@ -1739,7 +1960,7 @@ class MainWindow(QMainWindow):
     def _row_join_target_group_id(self, row: SegmentRow) -> str | None:
         if normalize_link_group_id(getattr(row, "link_group_id", None)):
             return None
-        s_val, e_val = self._row_time_values(row)
+        s_val, e_val = self._row_visual_time_values(row)
         if s_val is None or e_val is None or e_val <= s_val:
             return None
         valid_groups = self._valid_link_groups()
@@ -1747,7 +1968,7 @@ class MainWindow(QMainWindow):
             group_id = normalize_link_group_id(getattr(candidate, "link_group_id", None))
             if not group_id or group_id not in valid_groups:
                 continue
-            c_s, c_e = self._row_time_values(candidate)
+            c_s, c_e = self._row_visual_time_values(candidate)
             if c_s == s_val and c_e == e_val:
                 return group_id
         return None
@@ -1755,14 +1976,14 @@ class MainWindow(QMainWindow):
     def _same_interval_unlinked_rows(self, row: SegmentRow) -> list[SegmentRow]:
         if normalize_link_group_id(getattr(row, "link_group_id", None)):
             return []
-        s_val, e_val = self._row_time_values(row)
+        s_val, e_val = self._row_visual_time_values(row)
         if s_val is None or e_val is None or e_val <= s_val:
             return []
         rows: list[SegmentRow] = []
         for candidate in getattr(self, "_rows", []):
             if normalize_link_group_id(getattr(candidate, "link_group_id", None)):
                 continue
-            c_s, c_e = self._row_time_values(candidate)
+            c_s, c_e = self._row_visual_time_values(candidate)
             if c_s == s_val and c_e == e_val:
                 rows.append(candidate)
         return rows if len(rows) >= 2 else []
@@ -1788,7 +2009,7 @@ class MainWindow(QMainWindow):
         link_groups = self._valid_link_groups()
         group_index = {key: idx for idx, key in enumerate(groups)}
         for row in getattr(self, "_rows", []):
-            s_val, e_val = self._row_time_values(row)
+            s_val, e_val = self._row_visual_time_values(row)
             key = (int(s_val), int(e_val)) if s_val is not None and e_val is not None and e_val > s_val else None
             members = groups.get(key, []) if key is not None else []
             if hasattr(row, "set_visual_group"):
@@ -1845,7 +2066,7 @@ class MainWindow(QMainWindow):
                     continue
                 seen_groups.add(group_id)
                 members = list(valid_groups[group_id])
-                members.sort(key=lambda item: (self._row_effective_speed(item), int(getattr(item, "created_order", 0))))
+                members.sort(key=lambda item: (self._row_visual_effective_speed(item), int(getattr(item, "created_order", 0))))
                 blocks.append(members)
             else:
                 blocks.append([row])
@@ -1853,14 +2074,14 @@ class MainWindow(QMainWindow):
         def block_key(block: list[SegmentRow]):
             complete_rows = []
             for item in block:
-                s_val, e_val = self._row_time_values(item)
+                s_val, e_val = self._row_visual_time_values(item)
                 if s_val is not None and e_val is not None and e_val > s_val:
                     complete_rows.append((item, int(s_val), int(e_val)))
             if not complete_rows:
                 return (1, min(int(getattr(item, "created_order", 0)) for item in block))
             start = min(s for _item, s, _e in complete_rows)
             end = max(e for _item, _s, e in complete_rows)
-            min_speed = min(self._row_effective_speed(item) for item, _s, _e in complete_rows)
+            min_speed = min(self._row_visual_effective_speed(item) for item, _s, _e in complete_rows)
             order = min(int(getattr(item, "created_order", 0)) for item in block)
             if self.__dict__.get("_sort_mode", "time") == "speed":
                 return (0, min_speed, start, end, order)
@@ -2041,6 +2262,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_request_waveform_for_current_song"):
             self._request_waveform_for_current_song()
         self._mark_current_export_dirty()
+        reset_history = getattr(self, "_reset_segment_history", None)
+        if callable(reset_history):
+            reset_history()
 
     def _current_default_speed(self, fallback: float = 1.0) -> float:
         try:
@@ -2069,7 +2293,7 @@ class MainWindow(QMainWindow):
         self._maybe_auto_sort_segments()
 
     def _mark_current_export_dirty(self, *_args):
-        if getattr(self, "_suppress_source_reset", False):
+        if self.__dict__.get("_suppress_source_reset", False) or self.__dict__.get("_segment_restore_in_progress", False):
             return
         self._current_export_dirty = True
         self._invalidate_external_merge_plan("当前配置尚未导出，请先运行切片。")
@@ -2327,15 +2551,19 @@ class MainWindow(QMainWindow):
 
     # ── 段落管理 ──────────────────────────────────────────────────────────────
 
-    def _clear_segments(self):
+    def _clear_segments(self, *, refresh: bool = True):
+        self.__dict__.get("_segment_edit_display_snapshots", {}).clear()
         while self._rows:
             row = self._rows.pop()
             self._segs_layout.removeWidget(row)
             row.deleteLater()
         self._selected_segment_uid = ""
         self._hovered_segment_uid = ""
-        if hasattr(self, "_refresh_waveform_segments"):
+        if refresh and hasattr(self, "_refresh_waveform_segments"):
             self._refresh_waveform_segments()
+
+    def _on_add_segment_clicked(self) -> None:
+        self._run_segment_history_action("新增片段", lambda: self._add_segment())
 
     def _add_segment(
         self,
@@ -2344,6 +2572,9 @@ class MainWindow(QMainWindow):
         speed_override=None,
         uid: str | None = None,
         link_group_id=None,
+        created_order: int | None = None,
+        refresh: bool = True,
+        sort: bool = True,
     ):
         if s is _AUTO_SEGMENT and e is _AUTO_SEGMENT:
             s = None
@@ -2360,25 +2591,27 @@ class MainWindow(QMainWindow):
             uid=uid or self._next_segment_uid(),
             link_group_id=link_group_id,
         )
-        row.created_order = self._next_segment_order()
+        row.created_order = self._next_segment_order() if created_order is None else int(created_order)
+        self._segment_order = max(self._segment_order, row.created_order)
         self._connect_segment_row(row)
         self._rows.append(row)
         self._segs_layout.addWidget(row)
-        if hasattr(self, "_refresh_seg_header"):
+        if refresh:
             self._refresh_seg_header()
-        if hasattr(self, "_refresh_waveform_segments"):
-            self._refresh_waveform_segments()
-        if hasattr(self, "_schedule_segment_time_validation"):
+            self._flush_segment_preview_refresh()
             self._schedule_segment_time_validation()
-        if hasattr(self, "_schedule_arc_cut_warning_refresh"):
             self._schedule_arc_cut_warning_refresh()
-        self._maybe_auto_sort_segments()
+        if sort:
+            self._maybe_auto_sort_segments()
+        return row
 
     def _remove_segment(self, row: SegmentRow) -> None:
         """Keep the card action on the same uid-based deletion path as shortcuts."""
         self._delete_segment_by_uid(getattr(row, "uid", ""))
 
-    def _delete_segment_by_uid(self, uid: str) -> None:
+    def _delete_segment_by_uid(self, uid: str, record_history: bool = True) -> None:
+        if record_history:
+            return self._run_segment_history_action("删除片段", lambda: self._delete_segment_by_uid(uid, False))
         uid = str(uid or "")
         row = self._row_by_uid(uid)
         if row is None:
@@ -2439,9 +2672,12 @@ class MainWindow(QMainWindow):
             self._delete_segment_by_uid(uid)
 
     def _save_from_shortcut(self) -> None:
+        self._commit_active_segment_edits_for_save()
         self._save_slides()
 
-    def _copy_segment(self, row: SegmentRow):
+    def _copy_segment(self, row: SegmentRow, record_history: bool = True):
+        if record_history:
+            return self._run_segment_history_action("复制片段", lambda: self._copy_segment(row, False))
         if row not in self._rows:
             return
         source_group_id = normalize_link_group_id(getattr(row, "link_group_id", None))
@@ -2492,6 +2728,33 @@ class MainWindow(QMainWindow):
             f"时间段 · {len(self._rows)} 段 · 共 {total/1000:.1f}s"
         )
 
+    def _on_segment_row_changed(self, row: SegmentRow) -> None:
+        if row not in getattr(self, "_rows", []):
+            return
+        self._mark_current_export_dirty()
+        self._schedule_segment_time_validation()
+        snapshot = self._row_display_snapshot(row)
+        if snapshot is None or not snapshot.was_complete:
+            self._schedule_segment_preview_refresh(row)
+
+    def _schedule_segment_preview_refresh(self, row: SegmentRow | None = None) -> None:
+        if self.__dict__.get("_segment_restore_in_progress", False):
+            return
+        snapshot = self._row_display_snapshot(row) if row is not None else None
+        if snapshot is not None and snapshot.was_complete:
+            return
+        timer = self.__dict__.get("_segment_preview_refresh_timer")
+        if timer is None:
+            self._flush_segment_preview_refresh()
+            return
+        timer.start()
+
+    def _flush_segment_preview_refresh(self) -> None:
+        if self.__dict__.get("_segment_restore_in_progress", False):
+            return
+        self._refresh_seg_header()
+        self._refresh_waveform_segments()
+
     def _schedule_arc_cut_warning_refresh(self):
         self._arc_warning_timer.start(200)
 
@@ -2514,10 +2777,11 @@ class MainWindow(QMainWindow):
         ranges: list[tuple] = []
         valid_groups = self._valid_link_groups()
         for row in getattr(self, "_rows", []):
-            if row.s_val is None or row.e_val is None or row.e_val <= row.s_val:
+            start_value, end_value = self._row_visual_time_values(row)
+            if start_value is None or end_value is None or end_value <= start_value:
                 continue
-            start = int(row.s_val)
-            end = int(row.e_val)
+            start = int(start_value)
+            end = int(end_value)
             group_id = normalize_link_group_id(getattr(row, "link_group_id", None))
             is_linked = bool(group_id and group_id in valid_groups)
             join_mode = self._row_join_mode(row)
@@ -2536,6 +2800,9 @@ class MainWindow(QMainWindow):
     def _waveform_draft_segments(self) -> list[dict]:
         drafts: list[dict] = []
         for index, row in enumerate(getattr(self, "_rows", [])):
+            snapshot = self._row_display_snapshot(row)
+            if snapshot is not None and snapshot.was_complete:
+                continue
             start_text = row.start_text() if hasattr(row, "start_text") else ("" if row.s_val is None else str(row.s_val))
             end_text = row.end_text() if hasattr(row, "end_text") else ("" if row.e_val is None else str(row.e_val))
             if bool(start_text) == bool(end_text):
@@ -2575,12 +2842,49 @@ class MainWindow(QMainWindow):
             if hasattr(row, "set_speed_error"):
                 speed_error = self._segment_speed_error(row)
                 row.set_speed_error(speed_error)
-                if not speed_error:
-                    self._maybe_auto_sort_segments()
+        else:
+            self._validate_segment_row_hard(row)
+        self._commit_segment_edit(row, field)
+
+    def _commit_segment_edit(self, row: SegmentRow, field: str) -> None:
+        if row not in self._rows:
             return
-        result = self._validate_segment_row_hard(row)
-        if result.ok:
+        uid = str(getattr(row, "uid", "") or "")
+        snapshots = self.__dict__.setdefault("_segment_edit_display_snapshots", {})
+        snapshot = snapshots.pop(uid, None)
+        transactions = self.__dict__.get("_segment_history_transactions", {})
+        has_transaction = f"input:{uid}:{field}" in transactions
+        self._commit_segment_history_transaction(f"input:{uid}:{field}")
+        if snapshot is None and has_transaction is False:
             self._maybe_auto_sort_segments()
+            return
+        self._maybe_auto_sort_segments()
+        self._set_selected_segment_uid(uid, scroll=True)
+        self._schedule_segment_time_validation()
+        self._schedule_arc_cut_warning_refresh()
+
+    def _commit_active_segment_edits_for_save(self) -> None:
+        focus_getter = getattr(QApplication, "focusWidget", None)
+        focused = focus_getter() if callable(focus_getter) else None
+        row = self._segment_row_ancestor(focused)
+        if row not in getattr(self, "_rows", []):
+            return
+        field = row.active_field_name() if hasattr(row, "active_field_name") else ""
+        uid = str(getattr(row, "uid", "") or "")
+        transactions = self.__dict__.get("_segment_history_transactions", {})
+        if field and (self._row_display_snapshot(row) is not None or f"input:{uid}:{field}" in transactions):
+            self._on_segment_field_committed(row, field)
+
+    def _on_segment_edit_started(self, row: SegmentRow, field: str) -> None:
+        if row in self._rows:
+            self._capture_segment_edit_display_snapshot(row)
+            self._begin_segment_history_transaction(f"input:{row.uid}:{field}", f"修改{field}")
+
+    def _on_segment_edit_committed(self, row: SegmentRow, field: str) -> None:
+        uid = str(getattr(row, "uid", "") or "")
+        transactions = self.__dict__.get("_segment_history_transactions", {})
+        if self._row_display_snapshot(row) is not None or f"input:{uid}:{field}" in transactions:
+            self._on_segment_field_committed(row, field)
 
     def _first_empty_field_after(self, row_index: int) -> tuple[SegmentRow, str] | None:
         for row in self._rows[row_index + 1:]:
@@ -2621,13 +2925,13 @@ class MainWindow(QMainWindow):
     def _on_segment_enter_pressed(self, row: SegmentRow, field: str) -> None:
         if row not in self._rows:
             return
+        self._on_segment_field_committed(row, field)
         if field == "speed":
             speed_error = self._segment_speed_error(row)
             row.set_speed_error(speed_error)
             if speed_error:
                 row.focus_time_field("speed")
                 return
-            self._maybe_auto_sort_segments()
         else:
             result = self._validate_segment_row_hard(row)
             if result.first_field == field:
@@ -2636,8 +2940,6 @@ class MainWindow(QMainWindow):
             if field == "end" and result.first_field == "start":
                 row.focus_time_field("start")
                 return
-            if result.ok:
-                self._maybe_auto_sort_segments()
         self._focus_next_segment_field(row, field)
 
     def _add_waveform_segment(self, start_ms: int, end_ms: int) -> None:
@@ -2648,7 +2950,7 @@ class MainWindow(QMainWindow):
             return
         if end - start < WAVEFORM_MIN_SEGMENT_MS:
             return
-        self._add_segment(start, end, None)
+        self._run_segment_history_action("新增片段", lambda: self._add_segment(start, end, None))
         self._mark_current_export_dirty()
 
     def _cascade_edit_active(self) -> bool:
@@ -2708,6 +3010,12 @@ class MainWindow(QMainWindow):
 
     def _on_waveform_endpoint_committed(self) -> None:
         self._maybe_auto_sort_segments()
+
+    def _on_waveform_endpoint_drag_started(self, _uid: str, side: str) -> None:
+        self._begin_segment_history_transaction("timeline_endpoint_drag", f"拖动片段{side}")
+
+    def _on_waveform_endpoint_drag_finished(self, _uid: str, _side: str) -> None:
+        self._commit_segment_history_transaction("timeline_endpoint_drag")
 
     def _request_waveform_for_current_song(self) -> None:
         panel = getattr(self, "_waveform_panel", None)
@@ -2957,9 +3265,11 @@ class MainWindow(QMainWindow):
 
     def _save_slides(self):
         try:
+            self._commit_active_segment_edits_for_save()
             data = self._collect()
             slides_path = _window_dep(self, "slides_path", SLIDES_PATH)
             slides_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            self._segment_undo_stack.setClean()
             self._push_log(f"💾 已保存 → {slides_path}", "ok")
             self._saved_lbl.show()
             QTimer.singleShot(1900, self._saved_lbl.hide)

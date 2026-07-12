@@ -59,6 +59,34 @@ class SegmentRowUiTests(unittest.TestCase):
         )
         self.assertTrue(row.to_dict()["uid"])
 
+    def test_arc_cut_status_card_lifecycle_stops_timers_before_deletion(self):
+        if not callable(getattr(app.QApplication, "instance", None)):
+            self.skipTest("requires the real PyQt floating-card surface")
+        status = app.ArcCutStatus("start", [{"easing": "si"}])
+        status.show()
+        status.show_card()
+        status._position_card()
+        self.assertIsNotNone(status._card)
+
+        status.schedule_show_card()
+        status.schedule_hide_card()
+        status.deleteLater()
+
+        self.assertFalse(status._show_timer.isActive())
+        self.assertFalse(status._hide_timer.isActive())
+        self.assertIsNone(status._card)
+
+    def test_history_text_restore_updates_values_without_changed_signal(self):
+        row = app.SegmentRow(1, 1, 2)
+        changes = []
+        row.changed.connect(lambda: changes.append(True))
+
+        row.restore_history_texts("1200", "2400", "0.8")
+
+        self.assertEqual((row.start_text(), row.end_text(), row.speed_override_text()), ("1200", "2400", "0.8"))
+        self.assertEqual((row.s_val, row.e_val), (1200, 2400))
+        self.assertEqual(changes, [])
+
     def test_speed_override_blank_inherits_default_and_updates_duration(self):
         row = app.SegmentRow(1, 0, 2000, default_speed=1.0)
 

@@ -259,6 +259,9 @@ class MainWindowShortcutTests(unittest.TestCase):
             self.assertEqual(win._save_shortcut.key(), QKeySequence(QKeySequence.StandardKey.Save))
             self.assertEqual(win._delete_shortcut.key(), QKeySequence(app.Qt.Key.Key_Delete))
             self.assertEqual(win._backspace_shortcut.key(), QKeySequence(app.Qt.Key.Key_Backspace))
+            self.assertFalse(win._save_shortcut.autoRepeat())
+            self.assertFalse(win._delete_shortcut.autoRepeat())
+            self.assertFalse(win._backspace_shortcut.autoRepeat())
         finally:
             win.close()
 

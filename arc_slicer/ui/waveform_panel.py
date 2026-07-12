@@ -86,6 +86,8 @@ class WaveformPanel(QFrame):
     segmentCreated = pyqtSignal(int, int)
     segmentEndpointChanged = pyqtSignal(int, int, int)
     segmentEndpointCommitted = pyqtSignal()
+    segmentEndpointDragStarted = pyqtSignal(str, str)
+    segmentEndpointDragFinished = pyqtSignal(str, str)
     segmentHovered = pyqtSignal(str)
     segmentSelected = pyqtSignal(str)
     emptySelected = pyqtSignal()
@@ -714,6 +716,7 @@ class WaveformPanel(QFrame):
             self._drag_preview = None
             self._last_endpoint_emit = None
             self.setCursor(Qt.CursorShape.SizeHorCursor)
+            self.segmentEndpointDragStarted.emit(self._segment_items[index]["uid"], side)
             return True
         if self._hit_segment_body(widget_x, widget_y) is not None:
             self._cancel_drag()
@@ -783,6 +786,8 @@ class WaveformPanel(QFrame):
                 self.segmentCreated.emit(int(start_ms), int(end_ms))
         elif commit_endpoint:
             self.segmentEndpointCommitted.emit()
+            if self._drag_index is not None and self._drag_index < len(self._segment_items):
+                self.segmentEndpointDragFinished.emit(self._segment_items[self._drag_index]["uid"], self._drag_mode)
         self._cancel_drag()
         self.unsetCursor()
         self.update()

@@ -1,6 +1,7 @@
 """Metadata and songlist panel widgets."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, pyqtSignal, QMimeData

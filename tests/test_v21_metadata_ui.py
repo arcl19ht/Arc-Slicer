@@ -93,7 +93,7 @@ def _install_fake_pyqt():
     qtcore.Qt = _Fake()
     qtcore.QThread = _Fake
     qtcore.pyqtSignal = lambda *args, **kwargs: _FakeSignal()
-    for name in ("QTimer", "QSize", "QMimeData", "QPoint", "QRect", "QEvent"):
+    for name in ("QTimer", "QSize", "QMimeData", "QPoint", "QRect", "QEvent", "QSignalBlocker"):
         setattr(qtcore, name, _Fake)
     for name in (
         "QColor", "QFont", "QPalette", "QPainter", "QLinearGradient",

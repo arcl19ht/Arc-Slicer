@@ -3,10 +3,21 @@ from __future__ import annotations
 
 import uuid
 
-from PyQt6.QtCore import Qt, QEvent, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QEvent, QTimer, QPoint, QRect, pyqtSignal
+try:
+    from PyQt6.QtCore import QSignalBlocker
+except ImportError:  # Supports the project's deliberately small headless Qt surface.
+    class QSignalBlocker:
+        def __init__(self, widget):
+            self._widget = widget
+            self._previous = widget.blockSignals(True) if hasattr(widget, "blockSignals") else False
+
+        def __del__(self):
+            if self._widget is not None and hasattr(self._widget, "blockSignals"):
+                self._widget.blockSignals(self._previous)
 from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import (
-    QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QVBoxLayout, QWidget,
 )
 
@@ -164,6 +175,8 @@ class ArcCutStatus(QFrame):
         self._hide_timer.stop()
 
     def show_card(self):
+        if not self.isVisible():
+            return
         if self._card is None:
             self._card = ArcCutInfoCard(self, self.boundary, self.hits)
         self._position_card()
@@ -175,6 +188,8 @@ class ArcCutStatus(QFrame):
             self._card.hide()
 
     def deleteLater(self):
+        self._show_timer.stop()
+        self._hide_timer.stop()
         self.hide_card()
         if self._card is not None:
             self._card.deleteLater()
@@ -191,6 +206,8 @@ class ArcCutStatus(QFrame):
         status_rect = QRect(top_left, self.size())
 
         screen = self.screen() or QApplication.screenAt(status_rect.center()) or QApplication.primaryScreen()
+        if screen is None:
+            return
         available = screen.availableGeometry()
         margin = 10
 
@@ -222,6 +239,8 @@ class SegmentRow(QFrame):
     join_requested = pyqtSignal(object)
     join_previewed = pyqtSignal(object)
     join_unpreviewed = pyqtSignal(object)
+    segment_edit_started = pyqtSignal(object, str)
+    segment_edit_committed = pyqtSignal(object, str)
 
     def __init__(
         self,
@@ -469,11 +488,22 @@ class SegmentRow(QFrame):
         self._start.editingFinished.connect(lambda: self.field_committed.emit(self, "start"))
         self._end.editingFinished.connect(lambda: self.field_committed.emit(self, "end"))
         self._speed_override.editingFinished.connect(lambda: self.field_committed.emit(self, "speed"))
+        for field in (self._start, self._end, self._speed_override):
+            field.installEventFilter(self)
         self._start.returnPressed.connect(lambda: self.enter_pressed.emit(self, "start"))
         self._end.returnPressed.connect(lambda: self.enter_pressed.emit(self, "end"))
         self._speed_override.returnPressed.connect(lambda: self.enter_pressed.emit(self, "speed"))
         btn_copy.clicked.connect(lambda: self.copy_requested.emit(self))
         btn_del.clicked.connect(lambda: self.deleted.emit(self))
+
+    def eventFilter(self, obj, event):
+        fields = {self._start: "start", self._end: "end", self._speed_override: "speed"}
+        field = fields.get(obj)
+        if field is not None and event.type() == QEvent.Type.FocusIn:
+            self.segment_edit_started.emit(self, field)
+        if field is not None and event.type() == QEvent.Type.FocusOut:
+            self.segment_edit_committed.emit(self, field)
+        return super().eventFilter(obj, event)
 
     def _make_segment_field_label(self, text: str) -> QLabel:
         label = QLabel(text)
@@ -557,7 +587,7 @@ class SegmentRow(QFrame):
         label.hide()
         return label
 
-    def _on_change(self):
+    def _sync_values_from_inputs(self) -> None:
         try:
             self.s_val = int(self._start.text())
         except ValueError:
@@ -568,7 +598,27 @@ class SegmentRow(QFrame):
             self.e_val = None
         self._speed_override.setPlaceholderText(self._speed_placeholder())
         self._update_dur()
+
+    def _on_change(self):
+        self._sync_values_from_inputs()
         self.changed.emit()
+
+    def restore_history_texts(
+        self,
+        start_text: str,
+        end_text: str,
+        speed_override_text: str,
+    ) -> None:
+        blockers = [
+            QSignalBlocker(self._start),
+            QSignalBlocker(self._end),
+            QSignalBlocker(self._speed_override),
+        ]
+        self._start.setText(str(start_text))
+        self._end.setText(str(end_text))
+        self._speed_override.setText(str(speed_override_text))
+        self._sync_values_from_inputs()
+        del blockers
 
     def _update_dur(self):
         if self.s_val is None or self.e_val is None:
@@ -682,6 +732,16 @@ class SegmentRow(QFrame):
 
     def speed_override_text(self) -> str:
         return self._speed_override.text()
+
+    def active_field_name(self) -> str:
+        for widget, field in (
+            (self._start, "start"),
+            (self._end, "end"),
+            (self._speed_override, "speed"),
+        ):
+            if widget.hasFocus():
+                return field
+        return ""
 
     def speed_override_value(self) -> float | None:
         return normalize_speed_override_value(self._speed_override.text())
