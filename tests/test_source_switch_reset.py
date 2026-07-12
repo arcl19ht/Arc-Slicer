@@ -82,6 +82,10 @@ class _Window:
         self.dirty = False
         self.audio_refreshed = False
         self.arc_refreshed = False
+        self._timeline_quick_draft_anchor_ms = 12345
+
+    def _cancel_timeline_quick_draft(self):
+        self._timeline_quick_draft_anchor_ms = None
 
     def _clear_segments(self):
         self._rows.clear()
@@ -111,6 +115,7 @@ class SourceSwitchResetTests(unittest.TestCase):
         self.assertTrue(win.audio_refreshed)
         self.assertTrue(win.arc_refreshed)
         self.assertTrue(win.dirty)
+        self.assertIsNone(win._timeline_quick_draft_anchor_ms)
 
     def test_initial_load_suppression_does_not_reset_old_segments(self):
         win = _Window()

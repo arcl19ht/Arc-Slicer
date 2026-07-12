@@ -1242,6 +1242,7 @@ class MainWindow(QMainWindow):
         self._segment_order = 0
         self._selected_segment_uid = ""
         self._hovered_segment_uid = ""
+        self._timeline_quick_draft_anchor_ms: int | None = None
         self._auto_sort_enabled = True
         self._sort_mode = "time"
         self._join_preview_uid = ""
@@ -1430,6 +1431,7 @@ class MainWindow(QMainWindow):
         self._waveform_panel.segmentHovered.connect(self._on_waveform_segment_hovered)
         self._waveform_panel.segmentSelected.connect(self._on_waveform_segment_selected)
         self._waveform_panel.emptySelected.connect(self._clear_selected_segment)
+        self._waveform_panel.timeline_quick_draft_requested.connect(self._on_timeline_quick_draft_requested)
         lay.addWidget(self._waveform_panel)
         lay.addSpacing(12)
 
@@ -1606,6 +1608,11 @@ class MainWindow(QMainWindow):
         self._duplicate_shortcut.setContext(context)
         self._duplicate_shortcut.setAutoRepeat(False)
         self._duplicate_shortcut.activated.connect(self._duplicate_selected_segment_from_shortcut)
+
+        self._escape_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        self._escape_shortcut.setContext(context)
+        self._escape_shortcut.setAutoRepeat(False)
+        self._escape_shortcut.activated.connect(self._handle_escape_shortcut)
 
         self._undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
         self._undo_shortcut.setContext(context)
@@ -1860,6 +1867,31 @@ class MainWindow(QMainWindow):
 
     def _clear_selected_segment(self) -> None:
         self._set_selected_segment_uid("")
+
+    def _set_timeline_quick_draft_anchor(self, time_ms: int | None) -> None:
+        anchor = None if time_ms is None else int(time_ms)
+        self._timeline_quick_draft_anchor_ms = anchor
+        panel = self.__dict__.get("_waveform_panel")
+        if panel is not None and hasattr(panel, "set_quick_draft_anchor"):
+            panel.set_quick_draft_anchor(anchor)
+
+    def _cancel_timeline_quick_draft(self) -> None:
+        self._set_timeline_quick_draft_anchor(None)
+
+    def _handle_escape_shortcut(self) -> None:
+        if self.__dict__.get("_timeline_quick_draft_anchor_ms") is not None:
+            self._cancel_timeline_quick_draft()
+            return
+        focus_getter = getattr(QApplication, "focusWidget", None)
+        focus_widget = focus_getter() if callable(focus_getter) else None
+        if self._is_text_editing_focus(focus_widget):
+            return
+        if not self.__dict__.get("_selected_segment_uid", ""):
+            return
+        self._set_selected_segment_uid("")
+        self._set_hovered_segment_uid("")
+        self._join_preview_uid = ""
+        self._refresh_visual_groups()
 
     def _on_segment_row_hovered(self, row: SegmentRow) -> None:
         self._set_hovered_segment_uid(row.uid if row in self._rows else "")
@@ -2198,6 +2230,7 @@ class MainWindow(QMainWindow):
         self._request_waveform_for_current_song()
 
     def _apply_slides(self, data: dict):
+        self._cancel_timeline_quick_draft()
         if data.get("speed") is not None:
             self._speed_input.setText(str(data["speed"]))
         if data.get("song_id"):
@@ -2267,6 +2300,7 @@ class MainWindow(QMainWindow):
                 self._request_waveform_for_current_song()
             return
         self._current_source_id = song_id
+        self._cancel_timeline_quick_draft()
         if hasattr(self._songlist_panel, "reset_for_source"):
             self._songlist_panel.reset_for_source(song_id)
         self._clear_segments()
@@ -2566,6 +2600,7 @@ class MainWindow(QMainWindow):
     # ── 段落管理 ──────────────────────────────────────────────────────────────
 
     def _clear_segments(self, *, refresh: bool = True):
+        self._cancel_timeline_quick_draft()
         self.__dict__.get("_segment_edit_display_snapshots", {}).clear()
         while self._rows:
             row = self._rows.pop()
@@ -2578,6 +2613,20 @@ class MainWindow(QMainWindow):
 
     def _on_add_segment_clicked(self) -> None:
         self._run_segment_history_action("新增片段", lambda: self._add_segment())
+
+    def _create_user_segment(self, start_ms: int, end_ms: int) -> SegmentRow | None:
+        created: SegmentRow | None = None
+
+        def create() -> None:
+            nonlocal created
+            created = self._add_segment(start_ms, end_ms, None)
+            if created is not None:
+                self._set_selected_segment_uid(created.uid, scroll="_scroll" in self.__dict__)
+
+        self._run_segment_history_action("新增片段", create)
+        if created is not None:
+            self._mark_current_export_dirty()
+        return created
 
     def _add_segment(
         self,
@@ -3024,8 +3073,29 @@ class MainWindow(QMainWindow):
             return
         if end - start < WAVEFORM_MIN_SEGMENT_MS:
             return
-        self._run_segment_history_action("新增片段", lambda: self._add_segment(start, end, None))
-        self._mark_current_export_dirty()
+        self._create_user_segment(start, end)
+
+    def _on_timeline_quick_draft_requested(self, time_ms: int) -> None:
+        try:
+            point = int(time_ms)
+        except (TypeError, ValueError):
+            return
+        panel = self.__dict__.get("_waveform_panel")
+        duration = int(panel._duration_ms()) if panel is not None and hasattr(panel, "_duration_ms") else 0
+        if duration <= 0:
+            return
+        point = max(0, min(duration, point))
+        anchor = self.__dict__.get("_timeline_quick_draft_anchor_ms")
+        if anchor is None:
+            self._set_timeline_quick_draft_anchor(point)
+            return
+        start, end = sorted((int(anchor), point))
+        if end - start < WAVEFORM_MIN_SEGMENT_MS:
+            if "_log_widget" in self.__dict__:
+                self._push_log(f"片段长度至少为 {WAVEFORM_MIN_SEGMENT_MS}ms", "muted")
+            return
+        if self._create_user_segment(start, end) is not None:
+            self._cancel_timeline_quick_draft()
 
     def _update_waveform_segment_endpoint(self, index: int, start_ms: int, end_ms: int) -> None:
         try:
@@ -3077,6 +3147,7 @@ class MainWindow(QMainWindow):
         panel = getattr(self, "_waveform_panel", None)
         if panel is None:
             return
+        self._cancel_timeline_quick_draft()
         self._waveform_generation += 1
         generation = self._waveform_generation
         self._refresh_waveform_segments()

@@ -91,6 +91,7 @@ class WaveformPanel(QFrame):
     segmentHovered = pyqtSignal(str)
     segmentSelected = pyqtSignal(str)
     emptySelected = pyqtSignal()
+    timeline_quick_draft_requested = pyqtSignal(int)
     TIMELINE_LANE_HEIGHT = 28
     TIMELINE_LANE_GAP = 2
     TIMELINE_PADDING = 6
@@ -107,6 +108,7 @@ class WaveformPanel(QFrame):
         self._segments: list[tuple[int, int]] = []
         self._segment_items: list[dict] = []
         self._draft_segments: list[dict] = []
+        self._quick_draft_anchor_ms: int | None = None
         self._hover_time_ms: int | None = None
         self._hovered_segment_uid = ""
         self._selected_segment_uid = ""
@@ -163,6 +165,20 @@ class WaveformPanel(QFrame):
 
     def current_hover_time_ms(self) -> int | None:
         return self._hover_time_ms
+
+    def quick_draft_anchor_ms(self) -> int | None:
+        return self._quick_draft_anchor_ms
+
+    def set_quick_draft_anchor(self, time_ms: int | None) -> None:
+        if time_ms is None:
+            anchor = None
+        elif self._duration_ms() > 0:
+            anchor = max(0, min(self._duration_ms(), int(time_ms)))
+        else:
+            anchor = None
+        if anchor != self._quick_draft_anchor_ms:
+            self._quick_draft_anchor_ms = anchor
+            self.update()
 
     def resize(self, width: int, height: int) -> None:
         try:
@@ -473,6 +489,7 @@ class WaveformPanel(QFrame):
         self._state = "empty"
         self._message = "选择源曲后显示波形"
         self._waveform = None
+        self._quick_draft_anchor_ms = None
         self._segment_items = []
         self._segments = []
         self._draft_segments = []
@@ -485,6 +502,7 @@ class WaveformPanel(QFrame):
         self._state = "loading"
         self._message = "正在生成波形…"
         self._waveform = None
+        self._quick_draft_anchor_ms = None
         self._segment_items = []
         self._segments = []
         self._draft_segments = []
@@ -497,6 +515,7 @@ class WaveformPanel(QFrame):
         self._state = "error"
         self._message = "波形生成失败，不影响切片。"
         self._waveform = None
+        self._quick_draft_anchor_ms = None
         self._segment_items = []
         self._segments = []
         self._draft_segments = []
@@ -736,6 +755,24 @@ class WaveformPanel(QFrame):
         self._last_endpoint_emit = None
         return True
 
+    def _is_quick_draft_event(self, event: QMouseEvent) -> bool:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return False
+        try:
+            return event.modifiers() == Qt.KeyboardModifier.ControlModifier
+        except Exception:
+            return False
+
+    def _request_timeline_quick_draft(self, widget_x: float, widget_y: float) -> bool:
+        if not self._can_interact() or not self._timeline_area_rect().contains(int(widget_x), int(widget_y)):
+            return False
+        if self._hit_endpoint(widget_x, widget_y) is not None:
+            return False
+        if self._hit_segment_body(widget_x, widget_y) is not None:
+            return False
+        self.timeline_quick_draft_requested.emit(self.x_to_time_ms(self._local_x_from_widget_x(widget_x)))
+        return True
+
     def _update_interaction_at_widget_x(self, widget_x: float) -> None:
         self._update_interaction_at_pos(widget_x, None)
 
@@ -814,7 +851,22 @@ class WaveformPanel(QFrame):
         self.update()
 
     def mousePressEvent(self, event: QMouseEvent):
-        if event.button() == Qt.MouseButton.LeftButton and self._begin_interaction_at_pos(self._event_widget_x(event), self._event_widget_y(event)):
+        widget_x = self._event_widget_x(event)
+        widget_y = self._event_widget_y(event)
+        if event.button() == Qt.MouseButton.LeftButton and self._hit_timeline_grip(int(widget_x), int(widget_y)):
+            if self._begin_interaction_at_pos(widget_x, widget_y):
+                event.accept()
+                return
+        if self._is_quick_draft_event(event):
+            # Existing handles and blocks retain their normal interaction semantics.
+            if self._hit_endpoint(widget_x, widget_y) is not None or self._hit_segment_body(widget_x, widget_y) is not None:
+                self._begin_interaction_at_pos(widget_x, widget_y)
+                event.accept()
+                return
+            elif self._request_timeline_quick_draft(widget_x, widget_y):
+                event.accept()
+                return
+        if event.button() == Qt.MouseButton.LeftButton and self._begin_interaction_at_pos(widget_x, widget_y):
             event.accept()
             return
         super().mousePressEvent(event)
@@ -1078,6 +1130,34 @@ class WaveformPanel(QFrame):
                 pass
             self._draw_draft_label(painter, rect, anchor_x, label_text, color, label_side)
 
+    def _draw_quick_draft_anchor(self, painter: QPainter, rect) -> None:
+        anchor = self._quick_draft_anchor_ms
+        if anchor is None:
+            return
+        anchor_x = rect.left() + self.time_ms_to_x(anchor)
+        color = QColor(C_DRAFT_START)
+        pen = QPen(color, 2)
+        try:
+            pen.setStyle(Qt.PenStyle.DashLine)
+        except Exception:
+            pass
+        painter.setPen(pen)
+        painter.drawLine(anchor_x, rect.top() + 2, anchor_x, rect.bottom() - 2)
+        self._draw_draft_label(
+            painter,
+            rect,
+            anchor_x,
+            f"快速起点 {format_duration_ms(anchor)}",
+            color,
+            "right",
+        )
+        painter.setPen(QPen(QColor(C_MUTED), 1))
+        painter.drawText(
+            rect.adjusted(6, max(28, rect.height() - 24), -6, -4),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom,
+            "Ctrl+单击设置终点 · Esc取消",
+        )
+
     def _draw_hover_cursor(self, painter: QPainter, rect) -> None:
         if self._hover_time_ms is None:
             return
@@ -1138,6 +1218,7 @@ class WaveformPanel(QFrame):
         self._draw_complete_segments(painter, timeline_rect)
         self._draw_drag_preview(painter, timeline_rect)
         self._draw_draft_segments(painter, timeline_rect)
+        self._draw_quick_draft_anchor(painter, timeline_rect)
         try:
             painter.restore()
         except Exception:

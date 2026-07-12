@@ -216,7 +216,7 @@ class MainWindowShortcutTests(unittest.TestCase):
         self.assertNotIn(next_uid, [row.uid for row in win._rows])
         self.assertEqual(len(win._rows), 1)
 
-    def test_text_focus_protects_delete_and_backspace_with_real_qt_focus(self):
+    def test_text_focus_protects_delete_backspace_duplicate_and_escape_with_real_qt_focus(self):
         win = _window()
         self._add_three_rows(win)
         selected = win._rows[1]
@@ -231,6 +231,11 @@ class MainWindowShortcutTests(unittest.TestCase):
                 self.assertFalse(win._dirty_marked)
                 app.MainWindow._duplicate_selected_segment_from_shortcut(win)
                 self.assertEqual(len(win._rows), 3)
+                win._timeline_quick_draft_anchor_ms = 1234
+                win._waveform_panel.set_quick_draft_anchor(1234)
+                app.MainWindow._handle_escape_shortcut(win)
+                self.assertIsNone(win._timeline_quick_draft_anchor_ms)
+                self.assertEqual(win._selected_segment_uid, selected.uid)
             finally:
                 if original is None:
                     delattr(app.QApplication, "focusWidget")
@@ -254,6 +259,19 @@ class MainWindowShortcutTests(unittest.TestCase):
                 self.assertFalse(win._dirty_marked)
                 app.MainWindow._duplicate_selected_segment_from_shortcut(win)
                 self.assertEqual(len(win._rows), 3)
+                if isinstance(field, app.QTextEdit):
+                    field.setPlainText("keep")
+                else:
+                    field.setText("keep")
+                win._timeline_quick_draft_anchor_ms = 1234
+                win._waveform_panel.set_quick_draft_anchor(1234)
+                app.MainWindow._handle_escape_shortcut(win)
+                self.assertIsNone(win._timeline_quick_draft_anchor_ms)
+                self.assertEqual(win._selected_segment_uid, selected.uid)
+                text = field.toPlainText() if isinstance(field, app.QTextEdit) else field.text()
+                self.assertEqual(text, "keep")
+                app.MainWindow._handle_escape_shortcut(win)
+                self.assertEqual(win._selected_segment_uid, selected.uid)
         finally:
             host.close()
 
@@ -306,6 +324,9 @@ class MainWindowShortcutTests(unittest.TestCase):
             self.assertFalse(win._backspace_shortcut.autoRepeat())
             self.assertEqual(win._duplicate_shortcut.context(), context)
             self.assertFalse(win._duplicate_shortcut.autoRepeat())
+            self.assertEqual(win._escape_shortcut.key(), QKeySequence(app.Qt.Key.Key_Escape))
+            self.assertEqual(win._escape_shortcut.context(), context)
+            self.assertFalse(win._escape_shortcut.autoRepeat())
         finally:
             win.close()
 
