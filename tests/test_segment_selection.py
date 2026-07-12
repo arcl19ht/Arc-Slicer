@@ -111,7 +111,7 @@ class SegmentSelectionTests(unittest.TestCase):
         self.assertGreater(panel._timeline_scroll_offset, 0)
         self.assertLessEqual(panel._lane_rect(7).bottom(), panel._timeline_area_rect().bottom())
 
-    def test_deleting_selected_row_clears_selected_and_hovered_uid(self):
+    def test_deleting_selected_row_selects_next_and_clears_hovered_uid(self):
         win = _window()
         app.MainWindow._add_segment(win, 1000, 2000, None)
         app.MainWindow._add_segment(win, 3000, 4000, None)
@@ -121,7 +121,7 @@ class SegmentSelectionTests(unittest.TestCase):
 
         app.MainWindow._remove_segment(win, row)
 
-        self.assertEqual(win._selected_segment_uid, "")
+        self.assertEqual(win._selected_segment_uid, win._rows[0].uid)
         self.assertEqual(win._hovered_segment_uid, "")
 
     def test_waveform_panel_emits_hover_select_and_empty_click(self):

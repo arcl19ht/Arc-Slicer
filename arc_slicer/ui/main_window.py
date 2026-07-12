@@ -35,6 +35,46 @@ from PyQt6.QtWidgets import (
     QCheckBox, QGridLayout, QGraphicsDropShadowEffect,
 )
 try:
+    from PyQt6.QtGui import QKeySequence, QShortcut
+except ImportError:  # Older headless tests expose a deliberately small Qt surface.
+    class QKeySequence:
+        class StandardKey:
+            Save = "Ctrl+S"
+
+        def __init__(self, value):
+            self.value = value
+
+        def __eq__(self, other):
+            return isinstance(other, QKeySequence) and self.value == other.value
+
+    class _ShortcutSignal:
+        def connect(self, callback):
+            self.callback = callback
+
+    class QShortcut:
+        def __init__(self, key, _parent=None):
+            self._key = key
+            self._context = None
+            self.activated = _ShortcutSignal()
+
+        def setContext(self, context):
+            self._context = context
+
+        def context(self):
+            return self._context
+
+        def key(self):
+            return self._key
+
+try:
+    from PyQt6.QtWidgets import QPlainTextEdit, QAbstractSpinBox
+except ImportError:  # Keep text-focus checks importable under the same test surface.
+    class QPlainTextEdit:
+        pass
+
+    class QAbstractSpinBox:
+        pass
+try:
     from PyQt6.QtWidgets import QScrollBar
 except ImportError:  # Older headless tests install a small fake PyQt surface.
     QScrollBar = None
@@ -1201,6 +1241,7 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         self._setup_ui()
+        self._install_shortcuts()
         self._restore_external_merge_target_from_config()
         if self._migration_report.has_activity():
             self._push_log(self._migration_report.message(), "muted")
@@ -1514,6 +1555,20 @@ class MainWindow(QMainWindow):
         self._refresh_dir_label()
         self._refresh_export_target_state()
         self._update_external_merge_controls()
+
+    def _install_shortcuts(self) -> None:
+        context = Qt.ShortcutContext.WidgetWithChildrenShortcut
+        self._save_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.Save), self)
+        self._save_shortcut.setContext(context)
+        self._save_shortcut.activated.connect(self._save_from_shortcut)
+
+        self._delete_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Delete), self)
+        self._delete_shortcut.setContext(context)
+        self._delete_shortcut.activated.connect(self._delete_selected_segment_from_shortcut)
+
+        self._backspace_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Backspace), self)
+        self._backspace_shortcut.setContext(context)
+        self._backspace_shortcut.activated.connect(self._delete_selected_segment_from_shortcut)
 
     # ── 初始数据 ──────────────────────────────────────────────────────────────
 
@@ -2319,28 +2374,72 @@ class MainWindow(QMainWindow):
             self._schedule_arc_cut_warning_refresh()
         self._maybe_auto_sort_segments()
 
-    def _remove_segment(self, row: SegmentRow):
+    def _remove_segment(self, row: SegmentRow) -> None:
+        """Keep the card action on the same uid-based deletion path as shortcuts."""
+        self._delete_segment_by_uid(getattr(row, "uid", ""))
+
+    def _delete_segment_by_uid(self, uid: str) -> None:
+        uid = str(uid or "")
+        row = self._row_by_uid(uid)
+        if row is None:
+            if self.__dict__.get("_selected_segment_uid", "") == uid:
+                self._set_selected_segment_uid("")
+            return
+
+        row_index = self._rows.index(row)
         self._rows.remove(row)
         self._segs_layout.removeWidget(row)
         row.deleteLater()
         self._cleanup_single_member_link_groups()
-        if self._selected_segment_uid == row.uid:
-            self._selected_segment_uid = ""
-        if self._hovered_segment_uid == row.uid:
+        if self.__dict__.get("_hovered_segment_uid", "") == uid:
             self._hovered_segment_uid = ""
-        for i, r in enumerate(self._rows):
-            r.update_index(i + 1)
+        if self.__dict__.get("_join_preview_uid", "") == uid:
+            self._join_preview_uid = ""
+
+        selection_row = None
+        if self._rows:
+            selection_row = self._rows[row_index] if row_index < len(self._rows) else self._rows[-1]
+        for index, remaining_row in enumerate(self._rows):
+            remaining_row.update_index(index + 1)
         if not self._rows:
             self._add_segment(None, None)
-            return
-        self._refresh_seg_header()
-        self._refresh_waveform_segments()
+
+        self._maybe_auto_sort_segments()
         if hasattr(self, "_schedule_segment_time_validation"):
             self._schedule_segment_time_validation()
         if hasattr(self, "_schedule_arc_cut_warning_refresh"):
             self._schedule_arc_cut_warning_refresh()
-        self._maybe_auto_sort_segments()
+        self._set_selected_segment_uid(selection_row.uid if selection_row is not None else "")
         self._mark_current_export_dirty()
+
+    def _is_text_editing_focus(self, widget: QWidget | None = None) -> bool:
+        if widget is None:
+            focus_getter = getattr(QApplication, "focusWidget", None)
+            current = focus_getter() if callable(focus_getter) else None
+        else:
+            current = widget
+        visited: set[int] = set()
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            if isinstance(current, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)):
+                return True
+            if isinstance(current, QComboBox) and current.isEditable():
+                return True
+            parent_getter = getattr(current, "parentWidget", None)
+            current = parent_getter() if callable(parent_getter) else None
+        return False
+
+    def _delete_selected_segment_from_shortcut(self) -> None:
+        focus_getter = getattr(QApplication, "focusWidget", None)
+        focus_widget = focus_getter() if callable(focus_getter) else None
+        if self._is_text_editing_focus(focus_widget):
+            return
+        uid = self.__dict__.get("_selected_segment_uid", "")
+        if uid:
+            self._delete_segment_by_uid(uid)
+
+    def _save_from_shortcut(self) -> None:
+        self._save_slides()
 
     def _copy_segment(self, row: SegmentRow):
         if row not in self._rows:
