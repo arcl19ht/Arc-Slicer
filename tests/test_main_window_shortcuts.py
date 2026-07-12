@@ -117,6 +117,44 @@ class MainWindowShortcutTests(unittest.TestCase):
         self.assertEqual([row.uid for row in win._rows], [first.uid, third.uid])
         self.assertEqual(win._selected_segment_uid, third.uid)
 
+    def test_ctrl_d_uses_selected_card_copy_handler(self):
+        win = _window()
+        app.MainWindow._add_segment(win, 1000, 2000, 0.8)
+        source = win._rows[0]
+        app.MainWindow._on_segment_row_selected(win, source)
+
+        app.MainWindow._duplicate_selected_segment_from_shortcut(win)
+
+        self.assertEqual(len(win._rows), 2)
+        copied = win._rows[1]
+        self.assertNotEqual(copied.uid, source.uid)
+        self.assertEqual((copied.s_val, copied.e_val), (1000, 2000))
+        self.assertIsNone(copied.speed_override_value())
+        self.assertEqual(source.link_group_id, copied.link_group_id)
+        self.assertEqual(win._selected_segment_uid, source.uid)
+        self.assertTrue(win._dirty_marked)
+        self.assertTrue(win._invalidated)
+
+    def test_ctrl_d_uses_timeline_selection_and_ignores_empty_or_stale_selection(self):
+        win = _window()
+        app.MainWindow._add_segment(win, 1000, 2000, None)
+        source = win._rows[0]
+        app.MainWindow._on_waveform_segment_selected(win, source.uid)
+        app.MainWindow._duplicate_selected_segment_from_shortcut(win)
+        self.assertEqual(len(win._rows), 2)
+
+        clean = _window()
+        app.MainWindow._add_segment(clean, 1000, 2000, None)
+        app.MainWindow._duplicate_selected_segment_from_shortcut(clean)
+        self.assertEqual(len(clean._rows), 1)
+        self.assertFalse(clean._dirty_marked)
+
+        clean._selected_segment_uid = "missing"
+        app.MainWindow._duplicate_selected_segment_from_shortcut(clean)
+        self.assertEqual(len(clean._rows), 1)
+        self.assertEqual(clean._selected_segment_uid, "")
+        self.assertFalse(clean._dirty_marked)
+
     def test_backspace_deletes_selected_row_when_focus_is_not_text_editing(self):
         win = _window()
         self._add_three_rows(win)
@@ -191,6 +229,8 @@ class MainWindowShortcutTests(unittest.TestCase):
                 app.MainWindow._delete_selected_segment_from_shortcut(win)
                 self.assertIn(selected, win._rows)
                 self.assertFalse(win._dirty_marked)
+                app.MainWindow._duplicate_selected_segment_from_shortcut(win)
+                self.assertEqual(len(win._rows), 3)
             finally:
                 if original is None:
                     delattr(app.QApplication, "focusWidget")
@@ -212,6 +252,8 @@ class MainWindowShortcutTests(unittest.TestCase):
                 app.MainWindow._delete_selected_segment_from_shortcut(win)
                 self.assertIn(selected, win._rows)
                 self.assertFalse(win._dirty_marked)
+                app.MainWindow._duplicate_selected_segment_from_shortcut(win)
+                self.assertEqual(len(win._rows), 3)
         finally:
             host.close()
 
@@ -258,9 +300,12 @@ class MainWindowShortcutTests(unittest.TestCase):
             self.assertEqual(win._save_shortcut.key(), QKeySequence(QKeySequence.StandardKey.Save))
             self.assertEqual(win._delete_shortcut.key(), QKeySequence(app.Qt.Key.Key_Delete))
             self.assertEqual(win._backspace_shortcut.key(), QKeySequence(app.Qt.Key.Key_Backspace))
+            self.assertEqual(win._duplicate_shortcut.key(), QKeySequence("Ctrl+D"))
             self.assertFalse(win._save_shortcut.autoRepeat())
             self.assertFalse(win._delete_shortcut.autoRepeat())
             self.assertFalse(win._backspace_shortcut.autoRepeat())
+            self.assertEqual(win._duplicate_shortcut.context(), context)
+            self.assertFalse(win._duplicate_shortcut.autoRepeat())
         finally:
             win.close()
 

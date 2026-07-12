@@ -1602,6 +1602,11 @@ class MainWindow(QMainWindow):
         self._backspace_shortcut.setAutoRepeat(False)
         self._backspace_shortcut.activated.connect(self._delete_selected_segment_from_shortcut)
 
+        self._duplicate_shortcut = QShortcut(QKeySequence("Ctrl+D"), self)
+        self._duplicate_shortcut.setContext(context)
+        self._duplicate_shortcut.setAutoRepeat(False)
+        self._duplicate_shortcut.activated.connect(self._duplicate_selected_segment_from_shortcut)
+
         self._undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
         self._undo_shortcut.setContext(context)
         self._undo_shortcut.activated.connect(self._route_undo_shortcut)
@@ -2679,6 +2684,20 @@ class MainWindow(QMainWindow):
         uid = self.__dict__.get("_selected_segment_uid", "")
         if uid:
             self._delete_segment_by_uid(uid)
+
+    def _duplicate_selected_segment_from_shortcut(self) -> None:
+        focus_getter = getattr(QApplication, "focusWidget", None)
+        focus_widget = focus_getter() if callable(focus_getter) else None
+        if self._is_text_editing_focus(focus_widget):
+            return
+        uid = self.__dict__.get("_selected_segment_uid", "")
+        if not uid:
+            return
+        row = self._row_by_uid(uid)
+        if row is None:
+            self._set_selected_segment_uid("")
+            return
+        self._copy_segment(row)
 
     def _save_from_shortcut(self) -> None:
         self._save_slides()

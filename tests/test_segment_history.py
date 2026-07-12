@@ -151,6 +151,24 @@ class SegmentHistoryTests(unittest.TestCase):
         self.assertEqual((win._rows[1].uid, win._rows[0].link_group_id, win._rows[1].link_group_id),
                          (copied_uid, group_id, group_id))
 
+    def test_ctrl_d_copy_undo_redo_reuses_uid_and_group(self):
+        win = _window()
+        app.MainWindow._add_segment(win, 1000, 2000, None)
+        source = win._rows[0]
+        win._selected_segment_uid = source.uid
+        win._segment_undo_stack.clear(); win._segment_undo_stack.setClean()
+
+        app.MainWindow._duplicate_selected_segment_from_shortcut(win)
+        copied_uid = win._rows[1].uid
+        group_id = source.link_group_id
+        self.assertEqual(win._segment_undo_stack.count(), 1)
+        win._segment_undo_stack.undo()
+        self.assertEqual(len(win._rows), 1)
+        self.assertIsNone(win._rows[0].link_group_id)
+        win._segment_undo_stack.redo()
+        self.assertEqual((win._rows[1].uid, win._rows[0].link_group_id, win._rows[1].link_group_id),
+                         (copied_uid, group_id, group_id))
+
     def test_unlink_and_rejoin_restore_exact_snapshots(self):
         win = _window()
         for speed in (0.8, 0.9, 1.0):
