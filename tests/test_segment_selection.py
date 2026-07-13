@@ -78,7 +78,7 @@ class SegmentSelectionTests(unittest.TestCase):
         self.assertEqual(win._hovered_segment_uid, "")
         self.assertFalse(row._is_hovered)
 
-    def test_waveform_hover_select_scroll_and_empty_clear_selection(self):
+    def test_waveform_hover_select_keeps_page_viewport_and_empty_clear_selection(self):
         win = _window()
         app.MainWindow._add_segment(win, 1000, 2000, None)
         row = win._rows[0]
@@ -89,7 +89,7 @@ class SegmentSelectionTests(unittest.TestCase):
 
         app.MainWindow._on_waveform_segment_selected(win, row.uid)
         self.assertEqual(win._selected_segment_uid, row.uid)
-        self.assertEqual(win._scroll.visible, [row])
+        self.assertEqual(win._scroll.visible, [])
 
         app.MainWindow._clear_selected_segment(win)
         self.assertEqual(win._selected_segment_uid, "")

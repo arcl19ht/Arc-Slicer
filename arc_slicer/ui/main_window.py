@@ -1281,6 +1281,7 @@ class MainWindow(QMainWindow):
         self._waveform_panel.segmentEndpointDragFinished.connect(self._on_waveform_endpoint_drag_finished)
         self._waveform_panel.segmentHovered.connect(self._on_waveform_segment_hovered)
         self._waveform_panel.segmentSelected.connect(self._on_waveform_segment_selected)
+        self._waveform_panel.segmentSeekRequested.connect(self._on_waveform_segment_seek_requested)
         self._waveform_panel.emptySelected.connect(self._clear_selected_segment)
         self._waveform_panel.timeline_quick_draft_requested.connect(self._on_timeline_quick_draft_requested)
         lay.addWidget(self._waveform_panel)
@@ -1303,9 +1304,10 @@ class MainWindow(QMainWindow):
         self._audition_time_label = make_label("0:00.000 / 0:00.000", size=12, color=C_MUTED)
         self._audition_speed_label = make_label("1×", size=12, color=C_MUTED)
         self._audition_status_label = make_label("请选择完整片段", size=12, color=C_LABEL)
+        self._timeline_gesture_hint = make_label("选中后单击定位播放 · 拖动平移片段", size=12, color=C_LABEL)
         for label in (self._audition_time_label, self._audition_speed_label, self._audition_status_label):
             label.setObjectName("statusChip")
-        audition.addWidget(self._play_pause_button); audition.addWidget(self._loop_check); audition.addWidget(self._auto_audition_check); audition.addWidget(self._audition_time_label); audition.addWidget(self._audition_speed_label); audition.addWidget(self._audition_status_label); audition.addStretch()
+        audition.addWidget(self._play_pause_button); audition.addWidget(self._loop_check); audition.addWidget(self._auto_audition_check); audition.addWidget(self._audition_time_label); audition.addWidget(self._audition_speed_label); audition.addWidget(self._audition_status_label); audition.addWidget(self._timeline_gesture_hint); audition.addStretch()
         lay.addWidget(playback_toolbar)
         self._playback_controller.position_changed.connect(self._on_playback_position_changed)
         self._playback_controller.state_changed.connect(self._on_playback_state_changed)
@@ -1741,6 +1743,11 @@ class MainWindow(QMainWindow):
                     pass
         self._refresh_selected_segment_audition()
 
+    def _select_segment_for_user(self, uid: str, *, scroll: bool = False) -> None:
+        """Apply an explicit user selection, then schedule its refreshed range."""
+        self._set_selected_segment_uid(uid, scroll=scroll)
+        self._schedule_selected_segment_auto_audition()
+
     def _refresh_selected_segment_audition(self) -> None:
         controller = self.__dict__.get("_playback_controller")
         if controller is None: return
@@ -1774,7 +1781,25 @@ class MainWindow(QMainWindow):
         schedule = getattr(controller, "schedule_auto_play", None)
         row = self._row_by_uid(self.__dict__.get("_selected_segment_uid", ""))
         start, end = self._row_time_values(row) if row is not None else (None, None)
-        if not callable(schedule) or start is None or end is None or end - start < WAVEFORM_MIN_SEGMENT_MS:
+        try:
+            speed = effective_segment_speed(self._current_default_speed(), row.speed_override_value()) if row is not None else 0
+        except (TypeError, ValueError):
+            speed = 0
+        duration = self.__dict__.get("_audio_duration_ms")
+        is_available = getattr(controller, "is_available", None)
+        has_source = getattr(controller, "has_source", None)
+        if (
+            not callable(schedule)
+            or start is None
+            or end is None
+            or end - start < WAVEFORM_MIN_SEGMENT_MS
+            or (duration is not None and end > duration)
+            or speed <= 0
+            or not callable(is_available)
+            or not is_available()
+            or not callable(has_source)
+            or not has_source()
+        ):
             self._cancel_selected_segment_auto_audition()
             return False
         return bool(schedule())
@@ -1846,13 +1871,40 @@ class MainWindow(QMainWindow):
 
     def _on_segment_row_selected(self, row: SegmentRow) -> None:
         if row in self._rows:
-            self._set_selected_segment_uid(row.uid)
+            self._select_segment_for_user(row.uid)
 
     def _on_waveform_segment_hovered(self, uid: str) -> None:
         self._set_hovered_segment_uid(uid)
 
     def _on_waveform_segment_selected(self, uid: str) -> None:
-        self._set_selected_segment_uid(uid, scroll=True)
+        self._select_segment_for_user(uid)
+
+    def _on_waveform_segment_seek_requested(self, uid: str, position_ms: int) -> None:
+        uid = str(uid or "")
+        if not uid or uid != self.__dict__.get("_selected_segment_uid", ""):
+            return
+        row = self._row_by_uid(uid)
+        start, end = self._row_time_values(row) if row is not None else (None, None)
+        if start is None or end is None or end - start < WAVEFORM_MIN_SEGMENT_MS:
+            return
+        duration = self.__dict__.get("_audio_duration_ms")
+        if duration is not None and end > int(duration):
+            return
+        try:
+            speed = effective_segment_speed(self._current_default_speed(), row.speed_override_value())
+        except (TypeError, ValueError):
+            return
+        controller = self.__dict__.get("_playback_controller")
+        if controller is None or not controller.is_available() or not controller.has_source():
+            return
+        position = max(int(start), min(int(end) - 1, int(position_ms)))
+        self._cancel_selected_segment_auto_audition()
+        audition_range = getattr(controller, "audition_range", lambda: None)()
+        if audition_range != (int(start), int(end)):
+            controller.set_audition_range(int(start), int(end), speed)
+        controller.seek_ms(position)
+        if controller.play():
+            self._waveform_panel.set_playback_position_ms(position)
 
     def _on_join_group_previewed(self, row: SegmentRow) -> None:
         if row in self._rows and self._row_join_mode(row):
@@ -3107,6 +3159,9 @@ class MainWindow(QMainWindow):
             if duration_ms > 0:
                 end = min(duration_ms, end)
             self._set_linked_interval_values(cascade_rows, int(old_start), end)
+        if self.__dict__.get("_waveform_drag_kind") == "move":
+            self._refresh_waveform_segments()
+            return
         self._set_selected_segment_uid(row.uid)
         self._refresh_waveform_segments()
         self._schedule_segment_time_validation()
@@ -3115,6 +3170,10 @@ class MainWindow(QMainWindow):
 
     def _on_waveform_endpoint_committed(self) -> None:
         self._maybe_auto_sort_segments()
+        if self.__dict__.get("_waveform_drag_kind") == "move":
+            self._schedule_segment_time_validation()
+            self._schedule_arc_cut_warning_refresh()
+            self._mark_current_export_dirty()
         self._refresh_selected_segment_audition()
         self._schedule_selected_segment_auto_audition()
 
@@ -3123,10 +3182,16 @@ class MainWindow(QMainWindow):
         controller = self.__dict__.get("_playback_controller")
         if controller is not None:
             controller.stop(reset_to_start=False)
-        self._begin_segment_history_transaction("timeline_endpoint_drag", f"拖动片段{side}")
+        self._waveform_drag_kind = side
+        if side == "move":
+            self._begin_segment_history_transaction("timeline_segment_move", "平移片段")
+        else:
+            self._begin_segment_history_transaction("timeline_endpoint_drag", f"拖动片段{side}")
 
-    def _on_waveform_endpoint_drag_finished(self, _uid: str, _side: str) -> None:
-        self._commit_segment_history_transaction("timeline_endpoint_drag")
+    def _on_waveform_endpoint_drag_finished(self, _uid: str, side: str) -> None:
+        key = "timeline_segment_move" if side == "move" else "timeline_endpoint_drag"
+        self._commit_segment_history_transaction(key)
+        self.__dict__.pop("_waveform_drag_kind", None)
 
     def _request_waveform_for_current_song(self) -> None:
         panel = getattr(self, "_waveform_panel", None)

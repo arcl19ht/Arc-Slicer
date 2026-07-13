@@ -1,20 +1,20 @@
 # Arc Slicer Agent Handoff
 
-Read this document before changing the project. V2.4-A and V2.4-B are merged into `main`; the UI clarity refresh has passed Windows source-environment visual acceptance.
+Read this document before changing the project. V2.4 is complete and has passed Windows source-environment and final EXE acceptance.
 
 ## Current Baseline
 
 - Stable branch: `main`
-- Stable version: V2.3
+- Stable version: V2.4
 - V2.3 closing commit: `8316bba feat(v2.3): add timeline quick draft gesture`
-- Current feature branch: `feature/ui-clarity-refresh`
-- Current task: V2.4-C Windows EXE/OGG stability acceptance.
+- Current feature branch: `fix/v2.4-selection-auto-audition`
+- Current task: V2.5-A multi-difficulty foundation and compatibility audit.
 
 V2.2 is complete: AFF/audio slicing, `current_export` and `library_export`, songlist/packlist export, fixed pack sections, per-segment speed overrides, duplicate output-ID blocking, copy segment, and safe external shell merge. External merge uses an explicit plan and confirmation, backs up affected content, writes a manifest, attempts recovery on failure, and remembers a verified target `songs` directory.
 
 V2.3 is complete: waveform data and caching; waveform, time ruler, and timeline lanes; blank-area drag creation; endpoint editing; draft preview; Ctrl+click quick drafts; selected/hovered card-timeline linkage; automatic/manual sorting; `uid` and `link_group_id` grouping with break/rejoin and cascaded endpoint edits; undo/redo; and Delete, Backspace, Ctrl+S, and Ctrl+D shortcuts.
 
-V2.4-A provides manual audition of a selected complete segment from source `base.ogg`. V2.4-B adds a default-off, non-persistent 200ms debounce: only formal interval/effective-speed commits schedule playback; `textChanged` and timeline `mouseMove` do not. Manual play/pause and lifecycle changes cancel pending playback. Neither playback state nor the switch affects dirty state, history, or exports.
+V2.4-A provides manual audition of a selected complete segment from source `base.ogg`. V2.4-B adds a default-off, non-persistent 200ms debounce. V2.4-C makes explicit card/timeline selection refresh the selected range and schedule that debounce; rapid selection leaves only the final segment pending. A second click on an already selected timeline body seeks and plays from that point without changing its range, dirty state, or history. Dragging that selected body past the platform drag threshold translates its full interval, preserves its duration, and commits one history entry; linked members move together. Endpoint handles retain priority, and a first click on an unselected body only selects it. Looping always returns to the original segment start, never the last seek position. `textChanged` and timeline `mouseMove` do not schedule playback. Manual play/pause, input editing, drag start, and lifecycle changes cancel pending playback. Neither playback state nor the switch affects dirty state, history, or exports. V2.4 source and EXE acceptance are complete.
 
 The UI clarity refresh corrected interactive control rendering without changing behavior: auto sort, loop, and auto audition use true switches; form and export choices use square checkboxes; primary enabled/disabled states are visually distinct. `arc_slicer.ui.styles` is the sole global QSS source; `app.QSS` and `main_window.QSS` remain compatibility aliases.
 
@@ -75,4 +75,4 @@ Prefer restrained, low-noise PyQt UI with stable layouts and minimal configurati
 
 The V2.3 plan is historical. Use `README.md` and `docs/status/current-development-status.md` for current product status. Work beyond V2.3 must state clearly whether it is implemented, in development, awaiting manual acceptance, or not implemented.
 
-Next: V2.4-C Windows EXE/OGG stability. Windows source-environment UI acceptance is complete, but EXE validation remains pending. Outside an explicitly scoped task, do not add Combo snapping, multi-difficulty support, chart preview, a full DAW workflow, or a second playback engine.
+Next: V2.5-A must audit real chart filenames, difficulty/ratingClass mappings, target-shell formats, and slides migration before implementing multi-difficulty slicing. Preserve old slides with `2.aff` as their default. A segment may contain multiple AFF outputs, but its `base.ogg` must be cut once per segment/speed, never once per difficulty. Do not change external-merge safety boundaries. Combo snapping is cancelled due to insufficient current user value: do not implement combo parsing, snapping UI, endpoint snapping, or configuration without new explicit authorization. Do not add chart preview, a second playback engine, or DAW-style workflows while planning V2.5-A.
