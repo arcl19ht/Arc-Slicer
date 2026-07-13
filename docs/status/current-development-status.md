@@ -2,11 +2,12 @@
 
 ## 文档范围
 
-- 文档对应分支：`feature/v2.4-audio-audition`
-- 稳定基线：`main` 的 V2.3
+- 文档对应分支：`feature/v2.4-auto-audition`
+- 稳定基线：已合入 V2.4-A 的 `main`
 - V2.3 截止提交：`8316bba feat(v2.3): add timeline quick draft gesture`
-- V2.4-A rebase 后的代码提交：`bf3be77 fix(v2.4): handle Qt multimedia enum states`
-- 测试基线：374 passed，12 skipped
+- V2.4-B 分支起点：`f2186e8`
+- V2.4-B 代码提交：`99d0b65 feat(v2.4): add debounced automatic audition`
+- 测试基线：380 passed，12 skipped
 
 V2.4-A 的三个功能提交因本地 rebase 到 V2.3 文档基线而获得新 hash；当前文档提交位于它们之后。历史需求书和 V2.3 实施计划保留其当时的设计上下文，不作为当前状态判断依据。
 
@@ -26,21 +27,22 @@ V2.4-A 的三个功能提交因本地 rebase 到 V2.3 文档基线而获得新 h
 - `uid` 与 `link_group_id`，断链、重连和级联端点编辑。
 - 片段撤销/重做，以及 Delete、Backspace、Ctrl+S、Ctrl+D 快捷键。
 
-## 正在开发
+## 已实现
 
-V2.4-A 音频试听位于独立分支 `feature/v2.4-audio-audition`，不包含在 `main` 中。已实现对当前选中的完整片段使用源 `base.ogg` 手动试听：播放/暂停/恢复、循环开关、空格快捷键、有效倍速、播放头显示，以及切换片段时停止旧播放。试听不生成临时切片，播放状态不写入撤销历史，也不标记导出 dirty。
+V2.4-A 已合入 `main`：对当前选中的完整片段使用源 `base.ogg` 手动试听，支持播放/暂停/恢复、循环、空格、有效倍速、播放头与切换片段停止旧播放。
+
+V2.4-B 已实现：默认关闭且不持久化的自动试听开关；正式区间/有效倍速提交后的 200ms 防抖；连续提交最后一次生效；输入、拖动和手动播放期间取消 pending。自动试听不生成临时切片，不进入撤销历史，不标记导出 dirty。
 
 ## 尚待人工验收
 
-- V2.4-A 的真实声音、有效倍速和循环边界。
-- 打包 EXE 中的 OGG 试听。
+- V2.4-B 连续切点修改、倍速、循环边界与快速操作的真实听感。
+- 打包 EXE 中的 OGG 自动试听。
 
 ## 尚未实现
 
-- 边界修改后的自动试听和 150--300ms 自动试听防抖。
 - Combo snapping、多难度切片和谱面预览。
 
-V2.4-A 不是完整 V2.4 完成版本；在上述人工验收和后续范围完成前，不应将 V2.4 标记为完成。
+下一阶段为 V2.4-C Windows EXE 与 OGG 稳定性专项。V2.4 仍不应在上述人工验收完成前标记为完整完成版本。
 
 ## 文档更新规则
 
