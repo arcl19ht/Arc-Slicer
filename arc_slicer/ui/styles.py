@@ -51,7 +51,9 @@ QCheckBox::indicator:checked:hover {{ background: {C_ACCENT_H}; border-color: {C
 QCheckBox::indicator:disabled {{ background: #EAECF0; border-color: #98A2B3; }}
 QCheckBox::indicator:checked:disabled {{ background: #98A2B3; }}
 
-QFrame#songTopbar, QFrame#exportCard, QFrame#externalMergeCard, QFrame#actionBar, QFrame#directoryDisplay {{ background: {C_CARD}; border: 1px solid {C_BORDER}; border-radius: 10px; }}
+QFrame#songTopbar, QFrame#difficultyPanel, QFrame#exportCard, QFrame#externalMergeCard, QFrame#actionBar, QFrame#directoryDisplay {{ background: {C_CARD}; border: 1px solid {C_BORDER}; border-radius: 10px; }}
+QFrame#difficultyPanel QFrame {{ background: {C_CARD2}; border: 1px solid {C_BORDER}; border-radius: 6px; }}
+QLabel#difficultyNotice {{ padding: 2px 0; }}
 QFrame#playbackToolbar {{ background: {C_CARD2}; border: 1px solid {C_BORDER}; border-radius: 8px; }}
 QFrame#pathDisplay {{ background: {C_CARD2}; border: 1px solid {C_BORDER}; border-radius: 6px; }}
 QFrame#segmentCard {{ background: {C_CARD}; border: 1px solid {C_BORDER}; border-radius: 10px; }}

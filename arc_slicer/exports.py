@@ -163,15 +163,11 @@ class MultiDifficultyExportPlan:
 
     @property
     def audio_operation_count(self) -> int:
-        return len(self.segments)
+        return sum(len(item.audio_operations) for item in self.segments)
 
     @property
     def chart_operation_count(self) -> int:
         return sum(len(item.chart_operations) for item in self.segments)
-
-    @property
-    def audio_operation_count(self) -> int:
-        return sum(len(item.audio_operations) for item in self.segments)
 
 
 def build_multi_difficulty_export_plan(
@@ -274,8 +270,8 @@ def build_multi_difficulty_songlist_entries(
                 raise ValueError(f"ratingClass {rating_class} 缺少 rating")
             difficulty_entry = {
                 "ratingClass": rating_class,
-                "chartDesigner": metadata.chart_designer,
-                "jacketDesigner": metadata.jacket_designer,
+                "chartDesigner": metadata.chart_designer or template.chart_designer,
+                "jacketDesigner": metadata.jacket_designer or template.jacket_designer,
                 "rating": metadata.rating,
                 "ratingPlus": metadata.rating_plus,
             }
@@ -1113,6 +1109,8 @@ def do_slice(
     library_export_enabled: bool = True,
     packlist_enabled: bool = False,
     pack_template: PackTemplate | None = None,
+    selected_difficulties=None,
+    difficulty_metadata=None,
     *,
     ffmpeg_getter=default_get_ffmpeg,
     slice_ogg_fn=default_slice_ogg,
@@ -1156,15 +1154,17 @@ def do_slice(
         return 1
 
     in_dir = songs_dir / song_id
-    in_aff, in_ogg = in_dir / "2.aff", in_dir / "base.ogg"
+    in_ogg = in_dir / "base.ogg"
+    if not in_ogg.is_file():
+        log_fn(f"✗ 找不到文件: {in_ogg}", "err")
+        return 1
 
-    for p in (in_aff, in_ogg):
-        if not p.exists():
-            log_fn(f"✗ 找不到文件: {p}", "err")
-            return 1
-
+    # Omitted arguments preserve the established FTR-only export contract.
+    selected_difficulties = [2] if selected_difficulties is None else selected_difficulties
     try:
-        segment_plan = build_segment_export_plan(song_id, segments, speed)
+        multi_plan = build_multi_difficulty_export_plan(
+            in_dir, song_id, segments, speed, selected_difficulties,
+        )
     except ValueError as ex:
         log_fn(f"✗ {ex}", "err")
         return 1
@@ -1179,6 +1179,16 @@ def do_slice(
             log_fn(f"✗ Packlist 信息无效: {ex}", "err")
             return 1
 
+    all_song_entries: list[dict] = []
+    if songlist_enabled and song_template:
+        try:
+            all_song_entries = build_multi_difficulty_songlist_entries(
+                song_template, multi_plan, difficulty_metadata,
+            )
+        except ValueError as ex:
+            log_fn(f"✗ Songlist 难度信息无效: {ex}", "err")
+            return 1
+
     try:
         stage_root = stage_creator()
     except RuntimeError as ex:
@@ -1186,10 +1196,9 @@ def do_slice(
         return 1
 
     out_root = stage_root / "songs"
-    all_song_entries: list[dict] = []
-
     try:
-        for item in segment_plan:
+        for segment_operation in multi_plan.segments:
+            item = segment_operation.segment
             s, e = item["s"], item["e"]
             segment_speed = item["speed"]
             new_id = item["id"]
@@ -1198,25 +1207,29 @@ def do_slice(
 
             copy_song_jackets(in_dir, out_dir)
 
-            log_fn(f"  ♪ 音频 {s}ms – {e}ms  speed={segment_speed}…", "stage")
-            try:
-                slice_ogg_fn(in_ogg, out_dir / "base.ogg", s, e, segment_speed)
-            except subprocess.CalledProcessError as ex:
-                log_fn(f"✗ ffmpeg 失败: {ex}", "err")
-                stage_cleanup(stage_root)
-                return 1
+            for audio_operation in segment_operation.audio_operations:
+                source_label = "默认音源" if audio_operation.rating_class is None else f"{audio_operation.rating_class}.ogg 专属音源"
+                log_fn(f"  ♪ {source_label} {audio_operation.output_filename} {s}ms – {e}ms speed={segment_speed}…", "stage")
+                try:
+                    slice_ogg_fn(audio_operation.source_path, out_dir / audio_operation.output_filename, s, e, segment_speed)
+                except subprocess.CalledProcessError as ex:
+                    log_fn(f"✗ ffmpeg 失败: {ex}", "err")
+                    stage_cleanup(stage_root)
+                    return 1
 
-            log_fn(f"  ✎ 谱面 {s}ms – {e}ms…", "stage")
-            aff_warnings: list[str] = []
-            new_aff = slice_aff_fn(in_aff.read_text(encoding="utf-8", errors="replace"), s, e, segment_speed, aff_warnings)
-            for warning in aff_warnings:
-                log_fn(f"  ⚠ {warning}", "warn")
-            (out_dir / "2.aff").write_text(new_aff, encoding="utf-8")
+            for chart_operation in segment_operation.chart_operations:
+                definition = chart_operation.difficulty
+                log_fn(f"  ✎ {definition.abbreviation} {chart_operation.output_filename} {s}ms – {e}ms…", "stage")
+                aff_warnings: list[str] = []
+                new_aff = slice_aff_fn(
+                    chart_operation.source_path.read_text(encoding="utf-8", errors="replace"),
+                    s, e, segment_speed, aff_warnings,
+                )
+                for warning in aff_warnings:
+                    log_fn(f"  ⚠ {definition.abbreviation}: {warning}", "warn")
+                (out_dir / chart_operation.output_filename).write_text(new_aff, encoding="utf-8")
 
             if songlist_enabled and song_template:
-                display_title = build_segment_display_title(song_template.title_base or song_id, s, e, segment_speed)
-                entry = build_songlist_entry(song_template, new_id, display_title, s, e, segment_speed)
-                all_song_entries.append(entry)
                 log_fn(f"  ✎ songlist → {new_id}", "stage")
 
             log_fn(f"✓ 输出 → out/current_export/songs/{new_id}/", "ok")

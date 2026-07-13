@@ -155,6 +155,11 @@ from arc_slicer.ui.styles import QSS as _APP_QSS
 from arc_slicer.ui.check_box import SemanticCheckBox
 from arc_slicer.ui.combo_box import VisualComboBox
 from arc_slicer.ui.toggle_switch import ToggleSwitch
+from arc_slicer.difficulties import (
+    DifficultyMetadata, discover_song_difficulties, is_multi_difficulty_song_dir,
+    normalize_difficulty_metadata_map, restore_selected_difficulties,
+    serialize_difficulty_metadata_map,
+)
 
 from arc_slicer import exports as _exports_core
 from arc_slicer import persistence as _persistence_core
@@ -282,7 +287,7 @@ def slice_aff(aff_text: str, start_ms: int, end_ms: int, speed: float, warnings:
 
 
 def is_sliceable_song_dir(path: Path) -> bool:
-    return path.is_dir() and (path / "base.ogg").is_file() and (path / "2.aff").is_file()
+    return is_multi_difficulty_song_dir(path)
 
 
 
@@ -521,6 +526,8 @@ def do_slice(
     library_export_enabled: bool = True,
     packlist_enabled: bool = False,
     pack_template: PackTemplate | None = None,
+    selected_difficulties=None,
+    difficulty_metadata=None,
 ) -> int:
     return _exports_core.do_slice(
         songs_dir,
@@ -535,6 +542,8 @@ def do_slice(
         library_export_enabled,
         packlist_enabled,
         pack_template,
+        selected_difficulties,
+        difficulty_metadata,
         ffmpeg_getter=_get_ffmpeg,
         slice_ogg_fn=slice_ogg,
         slice_aff_fn=slice_aff,
@@ -952,6 +961,9 @@ class SlicerWorker(_workers_core.SlicerWorker):
         library_export_enabled: bool = True,
         packlist_enabled: bool = False,
         pack_template: PackTemplate | None = None,
+        *,
+        selected_difficulties=None,
+        difficulty_metadata=None,
     ):
         super().__init__(
             songs_dir,
@@ -968,6 +980,8 @@ class SlicerWorker(_workers_core.SlicerWorker):
             slice_fn=do_slice,
             packlist_enabled_fn=effective_packlist_export_enabled,
             library_enabled_fn=effective_library_export_enabled,
+            selected_difficulties=selected_difficulties,
+            difficulty_metadata=difficulty_metadata,
         )
 
 
@@ -1109,6 +1123,12 @@ class MainWindow(QMainWindow):
         self._segment_validation_timer.timeout.connect(self._refresh_segment_time_validation)
         self._audio_duration_ms: int | None = None
         self._audio_duration_error = ""
+        self._difficulty_discovery = None
+        self._selected_difficulties: tuple[int, ...] = ()
+        self._difficulty_metadata: dict[int, DifficultyMetadata] = {}
+        self._difficulty_settings_by_song: dict[str, dict] = {}
+        self._difficulty_syncing = False
+        self._preview_audio_filename = "base.ogg"
         self._playback_controller = AudioPlaybackController(self)
         self._auto_audition_enabled = False
 
@@ -1128,6 +1148,7 @@ class MainWindow(QMainWindow):
         finally:
             self._suppress_source_reset = False
             self._current_source_id = self._song_box.currentText()
+        self._load_difficulty_state_for_current_song(is_new_song=True)
         self._request_waveform_for_current_song()
         if self._current_export_dirty:
             self._invalidate_external_merge_plan()
@@ -1244,6 +1265,30 @@ class MainWindow(QMainWindow):
         tb_lay.addLayout(speed_col)
 
         lay.addWidget(topbar)
+        lay.addSpacing(12)
+
+        self._difficulty_panel = QFrame()
+        self._difficulty_panel.setObjectName("difficultyPanel")
+        difficulty_lay = QVBoxLayout(self._difficulty_panel)
+        difficulty_lay.setContentsMargins(14, 12, 14, 12)
+        difficulty_lay.setSpacing(7)
+        difficulty_heading = QHBoxLayout()
+        difficulty_heading.addWidget(make_label("谱面难度", size=14, weight=700, color=C_TEXT2))
+        difficulty_heading.addStretch()
+        self._difficulty_summary = make_label("正在检查…", size=12, color=C_MUTED)
+        self._difficulty_summary.setObjectName("difficultySummary")
+        difficulty_heading.addWidget(self._difficulty_summary)
+        difficulty_lay.addLayout(difficulty_heading)
+        self._difficulty_notice = make_label("", size=12, color=C_ERR)
+        self._difficulty_notice.setObjectName("difficultyNotice")
+        self._difficulty_notice.setWordWrap(True)
+        difficulty_lay.addWidget(self._difficulty_notice)
+        self._difficulty_rows_widget = QWidget()
+        self._difficulty_rows_layout = QVBoxLayout(self._difficulty_rows_widget)
+        self._difficulty_rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._difficulty_rows_layout.setSpacing(6)
+        difficulty_lay.addWidget(self._difficulty_rows_widget)
+        lay.addWidget(self._difficulty_panel)
         lay.addSpacing(22)
 
         # ── 段落标题
@@ -1301,13 +1346,20 @@ class MainWindow(QMainWindow):
         self._auto_audition_check.setCursor(Qt.CursorShape.PointingHandCursor)
         self._auto_audition_check.setChecked(False)
         self._auto_audition_check.toggled.connect(self._set_auto_audition_enabled)
+        self._preview_audio_label = make_label("试听音源", size=12, color=C_MUTED)
+        self._preview_audio_box = VisualComboBox()
+        self._preview_audio_box.setObjectName("previewAudioSource")
+        self._preview_audio_box.setAccessibleName("试听音源")
+        self._preview_audio_box.currentIndexChanged.connect(self._on_preview_audio_source_changed)
+        self._preview_audio_label.setVisible(False)
+        self._preview_audio_box.setVisible(False)
         self._audition_time_label = make_label("0:00.000 / 0:00.000", size=12, color=C_MUTED)
         self._audition_speed_label = make_label("1×", size=12, color=C_MUTED)
         self._audition_status_label = make_label("请选择完整片段", size=12, color=C_LABEL)
         self._timeline_gesture_hint = make_label("选中后单击定位播放 · 拖动平移片段", size=12, color=C_LABEL)
         for label in (self._audition_time_label, self._audition_speed_label, self._audition_status_label):
             label.setObjectName("statusChip")
-        audition.addWidget(self._play_pause_button); audition.addWidget(self._loop_check); audition.addWidget(self._auto_audition_check); audition.addWidget(self._audition_time_label); audition.addWidget(self._audition_speed_label); audition.addWidget(self._audition_status_label); audition.addWidget(self._timeline_gesture_hint); audition.addStretch()
+        audition.addWidget(self._play_pause_button); audition.addWidget(self._loop_check); audition.addWidget(self._auto_audition_check); audition.addWidget(self._preview_audio_label); audition.addWidget(self._preview_audio_box); audition.addWidget(self._audition_time_label); audition.addWidget(self._audition_speed_label); audition.addWidget(self._audition_status_label); audition.addWidget(self._timeline_gesture_hint); audition.addStretch()
         lay.addWidget(playback_toolbar)
         self._playback_controller.position_changed.connect(self._on_playback_position_changed)
         self._playback_controller.state_changed.connect(self._on_playback_state_changed)
@@ -1334,6 +1386,7 @@ class MainWindow(QMainWindow):
         # ── Songlist 配置面板
         self._songlist_panel = SonglistPanel()
         self._songlist_panel.enabled_changed.connect(self._refresh_export_target_state)
+        self._songlist_panel.enabled_changed.connect(self._refresh_difficulty_panel)
         self._songlist_panel.enabled_changed.connect(self._mark_current_export_dirty)
         self._songlist_panel.metadata_changed.connect(self._mark_current_export_dirty)
         lay.addWidget(self._songlist_panel)
@@ -2208,6 +2261,224 @@ class MainWindow(QMainWindow):
                 pass
         self._add_segment(None, None)
 
+    def _current_song_dir(self) -> Path | None:
+        song_id = self._song_box.currentText()
+        if not isinstance(song_id, str) or not song_id or "目录为空" in song_id:
+            return None
+        raw_songs_dir = self._cfg.get("songs_dir", str(_window_dep(self, "default_songs_dir", DEFAULT_SONGS_DIR)))
+        if not isinstance(raw_songs_dir, (str, os.PathLike)):
+            return None
+        return Path(raw_songs_dir) / song_id
+
+    def _capture_difficulty_state(self) -> None:
+        song_id = str(getattr(self, "_current_source_id", "") or "")
+        if not song_id:
+            return
+        settings = self.__dict__.setdefault("_difficulty_settings_by_song", {})
+        selected = self.__dict__.get("_selected_difficulties", ())
+        metadata = self.__dict__.get("_difficulty_metadata", {})
+        if not isinstance(selected, (tuple, list, set)):
+            selected = ()
+        if not isinstance(metadata, dict):
+            metadata = {}
+        settings[song_id] = {
+            "selected_difficulties": list(selected),
+            "difficulty_metadata": serialize_difficulty_metadata_map(metadata),
+        }
+
+    def _difficulty_saved_state(self, song_id: str) -> dict:
+        value = self._difficulty_settings_by_song.get(str(song_id), {})
+        return dict(value) if isinstance(value, dict) else {}
+
+    def _set_difficulty_notice(self, text: str, error: bool = True) -> None:
+        self._difficulty_notice.setText(text)
+        self._difficulty_notice.setStyleSheet(
+            f"color: {C_ERR if error else C_MUTED}; background: transparent; border: none;"
+        )
+        self._difficulty_notice.setVisible(bool(text))
+
+    def _refresh_difficulty_panel(self) -> None:
+        layout = self._difficulty_rows_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        discovery = self._difficulty_discovery
+        if discovery is None:
+            self._difficulty_summary.setText("未选择歌曲")
+            self._set_difficulty_notice("")
+            return
+        available = discovery.available
+        self._difficulty_summary.setText(f"已发现 {len(available)} 个 · 已选择 {len(self._selected_difficulties)} 个")
+        notice = ""
+        if not available:
+            notice = "未发现可用的标准 AFF，无法运行切片。"
+        elif getattr(self, "_difficulty_restore_error", ""):
+            notice = self._difficulty_restore_error
+        elif not self._selected_difficulties:
+            notice = "至少需要选择一个难度后才能运行切片。"
+        elif discovery.invalid or discovery.unknown_aff_filenames or discovery.warnings:
+            details = [f"未知 AFF：{', '.join(discovery.unknown_aff_filenames)}" if discovery.unknown_aff_filenames else ""]
+            details.extend(discovery.warnings)
+            notice = "\n".join(item for item in details if item)
+        self._set_difficulty_notice(notice, bool(notice))
+        songlist_on = bool(self._songlist_panel.is_songlist_enabled()) if hasattr(self, "_songlist_panel") else False
+        for definition in available:
+            rating_class = definition.rating_class
+            row = QFrame()
+            row.setObjectName(f"difficultyRow{rating_class}")
+            row_lay = QVBoxLayout(row)
+            row_lay.setContentsMargins(8, 6, 8, 6)
+            row_lay.setSpacing(5)
+            headline = QHBoxLayout()
+            check = SemanticCheckBox(f"{definition.abbreviation} · {definition.aff_filename}")
+            check.setObjectName(f"difficultyCheck{rating_class}")
+            check.setAccessibleName(f"选择 {definition.display_name} 难度")
+            check.setChecked(rating_class in self._selected_difficulties)
+            check.toggled.connect(lambda checked, rc=rating_class: self._on_difficulty_toggled(rc, checked))
+            headline.addWidget(check)
+            headline.addStretch()
+            asset = discovery.override_audio_for(rating_class)
+            if asset is not None and asset.usable:
+                badge = make_label(f"专属音源 {asset.filename}", size=11, color=C_OK)
+                badge.setObjectName(f"difficultyAudioBadge{rating_class}")
+                headline.addWidget(badge)
+            row_lay.addLayout(headline)
+            if songlist_on and rating_class in self._selected_difficulties:
+                metadata = self._difficulty_metadata.get(rating_class, DifficultyMetadata(rating_class, None))
+                meta_grid = QGridLayout()
+                meta_grid.setContentsMargins(25, 0, 0, 0)
+                meta_grid.setHorizontalSpacing(7)
+                meta_grid.setVerticalSpacing(5)
+                rating_input = QLineEdit("" if metadata.rating is None else str(metadata.rating))
+                rating_input.setObjectName(f"difficultyRating{rating_class}")
+                rating_input.setPlaceholderText("rating")
+                plus = SemanticCheckBox("+")
+                plus.setObjectName(f"difficultyRatingPlus{rating_class}")
+                plus.setAccessibleName(f"{definition.abbreviation} ratingPlus")
+                plus.setChecked(metadata.rating_plus)
+                chart = QLineEdit(metadata.chart_designer)
+                chart.setObjectName(f"difficultyChartDesigner{rating_class}")
+                chart.setPlaceholderText("继承歌曲默认谱师")
+                jacket = QLineEdit(metadata.jacket_designer)
+                jacket.setObjectName(f"difficultyJacketDesigner{rating_class}")
+                jacket.setPlaceholderText("继承歌曲默认曲绘师")
+                title = QLineEdit(metadata.title_override_base)
+                title.setObjectName(f"difficultyTitleOverride{rating_class}")
+                title.setPlaceholderText("难度专属标题（可选）")
+                meta_grid.addWidget(make_label("定数", size=11, color=C_LABEL), 0, 0)
+                meta_grid.addWidget(rating_input, 0, 1)
+                meta_grid.addWidget(plus, 0, 2)
+                meta_grid.addWidget(chart, 0, 3)
+                meta_grid.addWidget(jacket, 0, 4)
+                meta_grid.addWidget(title, 1, 1, 1, 4)
+                row_lay.addLayout(meta_grid)
+                for control in (rating_input, chart, jacket, title):
+                    control.editingFinished.connect(lambda rc=rating_class: self._commit_difficulty_metadata(rc))
+                plus.toggled.connect(lambda _checked, rc=rating_class: self._commit_difficulty_metadata(rc))
+                row._difficulty_inputs = (rating_input, plus, chart, jacket, title)
+            layout.addWidget(row)
+
+    def _load_difficulty_state_for_current_song(self, is_new_song: bool = False) -> None:
+        song_dir = self._current_song_dir()
+        self._preview_audio_filename = "base.ogg"
+        self._difficulty_discovery = discover_song_difficulties(song_dir) if song_dir is not None else None
+        saved = self._difficulty_saved_state(self._song_box.currentText())
+        self._difficulty_restore_error = ""
+        if self._difficulty_discovery is None:
+            self._selected_difficulties = ()
+            self._difficulty_metadata = {}
+        else:
+            restored = restore_selected_difficulties(saved, self._difficulty_discovery.available, is_new_song=is_new_song)
+            self._selected_difficulties = restored.selected
+            self._difficulty_restore_error = restored.error
+            try:
+                legacy = self._songlist_panel.get_form_data() if hasattr(self, "_songlist_panel") else {}
+                self._difficulty_metadata = normalize_difficulty_metadata_map(
+                    saved.get("difficulty_metadata"), legacy_ftr_data=legacy,
+                )
+            except ValueError as ex:
+                self._difficulty_metadata = {}
+                self._difficulty_restore_error = str(ex)
+        self._refresh_difficulty_panel()
+        self._refresh_preview_audio_sources()
+
+    def _on_difficulty_toggled(self, rating_class: int, checked: bool) -> None:
+        if self._difficulty_syncing:
+            return
+        selected = set(self._selected_difficulties)
+        if checked:
+            selected.add(rating_class)
+        else:
+            selected.discard(rating_class)
+        self._selected_difficulties = tuple(sorted(selected))
+        self._difficulty_restore_error = ""
+        capture_difficulty = getattr(self, "_capture_difficulty_state", None)
+        if callable(capture_difficulty):
+            capture_difficulty()
+        self._refresh_difficulty_panel()
+        self._mark_current_export_dirty()
+        if hasattr(self, "_btn_run") and not self._slicer_is_running():
+            self._btn_run.setEnabled(bool(self._selected_difficulties) and not bool(self._difficulty_restore_error))
+
+    def _commit_difficulty_metadata(self, rating_class: int) -> None:
+        row = self.findChild(QFrame, f"difficultyRow{rating_class}")
+        inputs = getattr(row, "_difficulty_inputs", None) if row is not None else None
+        if not inputs:
+            return
+        rating_input, plus, chart, jacket, title = inputs
+        text = rating_input.text().strip()
+        try:
+            rating = None if not text else int(text)
+        except ValueError:
+            self._set_difficulty_notice(f"{rating_class}.aff 的 rating 必须是非负整数")
+            return
+        if rating is not None and rating < 0:
+            self._set_difficulty_notice(f"{rating_class}.aff 的 rating 必须是非负整数")
+            return
+        self._difficulty_metadata[rating_class] = DifficultyMetadata(
+            rating_class, rating, plus.isChecked(), chart.text().strip(), jacket.text().strip(), title.text().strip(),
+        )
+        self._capture_difficulty_state()
+        self._mark_current_export_dirty()
+
+    def _refresh_preview_audio_sources(self) -> None:
+        box = getattr(self, "_preview_audio_box", None)
+        if box is None:
+            return
+        options = [("默认音源 · base.ogg", "base.ogg")]
+        discovery = self._difficulty_discovery
+        if discovery is not None:
+            for asset in discovery.usable_override_audio:
+                definition = next(item for item in discovery.available if item.rating_class == asset.rating_class)
+                options.append((f"{definition.abbreviation} 专属 · {asset.filename}", asset.filename))
+        previous = self._preview_audio_filename
+        self._difficulty_syncing = True
+        try:
+            box.clear()
+            for label, filename in options:
+                box.addItem(label, filename)
+            index = next((i for i, (_label, filename) in enumerate(options) if filename == previous), 0)
+            box.setCurrentIndex(index)
+            self._preview_audio_filename = options[index][1]
+        finally:
+            self._difficulty_syncing = False
+        visible = len(options) > 1
+        self._preview_audio_label.setVisible(visible)
+        box.setVisible(visible)
+
+    def _on_preview_audio_source_changed(self, index: int) -> None:
+        if self._difficulty_syncing or index < 0:
+            return
+        filename = self._preview_audio_box.itemData(index)
+        if not isinstance(filename, str) or not filename:
+            return
+        self._cancel_selected_segment_auto_audition()
+        self._playback_controller.stop(reset_to_start=False)
+        self._preview_audio_filename = filename
+        self._request_waveform_for_current_song()
+
     def _get_songs(self) -> list[str]:
         d = Path(self._cfg.get("songs_dir", ""))
         if not d.is_dir():
@@ -2233,6 +2504,17 @@ class MainWindow(QMainWindow):
 
     def _apply_slides(self, data: dict):
         self._cancel_timeline_quick_draft()
+        raw_settings = data.get("difficulty_settings_by_song", {})
+        self._difficulty_settings_by_song = (
+            {str(key): dict(value) for key, value in raw_settings.items() if isinstance(value, dict)}
+            if isinstance(raw_settings, dict) else {}
+        )
+        legacy_song_id = str(data.get("song_id") or "")
+        if legacy_song_id and legacy_song_id not in self._difficulty_settings_by_song:
+            self._difficulty_settings_by_song[legacy_song_id] = {
+                "selected_difficulties": data.get("selected_difficulties", [2]),
+                "difficulty_metadata": data.get("difficulty_metadata", {}),
+            }
         # V2.3 persisted manual ordering as a sort mode. The refreshed UI models
         # it as the automatic-sort switch being off while preserving row order.
         legacy_sort_mode = str(data.get("sort_mode") or "").strip().lower()
@@ -2278,6 +2560,9 @@ class MainWindow(QMainWindow):
             self._songlist_panel.set_meta(data["songlist"])
         if hasattr(self._songlist_panel, "update_pack_defaults"):
             self._songlist_panel.update_pack_defaults(self._song_box.currentText())
+        load_difficulty = self.__dict__.get("_load_difficulty_state_for_current_song")
+        if callable(load_difficulty):
+            load_difficulty()
         if hasattr(self, "_current_export_check"):
             self._current_export_check.setChecked(_bool_pref(data.get("current_export_enabled"), True))
         if hasattr(self, "_library_export_check"):
@@ -2314,12 +2599,19 @@ class MainWindow(QMainWindow):
             if hasattr(self, "_request_waveform_for_current_song"):
                 self._request_waveform_for_current_song()
             return
+        capture_difficulty = getattr(self, "_capture_difficulty_state", None)
+        if callable(capture_difficulty):
+            capture_difficulty()
         self._current_source_id = song_id
         self._cancel_timeline_quick_draft()
         if hasattr(self._songlist_panel, "reset_for_source"):
             self._songlist_panel.reset_for_source(song_id)
         self._clear_segments()
         self._add_segment(None, None)
+        load_difficulty = getattr(self, "_load_difficulty_state_for_current_song", None)
+        if callable(load_difficulty):
+            settings = self.__dict__.get("_difficulty_settings_by_song", {})
+            load_difficulty(is_new_song=song_id not in settings)
         self._refresh_current_audio_duration()
         self._schedule_arc_cut_warning_refresh()
         if hasattr(self, "_request_waveform_for_current_song"):
@@ -2865,16 +3157,15 @@ class MainWindow(QMainWindow):
         self._segment_validation_timer.start(120)
 
     def _current_audio_path(self) -> Path | None:
-        song_id = self._song_box.currentText()
-        if not isinstance(song_id, str) or not song_id or "目录为空" in song_id:
+        song_dir = self._current_song_dir()
+        if song_dir is None:
             return None
-        cfg = getattr(self, "_cfg", {})
-        default_songs_dir = _window_dep(self, "default_songs_dir", DEFAULT_SONGS_DIR)
-        raw_songs_dir = cfg.get("songs_dir", str(default_songs_dir)) if isinstance(cfg, dict) else str(default_songs_dir)
-        if not isinstance(raw_songs_dir, (str, os.PathLike)):
-            return None
-        songs_dir = Path(raw_songs_dir)
-        return songs_dir / song_id / "base.ogg"
+        candidate = song_dir / str(self._preview_audio_filename or "base.ogg")
+        return candidate if candidate.is_file() else song_dir / "base.ogg"
+
+    def _canonical_audio_path(self) -> Path | None:
+        song_dir = self._current_song_dir()
+        return None if song_dir is None else song_dir / "base.ogg"
 
     def _waveform_segment_ranges(self) -> list[tuple]:
         ranges: list[tuple] = []
@@ -3241,7 +3532,8 @@ class MainWindow(QMainWindow):
         self._refresh_waveform_segments()
 
     def _refresh_current_audio_duration(self):
-        audio_path = self._current_audio_path()
+        # Segment validation always uses the canonical base source, not a preview override.
+        audio_path = self._canonical_audio_path()
         if audio_path is None or not audio_path.is_file():
             self._audio_duration_ms = None
             self._audio_duration_error = ""
@@ -3437,7 +3729,11 @@ class MainWindow(QMainWindow):
             "current_export_enabled": current_export_enabled,
             "library_export_enabled": library_export_enabled,
             "songlist": songlist_form,
+            "selected_difficulties": list(self.__dict__.get("_selected_difficulties", ()) or ()),
+            "difficulty_metadata": serialize_difficulty_metadata_map(self.__dict__.get("_difficulty_metadata", {}) or {}),
         }
+        self._capture_difficulty_state()
+        data["difficulty_settings_by_song"] = dict(self.__dict__.get("_difficulty_settings_by_song", {}) or {})
         return data
 
     # ── 保存 / 运行 / 打开 ────────────────────────────────────────────────────
@@ -3506,6 +3802,9 @@ class MainWindow(QMainWindow):
         if not data["segments"]:
             self._push_log("✗ 至少需要一个时间段", "err")
             return
+        if not self._selected_difficulties or self._difficulty_restore_error:
+            self._push_log(f"✗ {self._difficulty_restore_error or '至少需要选择一个难度'}", "err")
+            return
         songlist_template = None
         packlist_template = None
         if data.get("songlist_enabled"):
@@ -3545,6 +3844,8 @@ class MainWindow(QMainWindow):
             bool(data.get("library_export_enabled", True)),
             bool(data.get("packlist_enabled", False)),
             packlist_template,
+            selected_difficulties=tuple(self._selected_difficulties),
+            difficulty_metadata=dict(self._difficulty_metadata),
         )
         self._worker.log_signal.connect(self._push_log)
         self._worker.done_signal.connect(self._on_done)
@@ -3561,7 +3862,9 @@ class MainWindow(QMainWindow):
 
     def _set_running(self, on: bool):
         self._slicer_running = bool(on)
-        self._btn_run.setEnabled(not on)
+        selected = self.__dict__.get("_selected_difficulties", (2,))
+        restore_error = self.__dict__.get("_difficulty_restore_error", "")
+        self._btn_run.setEnabled(not on and bool(selected) and not bool(restore_error))
         self._btn_run.setText("▶  运行中…" if on else "▶  运行切片")
         self._update_external_merge_controls()
 

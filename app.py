@@ -55,6 +55,7 @@ except ImportError:  # Older headless tests install a small fake PyQt surface.
             return None
 
 import external_merge
+from arc_slicer.difficulties import is_multi_difficulty_song_dir
 from arc_slicer.ui.styles import QSS as _APP_QSS
 
 # ----- Extracted core modules -------------------------------------------------
@@ -227,7 +228,7 @@ def slice_aff(aff_text: str, start_ms: int, end_ms: int, speed: float, warnings:
 
 
 def is_sliceable_song_dir(path: Path) -> bool:
-    return path.is_dir() and (path / "base.ogg").is_file() and (path / "2.aff").is_file()
+    return is_multi_difficulty_song_dir(path)
 
 
 
@@ -466,6 +467,8 @@ def do_slice(
     library_export_enabled: bool = True,
     packlist_enabled: bool = False,
     pack_template: PackTemplate | None = None,
+    selected_difficulties=None,
+    difficulty_metadata=None,
 ) -> int:
     return _exports_core.do_slice(
         songs_dir,
@@ -480,6 +483,8 @@ def do_slice(
         library_export_enabled,
         packlist_enabled,
         pack_template,
+        selected_difficulties,
+        difficulty_metadata,
         ffmpeg_getter=_get_ffmpeg,
         slice_ogg_fn=slice_ogg,
         slice_aff_fn=slice_aff,
@@ -892,6 +897,9 @@ class SlicerWorker(_workers_core.SlicerWorker):
         library_export_enabled: bool = True,
         packlist_enabled: bool = False,
         pack_template: PackTemplate | None = None,
+        *,
+        selected_difficulties=None,
+        difficulty_metadata=None,
     ):
         super().__init__(
             songs_dir,
@@ -908,6 +916,8 @@ class SlicerWorker(_workers_core.SlicerWorker):
             slice_fn=do_slice,
             packlist_enabled_fn=effective_packlist_export_enabled,
             library_enabled_fn=effective_library_export_enabled,
+            selected_difficulties=selected_difficulties,
+            difficulty_metadata=difficulty_metadata,
         )
 
 

@@ -96,6 +96,9 @@ class SlicerWorker(QThread):
         slice_fn=None,
         packlist_enabled_fn=effective_packlist_export_enabled,
         library_enabled_fn=effective_library_export_enabled,
+        *,
+        selected_difficulties=None,
+        difficulty_metadata=None,
     ):
         super().__init__()
         self.songs_dir = songs_dir
@@ -109,6 +112,8 @@ class SlicerWorker(QThread):
         self.library_export_enabled = library_export_enabled
         self.packlist_enabled = packlist_enabled
         self.pack_template = pack_template
+        self.selected_difficulties = selected_difficulties
+        self.difficulty_metadata = difficulty_metadata
         self.slice_fn = slice_fn
         self.packlist_enabled_fn = packlist_enabled_fn
         self.library_enabled_fn = library_enabled_fn
@@ -146,6 +151,8 @@ class SlicerWorker(QThread):
             self.library_export_enabled,
             self.packlist_enabled,
             self.pack_template,
+            self.selected_difficulties,
+            self.difficulty_metadata,
         )
         if code == 0:
             log("all done: out/current_export/songs/", "ok")
