@@ -45,6 +45,7 @@ class AudioPlaybackController(QObject):
         self._auto_timer.timeout.connect(self._run_scheduled_auto_play)
         self._range: tuple[int, int] | None = None
         self._rate = 1.0
+        self._source_path: Path | None = None
         self._loop = True
         self._source_ready = False
         self._state = "unavailable" if not QT_MULTIMEDIA_AVAILABLE and media_player is None else "idle"
@@ -68,6 +69,7 @@ class AudioPlaybackController(QObject):
     def error_text(self) -> str: return self._error
     def audition_range(self): return self._range
     def playback_rate(self) -> float: return self._rate
+    def source_path(self) -> Path | None: return self._source_path
     def is_playing(self) -> bool: return self._state == "playing"
     def position_ms(self) -> int: return int(self._player.position()) if self._player is not None else 0
     def has_pending_auto_play(self) -> bool: return bool(getattr(self._auto_timer, "isActive", lambda: False)())
@@ -83,10 +85,12 @@ class AudioPlaybackController(QObject):
         path = Path(path) if path else None
         if path is None or not path.is_file():
             self._source_ready = False
+            self._source_path = None
             self._player.setSource(QUrl.fromLocalFile(""))
             self._set_state("idle"); return
         self._player.setSource(QUrl.fromLocalFile(str(path.resolve())))
         self._source_ready = True
+        self._source_path = path.resolve()
         self._set_state("ready")
 
     def set_audition_range(self, start_ms: int, end_ms: int, speed: float) -> None:

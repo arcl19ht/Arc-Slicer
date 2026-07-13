@@ -66,13 +66,19 @@ class WaveformWorker(QThread):
 
     def run(self):
         try:
+            if self.isInterruptionRequested():
+                return
             if self.waveform_loader is None:
                 from arc_slicer.waveform import load_or_generate_waveform
 
                 self.waveform_loader = load_or_generate_waveform
             data = self.waveform_loader(self.audio_path, self.samples_per_second, self.cache_dir)
+            if self.isInterruptionRequested():
+                return
             self.done_signal.emit(self.generation, str(self.audio_path), data, "")
         except Exception as ex:
+            if self.isInterruptionRequested():
+                return
             self.done_signal.emit(self.generation, str(self.audio_path), None, str(ex))
 
 

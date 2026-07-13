@@ -1125,6 +1125,7 @@ class MainWindow(QMainWindow):
         self._audio_duration_error = ""
         self._preview_audio_duration_ms: int | None = None
         self._preview_audio_duration_error = ""
+        self._selected_audition_spec: tuple[str, int, int, float] | None = None
         self._difficulty_discovery = None
         self._selected_difficulties: tuple[int, ...] = ()
         self._difficulty_metadata: dict[int, DifficultyMetadata] = {}
@@ -1820,6 +1821,7 @@ class MainWindow(QMainWindow):
         valid, reason = self._preview_range_is_valid(start, end)
         valid = valid and speed > 0
         if not valid:
+            self._selected_audition_spec = None
             self._cancel_selected_segment_auto_audition()
             controller.stop(reset_to_start=False); controller.clear_audition_range()
             self._waveform_panel.set_playback_position_ms(None)
@@ -1828,9 +1830,33 @@ class MainWindow(QMainWindow):
                 self._audition_status_label.setText(reason or "请选择完整片段")
             return
         controller.stop(); controller.set_audition_range(start, end, speed)
+        self._selected_audition_spec = self._selected_audition_spec_for(start, end, speed)
         if hasattr(self, "_play_pause_button"):
             self._play_pause_button.setEnabled(controller.is_available() and controller.has_source()); self._audition_speed_label.setText(f"{speed:g}×"); self._audition_time_label.setText(f"{format_duration_ms(0)} / {format_duration_ms(end-start)}"); self._audition_status_label.setText("就绪")
         self._waveform_panel.set_playback_position_ms(start)
+
+    def _selected_audition_spec_for(self, start: int, end: int, speed: float) -> tuple[str, int, int, float]:
+        try:
+            audio_path = self._current_audio_path()
+        except RuntimeError:
+            # Lightweight coordination tests intentionally construct a bare window.
+            audio_path = None
+        source = str(audio_path.resolve(strict=False)) if audio_path is not None else str(
+            self.__dict__.get("_preview_audio_filename", "base.ogg")
+        )
+        return (source, int(start), int(end), float(speed))
+
+    def _current_selected_audition_spec(self) -> tuple[str, int, int, float] | None:
+        row = self._row_by_uid(self.__dict__.get("_selected_segment_uid", ""))
+        start, end = self._row_time_values(row) if row is not None else (None, None)
+        try:
+            speed = effective_segment_speed(self._current_default_speed(), row.speed_override_value()) if row is not None else 0
+        except (TypeError, ValueError):
+            speed = 0
+        valid, _reason = self._preview_range_is_valid(start, end)
+        if not valid or speed <= 0:
+            return None
+        return self._selected_audition_spec_for(start, end, speed)
 
     def _auto_audition_is_enabled(self) -> bool:
         return bool(self.__dict__.get("_auto_audition_enabled", False))
@@ -1878,9 +1904,23 @@ class MainWindow(QMainWindow):
     def _toggle_selected_segment_playback(self) -> None:
         if self._is_text_editing_focus(): return
         self._cancel_selected_segment_auto_audition()
-        self._refresh_selected_segment_audition()
         controller = self.__dict__.get("_playback_controller")
-        if controller and controller.toggle_play_pause(): pass
+        if controller is None:
+            return
+        if callable(getattr(controller, "is_playing", None)) and controller.is_playing():
+            controller.pause()
+            return
+        desired_spec = self._current_selected_audition_spec()
+        if desired_spec is None:
+            self._refresh_selected_segment_audition()
+            return
+        if self.__dict__.get("_selected_audition_spec") != desired_spec:
+            self._refresh_selected_segment_audition()
+        play = getattr(controller, "play", None)
+        if callable(play):
+            play()
+        else:
+            controller.toggle_play_pause()
 
     def _preview_range_is_valid(self, start: int | None, end: int | None) -> tuple[bool, str]:
         if start is None or end is None or start < 0 or end - start < WAVEFORM_MIN_SEGMENT_MS:
@@ -3528,11 +3568,19 @@ class MainWindow(QMainWindow):
         panel = getattr(self, "_waveform_panel", None)
         if panel is None:
             return
+        audio_path = self._current_audio_path()
+        audio_key = str(audio_path) if audio_path is not None and audio_path.is_file() else ""
+        if audio_key and audio_key == self.__dict__.get("_waveform_audio_path", ""):
+            active = any(worker.isRunning() and str(worker.audio_path) == audio_key for worker in self.__dict__.get("_waveform_workers", []))
+            if active or self.__dict__.get("_waveform_worker") is None:
+                return
+        for worker in list(self.__dict__.get("_waveform_workers", [])):
+            if worker.isRunning():
+                worker.requestInterruption()
         self._cancel_timeline_quick_draft()
         self._waveform_generation += 1
         generation = self._waveform_generation
         self._refresh_waveform_segments()
-        audio_path = self._current_audio_path()
         self._refresh_preview_audio_duration(audio_path)
         self._playback_controller.set_source(audio_path if audio_path is not None and audio_path.is_file() else None)
         self._refresh_selected_segment_audition()
@@ -3548,15 +3596,10 @@ class MainWindow(QMainWindow):
         self._waveform_worker = worker
         self._waveform_workers.append(worker)
         worker.done_signal.connect(self._on_waveform_done)
+        worker.finished.connect(self._on_waveform_worker_finished)
         worker.start()
 
     def _on_waveform_done(self, generation: int, audio_path: str, data, error: str):
-        try:
-            sender = self.sender()
-            if sender in self._waveform_workers:
-                self._waveform_workers.remove(sender)
-        except Exception:
-            pass
         if generation != getattr(self, "_waveform_generation", 0):
             return
         if audio_path != getattr(self, "_waveform_audio_path", ""):
@@ -3571,6 +3614,17 @@ class MainWindow(QMainWindow):
             return
         panel.set_waveform(data)
         self._refresh_waveform_segments()
+
+    def _on_waveform_worker_finished(self) -> None:
+        self._release_waveform_worker(self.sender())
+
+    def _release_waveform_worker(self, worker) -> None:
+        if worker not in self.__dict__.get("_waveform_workers", []):
+            return
+        self._waveform_workers.remove(worker)
+        if self.__dict__.get("_waveform_worker") is worker:
+            self._waveform_worker = None
+        worker.deleteLater()
 
     def _refresh_preview_audio_duration(self, audio_path: Path | None) -> None:
         self._preview_audio_duration_ms = None
@@ -3967,11 +4021,19 @@ class MainWindow(QMainWindow):
         self._playback_controller.stop(reset_to_start=False)
         self._playback_controller.clear_audition_range()
         self._waveform_generation += 1
-        for worker in list(getattr(self, "_waveform_workers", [])):
+        self._waveform_audio_path = ""
+        workers = list(getattr(self, "_waveform_workers", []))
+        for worker in workers:
             try:
                 if worker.isRunning():
-                    worker.quit()
-                    worker.wait(500)
+                    worker.requestInterruption()
+            except Exception:
+                pass
+        for worker in workers:
+            try:
+                if worker.isRunning():
+                    worker.wait()
+                self._release_waveform_worker(worker)
             except Exception:
                 pass
         super().closeEvent(event)
