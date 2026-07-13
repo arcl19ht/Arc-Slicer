@@ -695,6 +695,7 @@ class V21PackUiTests(unittest.TestCase):
         panel._toggle_btn = self._Line()
         panel._pack_toggle_btn = self._Line()
         panel._inputs = {key: self._Line() for _label, key, _placeholder in app.SonglistPanel._FIELDS}
+        panel._inputs["rating"] = self._Line()
         panel._rating_plus = self._Check(False)
         panel._refresh_packlist_state()
         return panel
@@ -775,7 +776,7 @@ class V21PackUiTests(unittest.TestCase):
         self.assertEqual(data["bpm_base"], "")
         self.assertEqual(data["chart_designer"], "")
         self.assertEqual(data["jacket_designer"], "")
-        self.assertEqual(data["rating"], "")
+        self.assertEqual(data["rating"], 9)
         self.assertEqual(data["pack_description"], "")
         self.assertFalse(data["rating_plus"])
         self.assertEqual(data["pack_cover_source"], "auto")
