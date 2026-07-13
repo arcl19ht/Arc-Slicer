@@ -7,8 +7,10 @@ Read this document before changing the project. V2.4 is complete and has passed 
 - Stable branch: `main`
 - Stable version: V2.4
 - V2.3 closing commit: `8316bba feat(v2.3): add timeline quick draft gesture`
-- Current feature branch: `fix/v2.4-selection-auto-audition`
-- Current task: V2.5-A multi-difficulty foundation and compatibility audit.
+- Main stable baseline: `d7bbaed` (V2.4 PR #4 merge)
+- V2.4 closing documentation: `9ff4f05 docs: close v2.4 and plan multi-difficulty slicing`
+- Current feature branch: `feature/v2.5-multi-difficulty-audit`
+- Current task: V2.5-A multi-difficulty discovery, compatibility model, persistence helpers, and export-plan logic.
 
 V2.2 is complete: AFF/audio slicing, `current_export` and `library_export`, songlist/packlist export, fixed pack sections, per-segment speed overrides, duplicate output-ID blocking, copy segment, and safe external shell merge. External merge uses an explicit plan and confirmation, backs up affected content, writes a manifest, attempts recovery on failure, and remembers a verified target `songs` directory.
 
@@ -75,4 +77,4 @@ Prefer restrained, low-noise PyQt UI with stable layouts and minimal configurati
 
 The V2.3 plan is historical. Use `README.md` and `docs/status/current-development-status.md` for current product status. Work beyond V2.3 must state clearly whether it is implemented, in development, awaiting manual acceptance, or not implemented.
 
-Next: V2.5-A must audit real chart filenames, difficulty/ratingClass mappings, target-shell formats, and slides migration before implementing multi-difficulty slicing. Preserve old slides with `2.aff` as their default. A segment may contain multiple AFF outputs, but its `base.ogg` must be cut once per segment/speed, never once per difficulty. Do not change external-merge safety boundaries. Combo snapping is cancelled due to insufficient current user value: do not implement combo parsing, snapping UI, endpoint snapping, or configuration without new explicit authorization. Do not add chart preview, a second playback engine, or DAW-style workflows while planning V2.5-A.
+V2.5-A confirms one directory-driven standard mapping: `0.aff`/Past/PST/ratingClass 0 through `4.aff`/Eternal/ETR/ratingClass 4. Any existing subset is legal; do not require 0/1/2, do not make 3/4 mutually exclusive, and do not invent missing AFF files. `arc_slicer.difficulties` owns discovery, normalized song-level selections, old-slides migration, per-difficulty metadata helpers, and missing-selection reporting. If `N.aff` and usable `N.ogg` coexist, `audioOverride` is derived for N; an orphan or invalid `N.ogg` is reported and never silently falls back or enters an export plan. Each segment plan always has `base.ogg`, plus one operation for every selected usable override source. `build_multi_difficulty_songlist_entries()` aggregates every selected chart into one song ID and one difficulties array; 0/1/2 compatibility placeholders remain, while 3/4 only appear when selected. Difficulty title overrides are optional and independent from audio overrides; never derive `jacketOverride` from audio assets. These pure plans must not be wired to real export until V2.5-B. Preserve old slides with `2.aff` as their default, and do not change external-merge safety boundaries. Combo snapping is cancelled due to insufficient current user value: do not implement combo parsing, snapping UI, endpoint snapping, or configuration without new explicit authorization. Do not add chart preview, a second playback engine, or DAW-style workflows while planning V2.5-A.

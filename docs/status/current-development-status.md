@@ -4,7 +4,8 @@
 
 - 当前稳定版本：V2.4
 - V2.3 截止提交：`8316bba feat(v2.3): add timeline quick draft gesture`
-- V2.4 最终文档提交：`47c1f8a docs: document timeline seek and translation gestures`
+- main 稳定基线：`d7bbaed`（V2.4 PR #4 合并）
+- V2.4 收口文档提交：`9ff4f05 docs: close v2.4 and plan multi-difficulty slicing`
 - 测试基线：378 passed，12 skipped，75 subtests passed。
 
 历史需求书和 V2.3 实施计划保留其当时的设计上下文，不作为当前状态判断依据。
@@ -61,7 +62,15 @@
 
 ## 当前开发：V2.5-A 多难度基础与兼容模型
 
-V2.5-A 只做格式和兼容审计、难度发现与用户多选模型、slides 持久化及迁移设计、缺失/未知难度行为和 songlist difficulties 数据模型设计。旧 slides 必须默认继续使用 `2.aff`。当前不实现多 AFF 切片或 UI，也不假定难度仅为 0–3。
+当前分支：`feature/v2.5-multi-difficulty-audit`。V2.5-A 已实现单一难度定义、目录发现、选择规范化、旧 slides 兼容解析、每难度元数据迁移、缺失/未知难度报告和多难度导出/单条 songlist 聚合计划纯逻辑；尚未接入 UI 或正式写盘。
+
+已确认标准映射：`0.aff` = Past/PST/ratingClass 0，`1.aff` = Present/PRS/ratingClass 1，`2.aff` = Future/FTR/ratingClass 2，`3.aff` = Beyond/BYD/ratingClass 3，`4.aff` = Eternal/ETR/ratingClass 4。以目录实际存在的普通可读文件为准：任意 0–4 子集都合法，不要求 0/1/2 同时存在，3/4 同时存在也合法；未知名称 `.aff` 单独报告且不参与计划。
+
+新导入歌曲默认选择全部已发现难度。旧 slides 缺少选择字段时，若有 `2.aff` 则恢复为 `[2]`，否则恢复全部可用难度；显式空选择或已选文件缺失保持错误状态，不会静默全选或删除。选择是歌曲级状态，不复制到片段。
+
+`N.aff` 与可用 `N.ogg` 同时存在时，N 具有派生的 `audioOverride: true`；它不是用户输入，不保存到 slides。孤立或不可用的 `N.ogg` 产生明确 warning，不成为 available difficulty，也不进入计划。音频不变量已修正为“每个片段、每个不同源音频一条操作”：每片段始终有 `base.ogg`，并为每个实际选中且可用的专属 `N.ogg` 另建一条操作。
+
+V2.5-A 保持当前正式 FTR 导出和 songlist `ratingClass 0/1/2` 兼容占位不变。这些 compatibility entries 不等于物理 AFF 可用性或 V2.5-B 的已选 chart outputs。单条 songlist 计划会将一个片段的所有真实选中难度聚合到一个 song ID 和一个 difficulties 数组；0/1/2 未选中或不存在时为 `rating = -1` 占位，3/4 仅在实际选中时出现。可选难度标题覆盖独立于 `audioOverride`，空白或与普通标题相同则省略；不从音源推导 `jacketOverride`。
 
 V2.5-B 将负责难度选择 UI、持久化、多 AFF 切片、多难度导出和 songlist difficulties；V2.5-C 将负责缺失难度、真实歌曲、外部测试壳与 Windows EXE 验收。每个片段/倍速的 `base.ogg` 必须只切一次，既有 segment export ID 和 external merge 安全边界保持不变。
 

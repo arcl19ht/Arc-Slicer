@@ -18,6 +18,11 @@ from typing import Callable
 
 from arc_slicer.aff import _scale_bpm_string, slice_aff as default_slice_aff
 from arc_slicer.audio import _get_ffmpeg as default_get_ffmpeg, slice_ogg as default_slice_ogg
+from arc_slicer.difficulties import (
+    DifficultyDefinition, DifficultyMetadata, discover_song_difficulties,
+    difficulty_metadata_from_legacy, normalize_difficulty_metadata_map,
+    validate_selected_difficulties,
+)
 from arc_slicer.paths import DATA_ROOT, OUT_DIR, SONGLIST_EXAMPLE_PATH
 from arc_slicer.segments import effective_segment_speed, normalize_speed_token, validate_speed_value
 
@@ -115,6 +120,177 @@ def build_segment_export_plan(source_id: str, segments: list[dict], default_spee
             "id": segment_id,
         })
     return plan
+
+
+@dataclass(frozen=True)
+class ChartExportOperation:
+    difficulty: DifficultyDefinition
+    source_path: Path
+    output_filename: str
+    start_ms: int
+    end_ms: int
+    speed: float
+    audio_override: bool = False
+    override_audio_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class AudioExportOperation:
+    source_path: Path
+    output_filename: str
+    start_ms: int
+    end_ms: int
+    speed: float
+    rating_class: int | None = None
+
+
+@dataclass(frozen=True)
+class MultiDifficultySegmentExportPlan:
+    segment: dict
+    audio_operations: tuple[AudioExportOperation, ...]
+    chart_operations: tuple[ChartExportOperation, ...]
+
+    @property
+    def audio_output_filename(self) -> str:
+        """V2.5-A compatibility alias for the always-present base output."""
+        return "base.ogg"
+
+
+@dataclass(frozen=True)
+class MultiDifficultyExportPlan:
+    selected_difficulties: tuple[int, ...]
+    segments: tuple[MultiDifficultySegmentExportPlan, ...]
+
+    @property
+    def audio_operation_count(self) -> int:
+        return len(self.segments)
+
+    @property
+    def chart_operation_count(self) -> int:
+        return sum(len(item.chart_operations) for item in self.segments)
+
+    @property
+    def audio_operation_count(self) -> int:
+        return sum(len(item.audio_operations) for item in self.segments)
+
+
+def build_multi_difficulty_export_plan(
+    source_dir: Path,
+    source_id: str,
+    segments: list[dict],
+    default_speed: float,
+    selected_difficulties,
+) -> MultiDifficultyExportPlan:
+    """Build the V2.5-B operation order without invoking ffmpeg or writing output."""
+    source_dir = Path(source_dir)
+    discovery = discover_song_difficulties(source_dir)
+    validation = validate_selected_difficulties(selected_difficulties, discovery.available)
+    if validation.missing:
+        names = "、".join(str(item) + ".aff" for item in validation.missing)
+        raise ValueError(f"选中的难度文件不存在: {names}")
+
+    definitions = tuple(item for item in discovery.available if item.rating_class in validation.selected)
+    override_audio = {}
+    for definition in definitions:
+        asset = discovery.override_audio_for(definition.rating_class)
+        if asset is None:
+            continue
+        if not asset.usable:
+            raise ValueError(f"选中难度的专属音源不可用: {asset.filename} ({asset.reason})")
+        override_audio[definition.rating_class] = asset
+    segment_plan = build_segment_export_plan(source_id, segments, default_speed)
+    return MultiDifficultyExportPlan(
+        selected_difficulties=validation.selected,
+        segments=tuple(
+            MultiDifficultySegmentExportPlan(
+                segment=dict(item),
+                audio_operations=(
+                    AudioExportOperation(source_dir / "base.ogg", "base.ogg", item["s"], item["e"], item["speed"]),
+                    *tuple(
+                        AudioExportOperation(asset.path, asset.filename, item["s"], item["e"], item["speed"], rating_class)
+                        for rating_class, asset in sorted(override_audio.items())
+                    ),
+                ),
+                chart_operations=tuple(
+                    ChartExportOperation(
+                        definition,
+                        source_dir / definition.aff_filename,
+                        definition.aff_filename,
+                        item["s"],
+                        item["e"],
+                        item["speed"],
+                        definition.rating_class in override_audio,
+                        override_audio.get(definition.rating_class).path if definition.rating_class in override_audio else None,
+                    )
+                    for definition in definitions
+                ),
+            )
+            for item in segment_plan
+        ),
+    )
+
+
+def build_multi_difficulty_songlist_entries(
+    template: SongTemplate,
+    export_plan: MultiDifficultyExportPlan,
+    difficulty_metadata=None,
+) -> list[dict]:
+    """Aggregate selected charts into one songlist entry per segment without writing it."""
+    metadata_by_class = normalize_difficulty_metadata_map(
+        difficulty_metadata,
+        legacy_ftr_data={
+            "rating": template.rating,
+            "rating_plus": template.rating_plus,
+            "chart_designer": template.chart_designer,
+            "jacket_designer": template.jacket_designer,
+        },
+    )
+    entries: list[dict] = []
+    for segment_plan in export_plan.segments:
+        segment = segment_plan.segment
+        normal_title = build_segment_display_title(template.title_base, segment["s"], segment["e"], segment["speed"])
+        entry = build_songlist_entry(
+            template, segment["id"], normal_title, segment["s"], segment["e"], segment["speed"],
+        )
+        selected_operations = {item.difficulty.rating_class: item for item in segment_plan.chart_operations}
+        difficulties: list[dict] = []
+        for rating_class in range(5):
+            operation = selected_operations.get(rating_class)
+            if operation is None:
+                if rating_class > 2:
+                    continue
+                difficulties.append({
+                    "ratingClass": rating_class,
+                    "chartDesigner": template.chart_designer,
+                    "jacketDesigner": template.jacket_designer,
+                    "rating": -1,
+                    "ratingPlus": False,
+                })
+                continue
+            metadata = metadata_by_class.get(rating_class)
+            if metadata is None:
+                raise ValueError(f"ratingClass {rating_class} 缺少难度元数据")
+            if metadata.rating is None:
+                raise ValueError(f"ratingClass {rating_class} 缺少 rating")
+            difficulty_entry = {
+                "ratingClass": rating_class,
+                "chartDesigner": metadata.chart_designer,
+                "jacketDesigner": metadata.jacket_designer,
+                "rating": metadata.rating,
+                "ratingPlus": metadata.rating_plus,
+            }
+            if operation.audio_override:
+                difficulty_entry["audioOverride"] = True
+            if metadata.title_override_base:
+                override_title = build_segment_display_title(
+                    metadata.title_override_base, segment["s"], segment["e"], segment["speed"],
+                )
+                if override_title != normal_title:
+                    difficulty_entry["title_localized"] = {"en": override_title}
+            difficulties.append(difficulty_entry)
+        entry["difficulties"] = difficulties
+        entries.append(entry)
+    return entries
 
 
 def copy_song_jackets(source_dir: Path, out_dir: Path) -> list[Path]:
