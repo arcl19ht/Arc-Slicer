@@ -1,20 +1,20 @@
 # Arc Slicer Agent Handoff
 
-Read this document before changing the project. V2.3 is closed on `main`; this branch continues V2.4-A audio audition work.
+Read this document before changing the project. V2.4-A is merged into `main`; this branch implements V2.4-B automatic audition.
 
 ## Current Baseline
 
 - Stable branch: `main`
 - Stable version: V2.3
 - V2.3 closing commit: `8316bba feat(v2.3): add timeline quick draft gesture`
-- Current feature branch: `feature/v2.4-audio-audition`
-- Current task: V2.4-A selected-segment audio audition and manual acceptance.
+- Current feature branch: `feature/v2.4-auto-audition`
+- Current task: V2.4-B debounced automatic audition and manual acceptance.
 
 V2.2 is complete: AFF/audio slicing, `current_export` and `library_export`, songlist/packlist export, fixed pack sections, per-segment speed overrides, duplicate output-ID blocking, copy segment, and safe external shell merge. External merge uses an explicit plan and confirmation, backs up affected content, writes a manifest, attempts recovery on failure, and remembers a verified target `songs` directory.
 
 V2.3 is complete: waveform data and caching; waveform, time ruler, and timeline lanes; blank-area drag creation; endpoint editing; draft preview; Ctrl+click quick drafts; selected/hovered card-timeline linkage; automatic/manual sorting; `uid` and `link_group_id` grouping with break/rejoin and cascaded endpoint edits; undo/redo; and Delete, Backspace, Ctrl+S, and Ctrl+D shortcuts.
 
-V2.4-A provides manual audition of a selected complete segment from source `base.ogg`. It uses the segment's effective speed and supports play, pause/resume, loop, Space when text editing does not own focus, waveform playhead drawing, and replacement of playback when selection changes. It does not generate temporary audio clips. It is not a complete V2.4 release: boundary-edit auto audition, debounce, real audio/speed/loop boundaries, and EXE OGG playback still require manual acceptance.
+V2.4-A provides manual audition of a selected complete segment from source `base.ogg`. V2.4-B adds a default-off, non-persistent 200ms debounce: only formal interval/effective-speed commits schedule playback; `textChanged` and timeline `mouseMove` do not. Manual play/pause and lifecycle changes cancel pending playback. Neither playback state nor the switch affects dirty state, history, or exports.
 
 ## Module Routing
 
@@ -48,7 +48,7 @@ Segment export IDs use:
 
 All user-visible segment edits must use `MainWindow` history transactions. Do not push history from `textChanged` or timeline `mouseMove`; input edits and endpoint drags each commit one snapshot command. Loading, source switching, and snapshot restoration suspend/reset history as appropriate.
 
-Playback state, position, and loop state are runtime-only. They must not enter undo history or mark exports dirty. Do not add a second player, use ffmpeg temporary audition clips, or repeatedly restart playback from drag `mouseMove`. MainWindow coordinates selection/source/UI; WaveformPanel only draws the playhead.
+Playback state, position, loop state, automatic-audition switch, and pending timer are runtime-only. They must not enter undo history or mark exports dirty. `AudioPlaybackController` owns separate boundary and automatic-audition timers; do not add a second player, use ffmpeg temporary audition clips, or repeatedly restart playback from drag `mouseMove`. MainWindow coordinates selection/source/UI; WaveformPanel only draws the playhead.
 
 ## Safety And Scope
 
@@ -73,4 +73,4 @@ Prefer restrained, low-noise PyQt UI with stable layouts and minimal configurati
 
 The V2.3 plan is historical. Use `README.md` and `docs/status/current-development-status.md` for current product status. Work beyond V2.3 must state clearly whether it is implemented, in development, awaiting manual acceptance, or not implemented.
 
-Outside an explicitly scoped task, do not add Combo snapping, multi-difficulty support, chart preview, a full DAW workflow, automatic audition/debounce, or a second playback engine.
+Next: real listening acceptance, then V2.4-C Windows EXE/OGG stability. Outside an explicitly scoped task, do not add Combo snapping, multi-difficulty support, chart preview, a full DAW workflow, or a second playback engine.

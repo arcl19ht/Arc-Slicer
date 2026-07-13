@@ -1266,6 +1266,7 @@ class MainWindow(QMainWindow):
         self._audio_duration_ms: int | None = None
         self._audio_duration_error = ""
         self._playback_controller = AudioPlaybackController(self)
+        self._auto_audition_enabled = False
 
         self.setWindowTitle("Arc Slicer")
         self.setMinimumSize(620, 580)
@@ -1441,10 +1442,13 @@ class MainWindow(QMainWindow):
         self._loop_check = QCheckBox("循环")
         self._loop_check.setChecked(True)
         self._loop_check.toggled.connect(self._playback_controller.set_loop_enabled)
+        self._auto_audition_check = QCheckBox("自动试听")
+        self._auto_audition_check.setChecked(False)
+        self._auto_audition_check.toggled.connect(self._set_auto_audition_enabled)
         self._audition_time_label = make_label("0:00.000 / 0:00.000", size=12, color=C_MUTED)
         self._audition_speed_label = make_label("1×", size=12, color=C_MUTED)
         self._audition_status_label = make_label("请选择完整片段", size=12, color=C_LABEL)
-        audition.addWidget(self._play_pause_button); audition.addWidget(self._loop_check); audition.addWidget(self._audition_time_label); audition.addWidget(self._audition_speed_label); audition.addWidget(self._audition_status_label); audition.addStretch()
+        audition.addWidget(self._play_pause_button); audition.addWidget(self._loop_check); audition.addWidget(self._auto_audition_check); audition.addWidget(self._audition_time_label); audition.addWidget(self._audition_speed_label); audition.addWidget(self._audition_status_label); audition.addStretch()
         lay.addLayout(audition)
         self._playback_controller.position_changed.connect(self._on_playback_position_changed)
         self._playback_controller.state_changed.connect(self._on_playback_state_changed)
@@ -1695,6 +1699,8 @@ class MainWindow(QMainWindow):
             self._schedule_segment_time_validation()
             self._schedule_arc_cut_warning_refresh()
         self._mark_current_export_dirty()
+        self._refresh_selected_segment_audition()
+        self._schedule_selected_segment_auto_audition()
 
     @contextmanager
     def _batch_restore_segment_history(self):
@@ -1902,8 +1908,37 @@ class MainWindow(QMainWindow):
             self._play_pause_button.setEnabled(controller.is_available() and controller.has_source()); self._audition_speed_label.setText(f"{speed:g}×"); self._audition_time_label.setText(f"{format_duration_ms(0)} / {format_duration_ms(end-start)}"); self._audition_status_label.setText("就绪")
         self._waveform_panel.set_playback_position_ms(start)
 
+    def _auto_audition_is_enabled(self) -> bool:
+        return bool(self.__dict__.get("_auto_audition_enabled", False))
+
+    def _cancel_selected_segment_auto_audition(self) -> None:
+        cancel = getattr(self.__dict__.get("_playback_controller"), "cancel_pending_auto_play", None)
+        if callable(cancel):
+            cancel()
+
+    def _schedule_selected_segment_auto_audition(self) -> bool:
+        if not self._auto_audition_is_enabled():
+            return False
+        controller = self.__dict__.get("_playback_controller")
+        schedule = getattr(controller, "schedule_auto_play", None)
+        row = self._row_by_uid(self.__dict__.get("_selected_segment_uid", ""))
+        start, end = self._row_time_values(row) if row is not None else (None, None)
+        if not callable(schedule) or start is None or end is None or end - start < WAVEFORM_MIN_SEGMENT_MS:
+            self._cancel_selected_segment_auto_audition()
+            return False
+        return bool(schedule())
+
+    def _set_auto_audition_enabled(self, enabled: bool) -> None:
+        self._auto_audition_enabled = bool(enabled)
+        if not self._auto_audition_enabled:
+            self._cancel_selected_segment_auto_audition()
+            return
+        self._refresh_selected_segment_audition()
+        self._schedule_selected_segment_auto_audition()
+
     def _toggle_selected_segment_playback(self) -> None:
         if self._is_text_editing_focus(): return
+        self._cancel_selected_segment_auto_audition()
         controller = self.__dict__.get("_playback_controller")
         if controller and controller.toggle_play_pause(): pass
 
@@ -2396,6 +2431,10 @@ class MainWindow(QMainWindow):
         except ValueError:
             return
         self._maybe_auto_sort_segments()
+        row = self._row_by_uid(self.__dict__.get("_selected_segment_uid", ""))
+        if row is not None and row.speed_override_value() is None:
+            self._refresh_selected_segment_audition()
+            self._schedule_selected_segment_auto_audition()
 
     def _mark_current_export_dirty(self, *_args):
         if self.__dict__.get("_suppress_source_reset", False) or self.__dict__.get("_segment_restore_in_progress", False):
@@ -2684,6 +2723,7 @@ class MainWindow(QMainWindow):
         self._run_segment_history_action("新增片段", create)
         if created is not None:
             self._mark_current_export_dirty()
+            self._schedule_selected_segment_auto_audition()
         return created
 
     def _add_segment(
@@ -2734,6 +2774,8 @@ class MainWindow(QMainWindow):
         if record_history:
             return self._run_segment_history_action("删除片段", lambda: self._delete_segment_by_uid(uid, False))
         uid = str(uid or "")
+        if uid == self.__dict__.get("_selected_segment_uid", ""):
+            self._cancel_selected_segment_auto_audition()
         row = self._row_by_uid(uid)
         if row is None:
             if self.__dict__.get("_selected_segment_uid", "") == uid:
@@ -3029,6 +3071,7 @@ class MainWindow(QMainWindow):
         self._set_selected_segment_uid(uid, scroll=True)
         self._schedule_segment_time_validation()
         self._schedule_arc_cut_warning_refresh()
+        self._schedule_selected_segment_auto_audition()
 
     def _pending_segment_edit_fields(self) -> list[tuple[SegmentRow, str]]:
         transactions = self.__dict__.get("_segment_history_transactions", {})
@@ -3061,6 +3104,7 @@ class MainWindow(QMainWindow):
     def _on_segment_edit_started(self, row: SegmentRow, field: str) -> None:
         if row in self._rows:
             if row.uid == self.__dict__.get("_selected_segment_uid", ""):
+                self._cancel_selected_segment_auto_audition()
                 controller = self.__dict__.get("_playback_controller")
                 if controller is not None:
                     controller.stop(reset_to_start=False)
@@ -3200,8 +3244,14 @@ class MainWindow(QMainWindow):
 
     def _on_waveform_endpoint_committed(self) -> None:
         self._maybe_auto_sort_segments()
+        self._refresh_selected_segment_audition()
+        self._schedule_selected_segment_auto_audition()
 
     def _on_waveform_endpoint_drag_started(self, _uid: str, side: str) -> None:
+        self._cancel_selected_segment_auto_audition()
+        controller = self.__dict__.get("_playback_controller")
+        if controller is not None:
+            controller.stop(reset_to_start=False)
         self._begin_segment_history_transaction("timeline_endpoint_drag", f"拖动片段{side}")
 
     def _on_waveform_endpoint_drag_finished(self, _uid: str, _side: str) -> None:
@@ -3620,6 +3670,7 @@ class MainWindow(QMainWindow):
         self._log_widget.moveCursor(QTextCursor.MoveOperation.End)
 
     def closeEvent(self, event):
+        self._cancel_selected_segment_auto_audition()
         self._playback_controller.stop(reset_to_start=False)
         self._playback_controller.clear_audition_range()
         self._waveform_generation += 1
