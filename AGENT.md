@@ -8,13 +8,13 @@ Read this document before changing the project. V2.3 is closed on `main`; this b
 - Stable version: V2.3
 - V2.3 closing commit: `8316bba feat(v2.3): add timeline quick draft gesture`
 - Current feature branch: `feature/v2.4-audio-audition`
-- Current task: V2.4-A selected-segment audio audition.
+- Current task: V2.4-A selected-segment audio audition and manual acceptance.
 
 V2.2 is complete: AFF/audio slicing, `current_export` and `library_export`, songlist/packlist export, fixed pack sections, per-segment speed overrides, duplicate output-ID blocking, copy segment, and safe external shell merge. External merge uses an explicit plan and confirmation, backs up affected content, writes a manifest, attempts recovery on failure, and remembers a verified target `songs` directory.
 
 V2.3 is complete: waveform data and caching; waveform, time ruler, and timeline lanes; blank-area drag creation; endpoint editing; draft preview; Ctrl+click quick drafts; selected/hovered card-timeline linkage; automatic/manual sorting; `uid` and `link_group_id` grouping with break/rejoin and cascaded endpoint edits; undo/redo; and Delete, Backspace, Ctrl+S, and Ctrl+D shortcuts.
 
-V2.4-A provides manual audition of a selected complete segment from source `base.ogg`. It uses the segment's effective speed and supports play, pause/resume, loop, Space when text editing does not own focus, waveform playhead drawing, and replacement of playback when selection changes. It is not a complete V2.4 release: real audio, speed/loop boundaries, and EXE OGG playback still require manual acceptance.
+V2.4-A provides manual audition of a selected complete segment from source `base.ogg`. It uses the segment's effective speed and supports play, pause/resume, loop, Space when text editing does not own focus, waveform playhead drawing, and replacement of playback when selection changes. It does not generate temporary audio clips. It is not a complete V2.4 release: boundary-edit auto audition, debounce, real audio/speed/loop boundaries, and EXE OGG playback still require manual acceptance.
 
 ## Module Routing
 

@@ -126,7 +126,9 @@ Version 2.2 已实现安全外部壳合并：选择外部目标壳的 `songs` �
 
 `main` 当前稳定基线为 V2.3：已包含 `WaveformData` 与波形缓存、波形/时间标尺/timeline lanes、空白区拖拽建段、端点拖拽、草稿预览、Ctrl+单击快速草稿、卡片与时间线的 selected/hovered 联动、自动与手动排序、`uid`/`link_group_id` 级联编辑、撤销/重做，以及 Delete、Backspace、Ctrl+S、Ctrl+D 等快捷键。
 
-音频试听不在当前 `main` 中。它正在独立的 `feature/v2.4-audio-audition` 分支开发；该分支的 V2.4-A 已实现手动试听基础能力，但尚未代表完整 V2.4，也尚待真实声音和打包 EXE 验收。
+音频试听不在 `main` 中。独立分支 `feature/v2.4-audio-audition` 正在开发 V2.4-A：可对当前选中的完整片段使用源 `base.ogg` 手动试听，支持播放/暂停/恢复、循环开关、空格快捷键、片段实际有效倍速、波形播放头，以及切换片段时停止旧播放；不会生成临时试听切片。
+
+V2.4-A 尚未代表完整 V2.4：边界修改后的自动试听、150--300ms 防抖启动、真实声音下的倍速与循环边界验收、以及打包 EXE 的 OGG 试听验收仍未完成。
 
 ## Songlist 填写说明
 
