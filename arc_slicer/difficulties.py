@@ -34,15 +34,63 @@ class DifficultyFileIssue:
 
 
 @dataclass(frozen=True)
+class DifficultyAudioAsset:
+    rating_class: int
+    filename: str
+    path: Path
+    usable: bool
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class DifficultyMetadata:
+    rating_class: int
+    rating: int | None
+    rating_plus: bool = False
+    chart_designer: str = ""
+    jacket_designer: str = ""
+    title_override_base: str = ""
+
+
+@dataclass(frozen=True)
 class DifficultyDiscovery:
     available: tuple[DifficultyDefinition, ...]
     missing: tuple[DifficultyDefinition, ...]
     invalid: tuple[DifficultyFileIssue, ...]
     unknown_aff_filenames: tuple[str, ...]
+    override_audio_assets: tuple[DifficultyAudioAsset, ...] = ()
+    unknown_audio_filenames: tuple[str, ...] = ()
 
     @property
     def available_rating_classes(self) -> tuple[int, ...]:
         return tuple(item.rating_class for item in self.available)
+
+    @property
+    def usable_override_audio(self) -> tuple[DifficultyAudioAsset, ...]:
+        available = set(self.available_rating_classes)
+        return tuple(item for item in self.override_audio_assets if item.usable and item.rating_class in available)
+
+    @property
+    def orphan_override_audio(self) -> tuple[DifficultyAudioAsset, ...]:
+        available = set(self.available_rating_classes)
+        return tuple(item for item in self.override_audio_assets if item.rating_class not in available)
+
+    def override_audio_for(self, rating_class: int) -> DifficultyAudioAsset | None:
+        for item in self.override_audio_assets:
+            if item.rating_class == rating_class:
+                return item
+        return None
+
+    @property
+    def warnings(self) -> tuple[str, ...]:
+        available = set(self.available_rating_classes)
+        warnings: list[str] = []
+        for item in self.override_audio_assets:
+            if item.rating_class not in available:
+                warnings.append(f"孤立专属音源，不参与导出: {item.filename}")
+            elif not item.usable:
+                warnings.append(f"专属音源不可用: {item.filename} ({item.reason})")
+        return tuple(warnings)
 
 
 class DifficultySelectionError(ValueError):
@@ -84,6 +132,7 @@ def discover_song_difficulties(song_dir: Path) -> DifficultyDiscovery:
     available: list[DifficultyDefinition] = []
     missing: list[DifficultyDefinition] = []
     invalid: list[DifficultyFileIssue] = []
+    override_audio_assets: list[DifficultyAudioAsset] = []
 
     for definition in STANDARD_DIFFICULTIES:
         path = song_dir / definition.aff_filename
@@ -101,15 +150,40 @@ def discover_song_difficulties(song_dir: Path) -> DifficultyDiscovery:
             continue
         available.append(definition)
 
+    for definition in STANDARD_DIFFICULTIES:
+        path = song_dir / f"{definition.rating_class}.ogg"
+        if not path.exists():
+            continue
+        if path.is_symlink() or not path.is_file():
+            override_audio_assets.append(DifficultyAudioAsset(
+                definition.rating_class, path.name, path, False, "not_regular_file",
+            ))
+            continue
+        try:
+            with path.open("rb") as audio_file:
+                audio_file.read(1)
+        except OSError:
+            override_audio_assets.append(DifficultyAudioAsset(
+                definition.rating_class, path.name, path, False, "unreadable",
+            ))
+            continue
+        override_audio_assets.append(DifficultyAudioAsset(definition.rating_class, path.name, path, True))
+
     unknown: list[str] = []
+    unknown_audio: list[str] = []
     if song_dir.is_dir():
         try:
             for path in song_dir.iterdir():
                 if path.suffix.lower() == ".aff" and path.name not in _STANDARD_FILENAMES:
                     unknown.append(path.name)
+                if path.suffix.lower() == ".ogg" and path.name not in {"base.ogg", "0.ogg", "1.ogg", "2.ogg", "3.ogg", "4.ogg"}:
+                    unknown_audio.append(path.name)
         except OSError:
             pass
-    return DifficultyDiscovery(tuple(available), tuple(missing), tuple(invalid), tuple(sorted(unknown)))
+    return DifficultyDiscovery(
+        tuple(available), tuple(missing), tuple(invalid), tuple(sorted(unknown)),
+        tuple(override_audio_assets), tuple(sorted(unknown_audio)),
+    )
 
 
 def is_multi_difficulty_song_dir(song_dir: Path) -> bool:
@@ -185,3 +259,80 @@ def serialize_selected_difficulties(slides_data: Mapping | None, selected_diffic
     data = dict(slides_data or {})
     data[DIFFICULTY_SELECTION_FIELD] = list(normalize_selected_difficulties(selected_difficulties))
     return data
+
+
+def difficulty_metadata_from_legacy(legacy_data: Mapping | None) -> DifficultyMetadata:
+    """Map the existing single FTR fields to ratingClass 2 without persisting assets."""
+    data = legacy_data or {}
+    rating = data.get("rating")
+    if isinstance(rating, bool) or not isinstance(rating, int) or rating < 0:
+        rating = None
+    return DifficultyMetadata(
+        rating_class=2,
+        rating=rating,
+        rating_plus=bool(data.get("rating_plus", data.get("ratingPlus", False))),
+        chart_designer=str(data.get("chart_designer", data.get("chartDesigner", "")) or "").strip(),
+        jacket_designer=str(data.get("jacket_designer", data.get("jacketDesigner", "")) or "").strip(),
+        title_override_base=str(data.get("title_override_base", "") or "").strip(),
+    )
+
+
+def normalize_difficulty_metadata(
+    rating_class: int,
+    data: Mapping | DifficultyMetadata | None,
+) -> DifficultyMetadata:
+    definition = difficulty_for_rating_class(rating_class)
+    if isinstance(data, DifficultyMetadata):
+        if data.rating_class != definition.rating_class:
+            raise ValueError("难度元数据 ratingClass 不一致")
+        return data
+    values = data or {}
+    rating = values.get("rating")
+    if rating in (None, ""):
+        normalized_rating = None
+    elif isinstance(rating, bool) or not isinstance(rating, int) or rating < 0:
+        raise ValueError(f"ratingClass {rating_class} 的 rating 无效")
+    else:
+        normalized_rating = rating
+    return DifficultyMetadata(
+        rating_class=definition.rating_class,
+        rating=normalized_rating,
+        rating_plus=bool(values.get("rating_plus", values.get("ratingPlus", False))),
+        chart_designer=str(values.get("chart_designer", values.get("chartDesigner", "")) or "").strip(),
+        jacket_designer=str(values.get("jacket_designer", values.get("jacketDesigner", "")) or "").strip(),
+        title_override_base=str(values.get("title_override_base", "") or "").strip(),
+    )
+
+
+def normalize_difficulty_metadata_map(
+    data: Mapping | None,
+    *,
+    legacy_ftr_data: Mapping | None = None,
+) -> dict[int, DifficultyMetadata]:
+    out: dict[int, DifficultyMetadata] = {}
+    for raw_rating_class, item in (data or {}).items():
+        if isinstance(raw_rating_class, bool):
+            raise ValueError("难度元数据键必须是 ratingClass")
+        try:
+            rating_class = int(raw_rating_class)
+        except (TypeError, ValueError) as ex:
+            raise ValueError("难度元数据键必须是 ratingClass") from ex
+        if str(rating_class) != str(raw_rating_class) and not isinstance(raw_rating_class, int):
+            raise ValueError("难度元数据键必须是整数")
+        out[rating_class] = normalize_difficulty_metadata(rating_class, item)
+    if 2 not in out and legacy_ftr_data is not None:
+        out[2] = difficulty_metadata_from_legacy(legacy_ftr_data)
+    return out
+
+
+def serialize_difficulty_metadata_map(metadata: Mapping[int, DifficultyMetadata]) -> dict[str, dict]:
+    return {
+        str(rating_class): {
+            "rating": item.rating,
+            "rating_plus": item.rating_plus,
+            "chart_designer": item.chart_designer,
+            "jacket_designer": item.jacket_designer,
+            "title_override_base": item.title_override_base,
+        }
+        for rating_class, item in sorted(metadata.items())
+    }
