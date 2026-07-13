@@ -1,20 +1,22 @@
 # Arc Slicer Agent Handoff
 
-Read this document before changing the project. V2.4-A is merged into `main`; this branch implements V2.4-B automatic audition.
+Read this document before changing the project. V2.4-A and V2.4-B are merged into `main`; the UI clarity refresh is in development.
 
 ## Current Baseline
 
 - Stable branch: `main`
 - Stable version: V2.3
 - V2.3 closing commit: `8316bba feat(v2.3): add timeline quick draft gesture`
-- Current feature branch: `feature/v2.4-auto-audition`
-- Current task: V2.4-B debounced automatic audition and manual acceptance.
+- Current feature branch: `feature/ui-clarity-refresh`
+- Current task: UI clarity refresh and final visual acceptance.
 
 V2.2 is complete: AFF/audio slicing, `current_export` and `library_export`, songlist/packlist export, fixed pack sections, per-segment speed overrides, duplicate output-ID blocking, copy segment, and safe external shell merge. External merge uses an explicit plan and confirmation, backs up affected content, writes a manifest, attempts recovery on failure, and remembers a verified target `songs` directory.
 
 V2.3 is complete: waveform data and caching; waveform, time ruler, and timeline lanes; blank-area drag creation; endpoint editing; draft preview; Ctrl+click quick drafts; selected/hovered card-timeline linkage; automatic/manual sorting; `uid` and `link_group_id` grouping with break/rejoin and cascaded endpoint edits; undo/redo; and Delete, Backspace, Ctrl+S, and Ctrl+D shortcuts.
 
 V2.4-A provides manual audition of a selected complete segment from source `base.ogg`. V2.4-B adds a default-off, non-persistent 200ms debounce: only formal interval/effective-speed commits schedule playback; `textChanged` and timeline `mouseMove` do not. Manual play/pause and lifecycle changes cancel pending playback. Neither playback state nor the switch affects dirty state, history, or exports.
+
+The UI clarity refresh may change theme tokens, object names, QSS, and visual control hierarchy only. It must not change slicing, exports, playback/loop/automatic-audition behavior, sorting, link groups, undo history, or dirty state. `arc_slicer.ui.styles` is the sole global QSS source; `app.QSS` and `main_window.QSS` remain compatibility aliases.
 
 ## Module Routing
 
