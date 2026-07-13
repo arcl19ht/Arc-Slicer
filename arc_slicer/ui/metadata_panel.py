@@ -116,6 +116,7 @@ class CollapsibleHeader(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("collapsibleHeader")
         self._hover = False
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._refresh_style()
@@ -124,7 +125,7 @@ class CollapsibleHeader(QFrame):
         bg = "#F3F4F6" if self._hover else C_CARD2
         border = C_BORDER if self._hover else C_BORDER2
         self.setStyleSheet(
-            f"QFrame {{ background: {bg}; border: 1px solid {border}; border-radius: 9px; }}"
+            f"QFrame#collapsibleHeader {{ background: {bg}; border: 1px solid {border}; border-radius: 9px; }}"
         )
 
     def enterEvent(self, event: QEvent):
@@ -149,6 +150,7 @@ class DropZone(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("songDropZone")
         self._over = False
         self.setAcceptDrops(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -183,14 +185,14 @@ class DropZone(QFrame):
     def _update_style(self):
         if self._over:
             self.setStyleSheet(
-                f"QFrame {{ background: #EFF6FF; border: 1.5px dashed {C_ACCENT}; border-radius: 12px; }}"
+                f"QFrame#songDropZone {{ background: #EAF1FF; border: 1.5px dashed {C_ACCENT}; border-radius: 12px; }}"
             )
             self._main_lbl.setStyleSheet(
                 f"font-size: 13px; font-weight: 600; color: {C_ACCENT}; background: transparent; border: none;"
             )
         else:
             self.setStyleSheet(
-                f"QFrame {{ background: {C_CARD2}; border: 1.5px dashed {C_BORDER}; border-radius: 12px; }}"
+                f"QFrame#songDropZone {{ background: {C_CARD2}; border: 1.5px dashed {C_BORDER}; border-radius: 12px; }}"
             )
             self._main_lbl.setStyleSheet(
                 f"font-size: 13px; font-weight: 600; color: {C_MUTED}; background: transparent; border: none;"
@@ -257,7 +259,8 @@ class SonglistPanel(QFrame):
         self._syncing_shared_pack_id = False
         self._resetting_source = False
         self._last_shared_pack_id = ""
-        self.setStyleSheet("QFrame { background: transparent; border: none; }")
+        self.setObjectName("metadataPanel")
+        self.setStyleSheet("QFrame#metadataPanel { background: transparent; border: none; }")
         self._setup_ui()
 
     def _setup_ui(self):
@@ -268,8 +271,9 @@ class SonglistPanel(QFrame):
         outer.addWidget(section_title("元数据导出"))
 
         self._songlist_item = QFrame()
+        self._songlist_item.setObjectName("songlistCard")
         self._songlist_item.setStyleSheet(
-            f"QFrame {{ background: {C_CARD}; border: 1px solid {C_BORDER}; border-radius: 12px; }}"
+            f"QFrame#songlistCard {{ background: {C_CARD}; border: 1px solid {C_BORDER}; border-radius: 12px; }}"
         )
         songlist_lay = QVBoxLayout(self._songlist_item)
         songlist_lay.setContentsMargins(14, 11, 14, 11)
@@ -280,6 +284,7 @@ class SonglistPanel(QFrame):
         songlist_head.setContentsMargins(10, 7, 10, 7)
         songlist_head.setSpacing(10)
         self._enabled = QCheckBox("生成 songlist")
+        self._enabled.setCursor(Qt.CursorShape.PointingHandCursor)
         self._enabled.setChecked(False)
         self._enabled.setStyleSheet(
             f"color: {C_TEXT2}; font-size: 13px; font-weight: 650; background: transparent; border: none;"
@@ -288,6 +293,8 @@ class SonglistPanel(QFrame):
         songlist_head.addWidget(self._enabled)
         songlist_head.addStretch()
         self._toggle_btn = QPushButton("▸")
+        self._toggle_btn.setObjectName("btnSecondary")
+        self._toggle_btn.setToolTip("展开或收起 songlist")
         self._toggle_btn.clicked.connect(self._toggle)
         songlist_head.addWidget(self._toggle_btn)
         songlist_lay.addWidget(self._songlist_header)
@@ -299,8 +306,9 @@ class SonglistPanel(QFrame):
         outer.addWidget(self._songlist_item)
 
         self._packlist_item = QFrame()
+        self._packlist_item.setObjectName("packlistCard")
         self._packlist_item.setStyleSheet(
-            f"QFrame {{ background: {C_CARD}; border: 1px solid {C_BORDER}; border-radius: 12px; }}"
+            f"QFrame#packlistCard {{ background: {C_CARD}; border: 1px solid {C_BORDER}; border-radius: 12px; }}"
         )
         pack_item_lay = QVBoxLayout(self._packlist_item)
         pack_item_lay.setContentsMargins(14, 11, 14, 11)
@@ -311,6 +319,7 @@ class SonglistPanel(QFrame):
         pack_head.setContentsMargins(10, 7, 10, 7)
         pack_head.setSpacing(10)
         self._packlist_enabled = QCheckBox("生成 packlist 与曲包资源")
+        self._packlist_enabled.setCursor(Qt.CursorShape.PointingHandCursor)
         self._packlist_enabled.setChecked(False)
         self._packlist_enabled.setStyleSheet(
             f"color: {C_TEXT2}; font-size: 13px; font-weight: 650; background: transparent; border: none;"
@@ -319,6 +328,8 @@ class SonglistPanel(QFrame):
         pack_head.addWidget(self._packlist_enabled)
         pack_head.addStretch()
         self._pack_toggle_btn = QPushButton("▸")
+        self._pack_toggle_btn.setObjectName("btnSecondary")
+        self._pack_toggle_btn.setToolTip("展开或收起 packlist")
         self._pack_toggle_btn.clicked.connect(self._toggle_pack)
         pack_head.addWidget(self._pack_toggle_btn)
         pack_item_lay.addWidget(self._packlist_header)
@@ -383,6 +394,7 @@ class SonglistPanel(QFrame):
         rp_row = QHBoxLayout()
         rp_row.setSpacing(10)
         self._rating_plus = QCheckBox("有 +（ratingPlus）")
+        self._rating_plus.setCursor(Qt.CursorShape.PointingHandCursor)
         self._rating_plus.setStyleSheet(
             f"color: {C_TEXT2}; font-size: 13px; background: transparent; border: none;"
         )
@@ -403,8 +415,9 @@ class SonglistPanel(QFrame):
         pack_body_lay.setSpacing(0)
 
         pack_frame = QFrame()
+        pack_frame.setObjectName("packFieldsCard")
         pack_frame.setStyleSheet(
-            f"QFrame {{ background: {C_CARD2}; border: 1px solid {C_BORDER2}; border-radius: 12px; }}"
+            f"QFrame#packFieldsCard {{ background: {C_CARD2}; border: 1px solid {C_BORDER2}; border-radius: 12px; }}"
         )
         pack_lay = QVBoxLayout(pack_frame)
         pack_lay.setContentsMargins(14, 12, 14, 12)
@@ -438,6 +451,8 @@ class SonglistPanel(QFrame):
         section_lay.setSpacing(5)
         section_lay.addWidget(metadata_field_label("曲包分区 SECTION"))
         self._pack_section = QComboBox()
+        self._pack_section.setObjectName("comboInput")
+        self._pack_section.setCursor(Qt.CursorShape.PointingHandCursor)
         self._pack_section.addItems(PACK_SECTION_OPTIONS)
         self._pack_section.setEditable(False)
         self._set_pack_section(PACK_DEFAULT_SECTION)
@@ -448,6 +463,7 @@ class SonglistPanel(QFrame):
         cover_row = QHBoxLayout()
         cover_row.setSpacing(10)
         self._pack_upload_check = QCheckBox("使用上传图片")
+        self._pack_upload_check.setCursor(Qt.CursorShape.PointingHandCursor)
         self._pack_upload_check.setStyleSheet(
             f"color: {C_TEXT2}; font-size: 13px; background: transparent; border: none;"
         )
