@@ -22,6 +22,8 @@ except ImportError:
     QMediaPlayer = None
     QT_MULTIMEDIA_AVAILABLE = False
 
+AUTO_AUDITION_DEBOUNCE_MS = 200
+
 
 class AudioPlaybackController(QObject):
     position_changed = pyqtSignal(int)
@@ -30,13 +32,17 @@ class AudioPlaybackController(QObject):
     error_changed = pyqtSignal(str)
     range_finished = pyqtSignal()
 
-    def __init__(self, parent=None, *, media_player=None, audio_output=None, boundary_timer=None):
+    def __init__(self, parent=None, *, media_player=None, audio_output=None, boundary_timer=None, auto_audition_timer=None):
         super().__init__(parent)
         self._player = media_player
         self._output = audio_output
         self._timer = boundary_timer or QTimer(self)
         self._timer.setInterval(20)
         self._timer.timeout.connect(self._check_boundary)
+        self._auto_timer = auto_audition_timer or QTimer(self)
+        if hasattr(self._auto_timer, "setSingleShot"):
+            self._auto_timer.setSingleShot(True)
+        self._auto_timer.timeout.connect(self._run_scheduled_auto_play)
         self._range: tuple[int, int] | None = None
         self._rate = 1.0
         self._loop = True
@@ -64,12 +70,14 @@ class AudioPlaybackController(QObject):
     def playback_rate(self) -> float: return self._rate
     def is_playing(self) -> bool: return self._state == "playing"
     def position_ms(self) -> int: return int(self._player.position()) if self._player is not None else 0
+    def has_pending_auto_play(self) -> bool: return bool(getattr(self._auto_timer, "isActive", lambda: False)())
 
     def _set_state(self, state: str) -> None:
         if state != self._state:
             self._state = state; self.state_changed.emit(state)
 
     def set_source(self, path: Path | None) -> None:
+        self.cancel_pending_auto_play()
         self.stop(reset_to_start=False); self.clear_audition_range()
         if not self.is_available(): return
         path = Path(path) if path else None
@@ -82,22 +90,36 @@ class AudioPlaybackController(QObject):
         self._set_state("ready")
 
     def set_audition_range(self, start_ms: int, end_ms: int, speed: float) -> None:
+        self.cancel_pending_auto_play()
         if not self.is_available() or not self.has_source() or start_ms < 0 or end_ms - start_ms < 100 or not math.isfinite(speed) or speed <= 0:
             self.clear_audition_range(); return
         self.stop(reset_to_start=False); self._range = (int(start_ms), int(end_ms)); self._rate = float(speed)
         self._player.setPlaybackRate(self._rate); self._player.setPosition(self._range[0]); self._set_state("ready")
 
     def clear_audition_range(self) -> None:
+        self.cancel_pending_auto_play()
         self.stop(reset_to_start=False); self._range = None
         if self.is_available(): self._set_state("ready" if self.has_source() else "idle")
 
     def set_loop_enabled(self, enabled: bool) -> None: self._loop = bool(enabled)
-    def play(self) -> bool:
+    def schedule_auto_play(self, delay_ms: int = AUTO_AUDITION_DEBOUNCE_MS) -> bool:
+        self.cancel_pending_auto_play()
+        if not self.is_available() or not self.has_source() or self._range is None:
+            return False
+        self._auto_timer.start(max(0, int(delay_ms)))
+        return True
+    def cancel_pending_auto_play(self) -> None: self._auto_timer.stop()
+    def _run_scheduled_auto_play(self) -> None:
+        self.cancel_pending_auto_play()
+        self.play(cancel_pending=False)
+    def play(self, *, cancel_pending: bool = True) -> bool:
+        if cancel_pending: self.cancel_pending_auto_play()
         if not self.is_available() or self._range is None: return False
         start, end = self._range
         if not start <= self.position_ms() < end: self._player.setPosition(start)
         self._player.setPlaybackRate(self._rate); self._player.play(); self._timer.start(); self._set_state("playing"); return True
     def pause(self) -> None:
+        self.cancel_pending_auto_play()
         if self._player is not None: self._player.pause()
         self._timer.stop()
         if self._range is not None: self._set_state("paused")
@@ -105,6 +127,7 @@ class AudioPlaybackController(QObject):
         if self.is_playing(): self.pause(); return False
         return self.play()
     def stop(self, *, reset_to_start: bool = True) -> None:
+        self.cancel_pending_auto_play()
         self._timer.stop()
         if self._player is not None: self._player.pause()
         if reset_to_start and self._range is not None and self._player is not None: self._player.setPosition(self._range[0])
@@ -130,7 +153,7 @@ class AudioPlaybackController(QObject):
             if self._range is not None:
                 self._set_state("ready")
     def _on_error(self, *_args) -> None:
-        self._timer.stop(); self._error = self._player.errorString() if self._player is not None else "音频播放失败"
+        self._timer.stop(); self.cancel_pending_auto_play(); self._error = self._player.errorString() if self._player is not None else "音频播放失败"
         self.error_changed.emit(self._error); self._set_state("error")
     def _check_boundary(self) -> None:
         if self._handling_boundary or self._range is None or self.position_ms() < self._range[1]: return
