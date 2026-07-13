@@ -10,6 +10,8 @@ Arcaea 谱面切片工具。可将完整谱面按多个时间段导出为独立�
 - 自动切割 `.aff` 谱面和 `base.ogg` 音频
 - 显式开启 Songlist 后，为每个片段生成合并 songlist
 - 显式开启 Packlist 后，生成练习曲包、曲包封面与曲包资源
+- 波形与时间线片段编辑：拖拽空白区创建、拖拽端点调整、草稿预览与 Ctrl+单击快速草稿
+- 片段选择、自动/手动排序、级联链接组，以及撤销/重做快捷键
 
 ## 使用方法
 
@@ -116,9 +118,15 @@ ArcSlicerData/
 
 ## 外部目标壳合并
 
-当前版本不会直接写入用户的外部目标壳。需要实机验证时，请把 `ArcSlicerData/out/current_export/songs/` 复制到测试壳副本中。
+Version 2.2 已实现安全外部壳合并：选择外部目标壳的 `songs` 根目录后，先检查合并计划，再由用户明确确认执行。执行时会备份受影响内容、写入 manifest，并在失败时尝试恢复；已验证的目标目录会保存在配置中。
 
-Version 2.2 的目标是新增“外部壳合并”流程：选择目标壳 `songs` 目录，先检查合并计划，再由用户确认写入，并提供受影响文件备份与失败恢复。该功能尚未实现，且不会替代 `library_export`。
+外部合并始终以 `current_export/songs/` 为本次输入，和长期累计的 `library_export` 保持独立。真实目标壳合并会写入用户选择的目录，应只在明确需要时执行。
+
+## 波形选段与版本状态
+
+`main` 当前稳定基线为 V2.3：已包含 `WaveformData` 与波形缓存、波形/时间标尺/timeline lanes、空白区拖拽建段、端点拖拽、草稿预览、Ctrl+单击快速草稿、卡片与时间线的 selected/hovered 联动、自动与手动排序、`uid`/`link_group_id` 级联编辑、撤销/重做，以及 Delete、Backspace、Ctrl+S、Ctrl+D 等快捷键。
+
+音频试听不在当前 `main` 中。它正在独立的 `feature/v2.4-audio-audition` 分支开发；该分支的 V2.4-A 已实现手动试听基础能力，但尚未代表完整 V2.4，也尚待真实声音和打包 EXE 验收。
 
 ## Songlist 填写说明
 
@@ -183,4 +191,5 @@ ArcSlicerData/out/<export_target>/songs/pack/<img>
 - 当前固定处理 `2.aff`，即 FTR 谱面。
 - 非线性 Arc 在片段边界被截断时，界面会显示提示：边界坐标会按原缓动计算，但 Arc 片段内部轨迹可能与原谱存在轻微差异。
 - 非零 AudioOffset、以及部分 Camera / Scenecontrol 持续时间在变速切片时，仍建议人工复核。
-- 尚未实现外部目标壳安全合并、多难度切片、官方曲包封面 / topbar 资源库、波形选段或循环试听。
+- 尚未实现多难度切片、官方曲包封面 / topbar 资源库、Combo snapping 与谱面预览。
+- `main` 尚不包含音频试听；V2.4-A 的真实倍速、循环边界和 EXE OGG 播放仍待人工验收。

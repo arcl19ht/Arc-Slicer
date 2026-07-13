@@ -1,5 +1,7 @@
 # Arc Slicer 项目需求书
 
+> 历史规格说明：本文记录修订 1.2 时的需求基线与版本路线。文中的“尚未实现”、阶段状态和路线安排只反映当时状态，不应作为当前完成度判断依据。当前状态以 `README.md`、`AGENT.md` 和 `docs/status/current-development-status.md` 为准。
+
 > 文档状态：设计基线（修订 1.2）
 > 项目名称：Arc Slicer
 > 当前阶段：Gate 0 已完成实机导入与游玩验证；待补“非线性 Arc 近似警告”后正式关闭。后续主线从 Version 2.1 开始。
