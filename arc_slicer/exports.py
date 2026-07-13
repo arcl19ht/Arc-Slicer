@@ -17,7 +17,11 @@ from pathlib import Path
 from typing import Callable
 
 from arc_slicer.aff import _scale_bpm_string, slice_aff as default_slice_aff
-from arc_slicer.audio import _get_ffmpeg as default_get_ffmpeg, slice_ogg as default_slice_ogg
+from arc_slicer.audio import (
+    _get_ffmpeg as default_get_ffmpeg,
+    probe_audio_duration_ms as default_duration_getter,
+    slice_ogg as default_slice_ogg,
+)
 from arc_slicer.difficulties import (
     DifficultyDefinition, DifficultyMetadata, discover_song_difficulties,
     difficulty_metadata_from_legacy, normalize_difficulty_metadata_map,
@@ -224,6 +228,37 @@ def build_multi_difficulty_export_plan(
             for item in segment_plan
         ),
     )
+
+
+def validate_multi_difficulty_audio_durations(
+    export_plan: MultiDifficultyExportPlan,
+    duration_getter: Callable[[Path], int],
+) -> None:
+    """Validate each source once before any export staging is created."""
+    durations: dict[Path, int] = {}
+    labels: dict[Path, str] = {}
+    for segment_plan in export_plan.segments:
+        for operation in segment_plan.audio_operations:
+            source = Path(operation.source_path)
+            labels.setdefault(
+                source,
+                "base.ogg" if operation.rating_class is None else f"{operation.output_filename}（难度 {operation.rating_class}）",
+            )
+    for source, label in labels.items():
+        try:
+            duration = int(duration_getter(source))
+        except Exception as ex:
+            raise ValueError(f"无法读取音源时长：{label}：{ex}") from ex
+        if duration < 0:
+            raise ValueError(f"音源时长无效：{label}：{duration}ms")
+        durations[source] = duration
+    for segment_plan in export_plan.segments:
+        for operation in segment_plan.audio_operations:
+            source = Path(operation.source_path)
+            if operation.end_ms > durations[source]:
+                raise ValueError(
+                    f"音源时长不足：{labels[source]} 时长 {durations[source]}ms，片段终点 {operation.end_ms}ms"
+                )
 
 
 def build_multi_difficulty_songlist_entries(
@@ -1120,6 +1155,7 @@ def do_slice(
     stage_publisher=publish_current_export_stage,
     library_merger=merge_staging_into_library_export,
     cover_renderer=render_pack_cover,
+    duration_getter: Callable[[Path], int] = default_duration_getter,
 ) -> int:
     try:
         validate_speed_value(speed)
@@ -1165,6 +1201,12 @@ def do_slice(
         multi_plan = build_multi_difficulty_export_plan(
             in_dir, song_id, segments, speed, selected_difficulties,
         )
+    except ValueError as ex:
+        log_fn(f"✗ {ex}", "err")
+        return 1
+
+    try:
+        validate_multi_difficulty_audio_durations(multi_plan, duration_getter)
     except ValueError as ex:
         log_fn(f"✗ {ex}", "err")
         return 1

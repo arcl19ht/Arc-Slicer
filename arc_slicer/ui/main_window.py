@@ -1123,6 +1123,8 @@ class MainWindow(QMainWindow):
         self._segment_validation_timer.timeout.connect(self._refresh_segment_time_validation)
         self._audio_duration_ms: int | None = None
         self._audio_duration_error = ""
+        self._preview_audio_duration_ms: int | None = None
+        self._preview_audio_duration_error = ""
         self._difficulty_discovery = None
         self._selected_difficulties: tuple[int, ...] = ()
         self._difficulty_metadata: dict[int, DifficultyMetadata] = {}
@@ -1283,6 +1285,13 @@ class MainWindow(QMainWindow):
         self._difficulty_notice.setObjectName("difficultyNotice")
         self._difficulty_notice.setWordWrap(True)
         difficulty_lay.addWidget(self._difficulty_notice)
+        self._clear_missing_difficulties_button = QPushButton("清除缺失选择")
+        self._clear_missing_difficulties_button.setObjectName("clearMissingDifficultySelection")
+        self._clear_missing_difficulties_button.setAccessibleName("清除缺失的已保存难度选择")
+        self._clear_missing_difficulties_button.setToolTip("移除当前目录中不存在的已保存难度，保留其元数据。")
+        self._clear_missing_difficulties_button.clicked.connect(self._clear_missing_difficulty_selection)
+        self._clear_missing_difficulties_button.setVisible(False)
+        difficulty_lay.addWidget(self._clear_missing_difficulties_button, 0, Qt.AlignmentFlag.AlignLeft)
         self._difficulty_rows_widget = QWidget()
         self._difficulty_rows_layout = QVBoxLayout(self._difficulty_rows_widget)
         self._difficulty_rows_layout.setContentsMargins(0, 0, 0, 0)
@@ -1808,11 +1817,15 @@ class MainWindow(QMainWindow):
         start, end = self._row_time_values(row) if row is not None else (None, None)
         try: speed = effective_segment_speed(self._current_default_speed(), row.speed_override_value()) if row is not None else 0
         except (TypeError, ValueError): speed = 0
-        duration = self.__dict__.get("_audio_duration_ms")
-        valid = start is not None and end is not None and end - start >= WAVEFORM_MIN_SEGMENT_MS and (duration is None or end <= duration) and speed > 0
+        valid, reason = self._preview_range_is_valid(start, end)
+        valid = valid and speed > 0
         if not valid:
-            controller.clear_audition_range(); self._waveform_panel.set_playback_position_ms(None)
-            if hasattr(self, "_play_pause_button"): self._play_pause_button.setEnabled(False); self._audition_status_label.setText("请选择完整片段")
+            self._cancel_selected_segment_auto_audition()
+            controller.stop(reset_to_start=False); controller.clear_audition_range()
+            self._waveform_panel.set_playback_position_ms(None)
+            if hasattr(self, "_play_pause_button"):
+                self._play_pause_button.setEnabled(False)
+                self._audition_status_label.setText(reason or "请选择完整片段")
             return
         controller.stop(); controller.set_audition_range(start, end, speed)
         if hasattr(self, "_play_pause_button"):
@@ -1838,15 +1851,12 @@ class MainWindow(QMainWindow):
             speed = effective_segment_speed(self._current_default_speed(), row.speed_override_value()) if row is not None else 0
         except (TypeError, ValueError):
             speed = 0
-        duration = self.__dict__.get("_audio_duration_ms")
+        range_valid, _reason = self._preview_range_is_valid(start, end)
         is_available = getattr(controller, "is_available", None)
         has_source = getattr(controller, "has_source", None)
         if (
             not callable(schedule)
-            or start is None
-            or end is None
-            or end - start < WAVEFORM_MIN_SEGMENT_MS
-            or (duration is not None and end > duration)
+            or not range_valid
             or speed <= 0
             or not callable(is_available)
             or not is_available()
@@ -1868,8 +1878,20 @@ class MainWindow(QMainWindow):
     def _toggle_selected_segment_playback(self) -> None:
         if self._is_text_editing_focus(): return
         self._cancel_selected_segment_auto_audition()
+        self._refresh_selected_segment_audition()
         controller = self.__dict__.get("_playback_controller")
         if controller and controller.toggle_play_pause(): pass
+
+    def _preview_range_is_valid(self, start: int | None, end: int | None) -> tuple[bool, str]:
+        if start is None or end is None or start < 0 or end - start < WAVEFORM_MIN_SEGMENT_MS:
+            return False, "请选择完整片段"
+        duration = self.__dict__.get("_preview_audio_duration_ms", self.__dict__.get("_audio_duration_ms"))
+        if duration is None:
+            return False, f"无法读取试听音源 {self.__dict__.get('_preview_audio_filename', 'base.ogg')} 的时长"
+        if end > int(duration):
+            filename = self.__dict__.get("_preview_audio_filename", "base.ogg")
+            return False, f"试听音源 {filename} 时长 {int(duration)}ms，片段终点 {end}ms"
+        return True, ""
 
     def _on_playback_position_changed(self, position: int) -> None:
         if hasattr(self, "_waveform_panel"): self._waveform_panel.set_playback_position_ms(position)
@@ -1938,10 +1960,9 @@ class MainWindow(QMainWindow):
             return
         row = self._row_by_uid(uid)
         start, end = self._row_time_values(row) if row is not None else (None, None)
-        if start is None or end is None or end - start < WAVEFORM_MIN_SEGMENT_MS:
-            return
-        duration = self.__dict__.get("_audio_duration_ms")
-        if duration is not None and end > int(duration):
+        valid, _reason = self._preview_range_is_valid(start, end)
+        if not valid:
+            self._refresh_selected_segment_audition()
             return
         try:
             speed = effective_segment_speed(self._current_default_speed(), row.speed_override_value())
@@ -2308,8 +2329,15 @@ class MainWindow(QMainWindow):
         if discovery is None:
             self._difficulty_summary.setText("未选择歌曲")
             self._set_difficulty_notice("")
+            self._clear_missing_difficulties_button.setVisible(False)
             return
         available = discovery.available
+        missing = tuple(sorted(set(self._selected_difficulties) - set(discovery.available_rating_classes)))
+        if missing:
+            self._difficulty_restore_error = f"已保存但缺失：{'、'.join(f'{item}.aff' for item in missing)}"
+        else:
+            self._difficulty_restore_error = ""
+        self._clear_missing_difficulties_button.setVisible(bool(missing))
         self._difficulty_summary.setText(f"已发现 {len(available)} 个 · 已选择 {len(self._selected_difficulties)} 个")
         notice = ""
         if not available:
@@ -2383,6 +2411,8 @@ class MainWindow(QMainWindow):
     def _load_difficulty_state_for_current_song(self, is_new_song: bool = False) -> None:
         song_dir = self._current_song_dir()
         self._preview_audio_filename = "base.ogg"
+        self._preview_audio_duration_ms = None
+        self._preview_audio_duration_error = ""
         self._difficulty_discovery = discover_song_difficulties(song_dir) if song_dir is not None else None
         saved = self._difficulty_saved_state(self._song_box.currentText())
         self._difficulty_restore_error = ""
@@ -2413,7 +2443,6 @@ class MainWindow(QMainWindow):
         else:
             selected.discard(rating_class)
         self._selected_difficulties = tuple(sorted(selected))
-        self._difficulty_restore_error = ""
         capture_difficulty = getattr(self, "_capture_difficulty_state", None)
         if callable(capture_difficulty):
             capture_difficulty()
@@ -2421,6 +2450,17 @@ class MainWindow(QMainWindow):
         self._mark_current_export_dirty()
         if hasattr(self, "_btn_run") and not self._slicer_is_running():
             self._btn_run.setEnabled(bool(self._selected_difficulties) and not bool(self._difficulty_restore_error))
+
+    def _clear_missing_difficulty_selection(self) -> None:
+        discovery = self.__dict__.get("_difficulty_discovery")
+        available = set(discovery.available_rating_classes) if discovery is not None else set()
+        self._selected_difficulties = tuple(item for item in self._selected_difficulties if item in available)
+        self._difficulty_restore_error = ""
+        self._capture_difficulty_state()
+        self._refresh_difficulty_panel()
+        self._mark_current_export_dirty()
+        if hasattr(self, "_btn_run") and not self._slicer_is_running():
+            self._btn_run.setEnabled(bool(self._selected_difficulties))
 
     def _commit_difficulty_metadata(self, rating_class: int) -> None:
         row = self.findChild(QFrame, f"difficultyRow{rating_class}")
@@ -3493,6 +3533,7 @@ class MainWindow(QMainWindow):
         generation = self._waveform_generation
         self._refresh_waveform_segments()
         audio_path = self._current_audio_path()
+        self._refresh_preview_audio_duration(audio_path)
         self._playback_controller.set_source(audio_path if audio_path is not None and audio_path.is_file() else None)
         self._refresh_selected_segment_audition()
         if audio_path is None or not audio_path.is_file():
@@ -3530,6 +3571,19 @@ class MainWindow(QMainWindow):
             return
         panel.set_waveform(data)
         self._refresh_waveform_segments()
+
+    def _refresh_preview_audio_duration(self, audio_path: Path | None) -> None:
+        self._preview_audio_duration_ms = None
+        self._preview_audio_duration_error = ""
+        if audio_path is None or not audio_path.is_file():
+            self._preview_audio_duration_error = "试听音源不存在"
+            return
+        try:
+            duration_probe = _window_dep(self, "duration_probe_func", probe_audio_duration_ms)
+            self._preview_audio_duration_ms = int(duration_probe(audio_path))
+        except Exception as ex:
+            self._preview_audio_duration_error = str(ex)
+            self._push_log(f"⚠ 无法读取试听音源 {audio_path.name} 的时长：{ex}", "muted")
 
     def _refresh_current_audio_duration(self):
         # Segment validation always uses the canonical base source, not a preview override.

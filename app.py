@@ -469,6 +469,8 @@ def do_slice(
     pack_template: PackTemplate | None = None,
     selected_difficulties=None,
     difficulty_metadata=None,
+    *,
+    duration_getter=None,
 ) -> int:
     return _exports_core.do_slice(
         songs_dir,
@@ -493,6 +495,7 @@ def do_slice(
         stage_publisher=publish_current_export_stage,
         library_merger=merge_staging_into_library_export,
         cover_renderer=render_pack_cover,
+        duration_getter=duration_getter or probe_audio_duration_ms,
     )
 
 
