@@ -8,6 +8,7 @@ _SCRIPT = r'''
 import math, sys, tempfile
 from pathlib import Path
 from PyQt6.QtCore import QCoreApplication
+from PyQt6.QtMultimedia import QMediaPlayer
 from arc_slicer.playback import AudioPlaybackController
 class Signal:
     def __init__(self): self.slots=[]
@@ -28,8 +29,8 @@ class Player:
     def setPlaybackRate(self, rate): self.rate=rate
     def setPosition(self, position): self.pos=int(position); self.positionChanged.emit(self.pos)
     def position(self): return self.pos
-    def play(self): self.play_calls+=1; self.playbackStateChanged.emit(1)
-    def pause(self): self.pause_calls+=1; self.playbackStateChanged.emit(0)
+    def play(self): self.play_calls+=1; self.playbackStateChanged.emit(QMediaPlayer.PlaybackState.PlayingState)
+    def pause(self): self.pause_calls+=1; self.playbackStateChanged.emit(QMediaPlayer.PlaybackState.PausedState)
     def errorString(self): return "fake playback error"
 class Output: pass
 QCoreApplication.instance() or QCoreApplication([])
@@ -55,7 +56,11 @@ with tempfile.TemporaryDirectory() as root:
         c.set_audition_range(1000,2000,1); c.play(); p.setPosition(2000); timer.timeout.emit(); assert p.pos==1000 and timer.running and c.is_playing()
     elif mode == "error":
         c.set_audition_range(1000,2000,1); c.clear_audition_range(); assert not c.play() and not timer.running
-        errors=[]; c.error_changed.connect(errors.append); p.errorOccurred.emit(1,"ignored"); assert c.error_text()=="fake playback error" and errors==["fake playback error"] and not timer.running
+        errors=[]; c.error_changed.connect(errors.append); p.errorOccurred.emit(QMediaPlayer.Error.ResourceError,"ignored"); assert c.error_text()=="fake playback error" and errors==["fake playback error"] and not timer.running
+    elif mode == "enums":
+        c.set_audition_range(1000,2000,1); c._on_playback_state_changed(QMediaPlayer.PlaybackState.PlayingState); assert c.is_playing() and timer.running
+        p.setPosition(1400); c._on_playback_state_changed(QMediaPlayer.PlaybackState.PausedState); assert c._state=="paused" and not timer.running and p.pos==1400
+        c._on_playback_state_changed(QMediaPlayer.PlaybackState.StoppedState); assert c._state=="ready" and not timer.running and p.pos==1400
 '''
 
 
@@ -70,6 +75,7 @@ class AudioPlaybackControllerTests(unittest.TestCase):
     def test_non_loop_boundary_finishes_once(self): self._run("nonloop")
     def test_loop_boundary_avoids_reentry(self): self._run("loop")
     def test_clear_range_and_player_error(self): self._run("error")
+    def test_real_pyqt_playback_state_enums(self): self._run("enums")
 
 
 if __name__ == "__main__":
