@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal, QSize, QPoint, QRect
 from PyQt6.QtGui import QColor, QPainter, QPen, QMouseEvent
-from PyQt6.QtWidgets import QFrame
+from PyQt6.QtWidgets import QApplication, QFrame
 try:
     from PyQt6.QtWidgets import QScrollBar
 except ImportError:
@@ -90,6 +90,7 @@ class WaveformPanel(QFrame):
     segmentEndpointDragFinished = pyqtSignal(str, str)
     segmentHovered = pyqtSignal(str)
     segmentSelected = pyqtSignal(str)
+    segmentSeekRequested = pyqtSignal(str, int)
     emptySelected = pyqtSignal()
     timeline_quick_draft_requested = pyqtSignal(int)
     TIMELINE_LANE_HEIGHT = 28
@@ -119,6 +120,9 @@ class WaveformPanel(QFrame):
         self._drag_anchor_ms: int | None = None
         self._drag_preview: tuple[int, int] | None = None
         self._last_endpoint_emit: tuple[int, int, int] | None = None
+        self._body_press_x: float | None = None
+        self._body_press_time_ms: int | None = None
+        self._body_original_interval: tuple[int, int] | None = None
         self._fallback_width = 1000
         self._fallback_height = 130
         self._timeline_expanded = True
@@ -712,6 +716,9 @@ class WaveformPanel(QFrame):
         self._drag_anchor_ms = None
         self._drag_preview = None
         self._last_endpoint_emit = None
+        self._body_press_x = None
+        self._body_press_time_ms = None
+        self._body_original_interval = None
         self._timeline_resize_active = False
 
     def _begin_interaction_at_widget_x(self, widget_x: float) -> bool:
@@ -745,14 +752,24 @@ class WaveformPanel(QFrame):
             self.setCursor(Qt.CursorShape.SizeHorCursor)
             self.segmentEndpointDragStarted.emit(self._segment_items[index]["uid"], side)
             return True
-        if self._hit_segment_body(widget_x, widget_y) is not None:
-            self._cancel_drag()
-            index = self._hit_segment_body(widget_x, widget_y)
-            if index is not None and 0 <= index < len(self._segment_items):
-                uid = self._segment_items[index]["uid"]
+        body_index = self._hit_segment_body(widget_x, widget_y)
+        if body_index is not None and 0 <= body_index < len(self._segment_items):
+            uid = self._segment_items[body_index]["uid"]
+            start_ms, end_ms = self._segments[body_index]
+            if uid != self._selected_segment_uid:
+                self._cancel_drag()
                 self._selected_segment_uid = uid
                 self.segmentSelected.emit(uid)
-            return False
+                return False
+            self._drag_mode = "body_pending"
+            self._drag_index = body_index
+            self._drag_preview = None
+            self._last_endpoint_emit = None
+            self._body_press_x = float(widget_x)
+            self._body_press_time_ms = self.x_to_time_ms(self._local_x_from_widget_x(widget_x))
+            self._body_original_interval = (int(start_ms), int(end_ms))
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            return True
         if self._selected_segment_uid:
             self._selected_segment_uid = ""
             self.emptySelected.emit()
@@ -807,6 +824,18 @@ class WaveformPanel(QFrame):
             return
         if self._drag_mode in ("start", "end") and self._drag_index is not None:
             self._apply_endpoint_drag(current_ms)
+            return
+        if self._drag_mode == "body_pending":
+            press_x = self._body_press_x
+            threshold = max(1, int(QApplication.startDragDistance()))
+            if press_x is None or abs(float(widget_x) - press_x) < threshold:
+                return
+            self._drag_mode = "body_move"
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            if self._drag_index is not None and self._drag_index < len(self._segment_items):
+                self.segmentEndpointDragStarted.emit(self._segment_items[self._drag_index]["uid"], "move")
+        if self._drag_mode == "body_move":
+            self._apply_body_drag(current_ms)
 
     def _finish_interaction_at_widget_x(self, widget_x: float) -> None:
         self._finish_interaction_at_pos(widget_x, None)
@@ -824,15 +853,24 @@ class WaveformPanel(QFrame):
             self.update()
             return
         self._update_interaction_at_pos(widget_x, widget_y)
-        commit_endpoint = self._drag_mode in ("start", "end")
+        commit_endpoint = self._drag_mode in ("start", "end", "body_move")
         if self._drag_mode == "create" and self._drag_preview is not None:
             start_ms, end_ms = self._drag_preview
             if end_ms - start_ms >= WAVEFORM_MIN_SEGMENT_MS:
                 self.segmentCreated.emit(int(start_ms), int(end_ms))
+        elif self._drag_mode == "body_pending":
+            if self._drag_index is not None and self._drag_index < len(self._segment_items):
+                interval = self._body_original_interval
+                if interval is not None:
+                    start_ms, end_ms = interval
+                    clicked_ms = self.x_to_time_ms(self._local_x_from_widget_x(widget_x))
+                    clicked_ms = max(start_ms, min(end_ms - 1, int(clicked_ms)))
+                    self.segmentSeekRequested.emit(self._segment_items[self._drag_index]["uid"], clicked_ms)
         elif commit_endpoint:
             self.segmentEndpointCommitted.emit()
             if self._drag_index is not None and self._drag_index < len(self._segment_items):
-                self.segmentEndpointDragFinished.emit(self._segment_items[self._drag_index]["uid"], self._drag_mode)
+                side = "move" if self._drag_mode == "body_move" else self._drag_mode
+                self.segmentEndpointDragFinished.emit(self._segment_items[self._drag_index]["uid"], side)
         self._cancel_drag()
         self.unsetCursor()
         self.update()
@@ -858,6 +896,33 @@ class WaveformPanel(QFrame):
             self.segmentEndpointChanged.emit(index, new_start, new_end)
         self.update()
 
+    def _apply_body_drag(self, current_ms: int) -> None:
+        index = self._drag_index
+        interval = self._body_original_interval
+        press_time = self._body_press_time_ms
+        duration_ms = self._duration_ms()
+        if (
+            index is None
+            or interval is None
+            or press_time is None
+            or not (0 <= index < len(self._segments))
+            or duration_ms <= 0
+        ):
+            return
+        original_start, original_end = interval
+        delta = int(current_ms) - int(press_time)
+        delta = max(-original_start, min(delta, duration_ms - original_end))
+        new_start, new_end = original_start + delta, original_end + delta
+        self._segments[index] = (new_start, new_end)
+        if index < len(self._segment_items):
+            self._segment_items[index]["start"] = new_start
+            self._segment_items[index]["end"] = new_end
+        emitted = (index, new_start, new_end)
+        if emitted != self._last_endpoint_emit:
+            self._last_endpoint_emit = emitted
+            self.segmentEndpointChanged.emit(index, new_start, new_end)
+        self.update()
+
     def mousePressEvent(self, event: QMouseEvent):
         widget_x = self._event_widget_x(event)
         widget_y = self._event_widget_y(event)
@@ -866,9 +931,16 @@ class WaveformPanel(QFrame):
                 event.accept()
                 return
         if self._is_quick_draft_event(event):
-            # Existing handles and blocks retain their normal interaction semantics.
-            if self._hit_endpoint(widget_x, widget_y) is not None or self._hit_segment_body(widget_x, widget_y) is not None:
+            # Ctrl remains reserved for blank-area quick drafts; segment bodies only select.
+            if self._hit_endpoint(widget_x, widget_y) is not None:
                 self._begin_interaction_at_pos(widget_x, widget_y)
+                event.accept()
+                return
+            body_index = self._hit_segment_body(widget_x, widget_y)
+            if body_index is not None and 0 <= body_index < len(self._segment_items):
+                uid = self._segment_items[body_index]["uid"]
+                self._selected_segment_uid = uid
+                self.segmentSelected.emit(uid)
                 event.accept()
                 return
             elif self._request_timeline_quick_draft(widget_x, widget_y):
@@ -895,7 +967,16 @@ class WaveformPanel(QFrame):
         else:
             self._timeline_grip_hover = False
             self._update_hover_at_pos(self._event_widget_x(event), self._event_widget_y(event))
-            self.unsetCursor()
+            body_index = self._hit_segment_body(self._event_widget_x(event), self._event_widget_y(event)) if self._can_interact() else None
+            if body_index is not None and body_index < len(self._segment_items):
+                cursor = (
+                    Qt.CursorShape.OpenHandCursor
+                    if self._segment_items[body_index]["uid"] == self._selected_segment_uid
+                    else Qt.CursorShape.PointingHandCursor
+                )
+                self.setCursor(cursor)
+            else:
+                self.unsetCursor()
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event):
