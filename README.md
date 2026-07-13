@@ -14,6 +14,10 @@ Arcaea 谱面切片工具。可将完整谱面按多个时间段导出为独立�
 - 片段选择、自动/手动排序、级联链接组，以及撤销/重做快捷键
 - 清晰的输入、下拉、开关、主次按钮和禁用状态视觉层级；不改变既有切片、导出或试听语义
 
+## V2.5-B Validation
+
+V2.5-B validates the duration of every source audio used by an export before staging is created. Previewing an override `N.ogg` keeps the canonical `base.ogg` duration intact and rejects preview ranges outside that selected source. Windows source, real-song, and EXE acceptance remain pending.
+
 ## UI 清晰度改造
 
 当前 UI 使用统一的语义色彩与控件样式：只读路径以信息展示呈现，文本输入、下拉选择、开关和按钮具有不同的静态外观，禁用操作仍保留可识别轮廓。自动排序、循环和自动试听使用真实 switch；表单与导出选择使用方形勾选框。该改造只调整视觉表达，不改变切片和导出数据结构、播放/循环/自动试听、排序、dirty 或撤销历史语义。
