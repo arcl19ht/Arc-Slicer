@@ -1899,7 +1899,7 @@ class MainWindow(QMainWindow):
             return
         controller.stop(); controller.set_audition_range(start, end, speed)
         if hasattr(self, "_play_pause_button"):
-            self._play_pause_button.setEnabled(controller.is_available()); self._audition_speed_label.setText(f"{speed:g}×"); self._audition_time_label.setText(f"{format_duration_ms(0)} / {format_duration_ms(end-start)}"); self._audition_status_label.setText("就绪")
+            self._play_pause_button.setEnabled(controller.is_available() and controller.has_source()); self._audition_speed_label.setText(f"{speed:g}×"); self._audition_time_label.setText(f"{format_duration_ms(0)} / {format_duration_ms(end-start)}"); self._audition_status_label.setText("就绪")
         self._waveform_panel.set_playback_position_ms(start)
 
     def _toggle_selected_segment_playback(self) -> None:
@@ -2665,6 +2665,7 @@ class MainWindow(QMainWindow):
             row.deleteLater()
         self._selected_segment_uid = ""
         self._hovered_segment_uid = ""
+        self._refresh_selected_segment_audition()
         if refresh and hasattr(self, "_refresh_waveform_segments"):
             self._refresh_waveform_segments()
 
@@ -2980,9 +2981,11 @@ class MainWindow(QMainWindow):
                 speed_error = self._segment_speed_error(row)
                 row.set_speed_error(speed_error)
                 if speed_error:
+                    self._refresh_selected_segment_audition()
                     return False
         else:
             if not self._commit_linked_interval_field(row, field):
+                self._refresh_selected_segment_audition()
                 return False
         self._commit_segment_edit(row, field)
         return True
@@ -3057,6 +3060,10 @@ class MainWindow(QMainWindow):
 
     def _on_segment_edit_started(self, row: SegmentRow, field: str) -> None:
         if row in self._rows:
+            if row.uid == self.__dict__.get("_selected_segment_uid", ""):
+                controller = self.__dict__.get("_playback_controller")
+                if controller is not None:
+                    controller.stop(reset_to_start=False)
             self._capture_segment_edit_display_snapshot(row)
             self._begin_segment_history_transaction(f"input:{row.uid}:{field}", f"修改{field}")
 
@@ -3210,6 +3217,7 @@ class MainWindow(QMainWindow):
         self._refresh_waveform_segments()
         audio_path = self._current_audio_path()
         self._playback_controller.set_source(audio_path if audio_path is not None and audio_path.is_file() else None)
+        self._refresh_selected_segment_audition()
         if audio_path is None or not audio_path.is_file():
             self._waveform_audio_path = ""
             panel.set_empty()

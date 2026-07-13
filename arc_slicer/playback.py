@@ -40,6 +40,7 @@ class AudioPlaybackController(QObject):
         self._range: tuple[int, int] | None = None
         self._rate = 1.0
         self._loop = True
+        self._source_ready = False
         self._state = "unavailable" if not QT_MULTIMEDIA_AVAILABLE and media_player is None else "idle"
         self._error = "当前环境不支持音频播放" if self._state == "unavailable" else ""
         self._handling_boundary = False
@@ -57,6 +58,7 @@ class AudioPlaybackController(QObject):
         self.state_changed.emit(self._state)
 
     def is_available(self) -> bool: return self._player is not None and self._state != "unavailable"
+    def has_source(self) -> bool: return self._source_ready
     def error_text(self) -> str: return self._error
     def audition_range(self): return self._range
     def playback_rate(self) -> float: return self._rate
@@ -72,19 +74,22 @@ class AudioPlaybackController(QObject):
         if not self.is_available(): return
         path = Path(path) if path else None
         if path is None or not path.is_file():
+            self._source_ready = False
+            self._player.setSource(QUrl.fromLocalFile(""))
             self._set_state("idle"); return
         self._player.setSource(QUrl.fromLocalFile(str(path.resolve())))
+        self._source_ready = True
         self._set_state("ready")
 
     def set_audition_range(self, start_ms: int, end_ms: int, speed: float) -> None:
-        if not self.is_available() or start_ms < 0 or end_ms - start_ms < 100 or not math.isfinite(speed) or speed <= 0:
+        if not self.is_available() or not self.has_source() or start_ms < 0 or end_ms - start_ms < 100 or not math.isfinite(speed) or speed <= 0:
             self.clear_audition_range(); return
         self.stop(reset_to_start=False); self._range = (int(start_ms), int(end_ms)); self._rate = float(speed)
         self._player.setPlaybackRate(self._rate); self._player.setPosition(self._range[0]); self._set_state("ready")
 
     def clear_audition_range(self) -> None:
         self.stop(reset_to_start=False); self._range = None
-        if self.is_available(): self._set_state("idle")
+        if self.is_available(): self._set_state("ready" if self.has_source() else "idle")
 
     def set_loop_enabled(self, enabled: bool) -> None: self._loop = bool(enabled)
     def play(self) -> bool:
