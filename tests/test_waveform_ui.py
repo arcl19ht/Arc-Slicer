@@ -72,9 +72,9 @@ class WaveformUiTests(unittest.TestCase):
         self.assertEqual(panel.draft_segments(), [])
 
     def test_theme_constants_are_neutral_not_warm_legacy_colors(self):
-        self.assertEqual(app.C_BG, "#F3F4F6")
+        self.assertEqual(app.C_BG, "#F4F6FB")
         self.assertEqual(app.C_CARD, "#FFFFFF")
-        self.assertEqual(app.C_ACCENT, "#2563EB")
+        self.assertEqual(app.C_ACCENT, "#005BFF")
         self.assertNotIn(app.C_BG, {"#EDE9DF", "#FAF9F5", "#F2EFE7"})
         self.assertNotIn(app.C_CARD, {"#FAF9F5", "#F2EFE7"})
         self.assertNotIn(app.C_ACCENT, {"#C96442", "#B5573A"})
