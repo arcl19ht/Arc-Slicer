@@ -1,6 +1,6 @@
 # Arc Slicer Agent Handoff
 
-Read this document before changing the project. V2.4-A and V2.4-B are merged into `main`; the UI clarity refresh is in development.
+Read this document before changing the project. V2.4-A and V2.4-B are merged into `main`; the UI clarity refresh has passed Windows source-environment visual acceptance.
 
 ## Current Baseline
 
@@ -8,7 +8,7 @@ Read this document before changing the project. V2.4-A and V2.4-B are merged int
 - Stable version: V2.3
 - V2.3 closing commit: `8316bba feat(v2.3): add timeline quick draft gesture`
 - Current feature branch: `feature/ui-clarity-refresh`
-- Current task: UI clarity refresh and final visual acceptance.
+- Current task: V2.4-C Windows EXE/OGG stability acceptance.
 
 V2.2 is complete: AFF/audio slicing, `current_export` and `library_export`, songlist/packlist export, fixed pack sections, per-segment speed overrides, duplicate output-ID blocking, copy segment, and safe external shell merge. External merge uses an explicit plan and confirmation, backs up affected content, writes a manifest, attempts recovery on failure, and remembers a verified target `songs` directory.
 
@@ -16,7 +16,7 @@ V2.3 is complete: waveform data and caching; waveform, time ruler, and timeline 
 
 V2.4-A provides manual audition of a selected complete segment from source `base.ogg`. V2.4-B adds a default-off, non-persistent 200ms debounce: only formal interval/effective-speed commits schedule playback; `textChanged` and timeline `mouseMove` do not. Manual play/pause and lifecycle changes cancel pending playback. Neither playback state nor the switch affects dirty state, history, or exports.
 
-The UI clarity refresh may change theme tokens, object names, QSS, and visual control hierarchy only. It must not change slicing, exports, playback/loop/automatic-audition behavior, sorting, link groups, undo history, or dirty state. `arc_slicer.ui.styles` is the sole global QSS source; `app.QSS` and `main_window.QSS` remain compatibility aliases.
+The UI clarity refresh corrected interactive control rendering without changing behavior: auto sort, loop, and auto audition use true switches; form and export choices use square checkboxes; primary enabled/disabled states are visually distinct. `arc_slicer.ui.styles` is the sole global QSS source; `app.QSS` and `main_window.QSS` remain compatibility aliases.
 
 ## Module Routing
 
@@ -75,4 +75,4 @@ Prefer restrained, low-noise PyQt UI with stable layouts and minimal configurati
 
 The V2.3 plan is historical. Use `README.md` and `docs/status/current-development-status.md` for current product status. Work beyond V2.3 must state clearly whether it is implemented, in development, awaiting manual acceptance, or not implemented.
 
-Next: real listening acceptance, then V2.4-C Windows EXE/OGG stability. Outside an explicitly scoped task, do not add Combo snapping, multi-difficulty support, chart preview, a full DAW workflow, or a second playback engine.
+Next: V2.4-C Windows EXE/OGG stability. Windows source-environment UI acceptance is complete, but EXE validation remains pending. Outside an explicitly scoped task, do not add Combo snapping, multi-difficulty support, chart preview, a full DAW workflow, or a second playback engine.
