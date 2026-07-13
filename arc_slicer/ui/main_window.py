@@ -1741,6 +1741,11 @@ class MainWindow(QMainWindow):
                     pass
         self._refresh_selected_segment_audition()
 
+    def _select_segment_for_user(self, uid: str, *, scroll: bool = False) -> None:
+        """Apply an explicit user selection, then schedule its refreshed range."""
+        self._set_selected_segment_uid(uid, scroll=scroll)
+        self._schedule_selected_segment_auto_audition()
+
     def _refresh_selected_segment_audition(self) -> None:
         controller = self.__dict__.get("_playback_controller")
         if controller is None: return
@@ -1774,7 +1779,25 @@ class MainWindow(QMainWindow):
         schedule = getattr(controller, "schedule_auto_play", None)
         row = self._row_by_uid(self.__dict__.get("_selected_segment_uid", ""))
         start, end = self._row_time_values(row) if row is not None else (None, None)
-        if not callable(schedule) or start is None or end is None or end - start < WAVEFORM_MIN_SEGMENT_MS:
+        try:
+            speed = effective_segment_speed(self._current_default_speed(), row.speed_override_value()) if row is not None else 0
+        except (TypeError, ValueError):
+            speed = 0
+        duration = self.__dict__.get("_audio_duration_ms")
+        is_available = getattr(controller, "is_available", None)
+        has_source = getattr(controller, "has_source", None)
+        if (
+            not callable(schedule)
+            or start is None
+            or end is None
+            or end - start < WAVEFORM_MIN_SEGMENT_MS
+            or (duration is not None and end > duration)
+            or speed <= 0
+            or not callable(is_available)
+            or not is_available()
+            or not callable(has_source)
+            or not has_source()
+        ):
             self._cancel_selected_segment_auto_audition()
             return False
         return bool(schedule())
@@ -1846,13 +1869,13 @@ class MainWindow(QMainWindow):
 
     def _on_segment_row_selected(self, row: SegmentRow) -> None:
         if row in self._rows:
-            self._set_selected_segment_uid(row.uid)
+            self._select_segment_for_user(row.uid)
 
     def _on_waveform_segment_hovered(self, uid: str) -> None:
         self._set_hovered_segment_uid(uid)
 
     def _on_waveform_segment_selected(self, uid: str) -> None:
-        self._set_selected_segment_uid(uid, scroll=True)
+        self._select_segment_for_user(uid, scroll=True)
 
     def _on_join_group_previewed(self, row: SegmentRow) -> None:
         if row in self._rows and self._row_join_mode(row):
