@@ -24,10 +24,14 @@ class Controller:
 class Speed:
     def text(self): return "1.0"
 
+class Scroll:
+    def __init__(self): self.value=173; self.calls=[]
+    def ensureWidgetVisible(self, row): self.calls.append(row.uid); self.value=0
+
 qapp=app.QApplication.instance() or app.QApplication([])
 w=app.MainWindow.__new__(app.MainWindow); w._uid=0; w._segment_order=0; w._rows=[]; w._segment_edit_display_snapshots={}
 w._speed_input=Speed(); w._audio_duration_ms=10000; w._selected_segment_uid=""; w._hovered_segment_uid=""; w._join_preview_uid=""
-w._waveform_panel=app.WaveformPanel(); w._playback_controller=Controller(); w._play_pause_button=app.QPushButton(); w._audition_time_label=app.QLabel(); w._audition_speed_label=app.QLabel(); w._audition_status_label=app.QLabel(); w._refresh_segment_interaction_state=lambda:None
+w._waveform_panel=app.WaveformPanel(); w._scroll=Scroll(); w._playback_controller=Controller(); w._play_pause_button=app.QPushButton(); w._audition_time_label=app.QLabel(); w._audition_speed_label=app.QLabel(); w._audition_status_label=app.QLabel(); w._refresh_segment_interaction_state=lambda:None
 w._segment_history_transactions={}; w._segment_history_suspended=False; w._segment_restore_in_progress=False
 w._capture_segment_history_state=lambda: None
 w._auto_audition_enabled=False
@@ -57,10 +61,12 @@ elif mode=="timeline":
     app.MainWindow._on_waveform_segment_selected(w,"selected")
     assert w._selected_segment_uid=="selected"
     assert [call[0] for call in w._playback_controller.calls]==["stop","range","schedule"]
+    assert w._scroll.value==173 and not w._scroll.calls
 elif mode=="off":
     w._auto_audition_enabled=False; w._playback_controller.calls.clear()
-    app.MainWindow._on_segment_row_selected(w,w._rows[0])
+    app.MainWindow._on_waveform_segment_selected(w,"selected")
     assert [call[0] for call in w._playback_controller.calls]==["stop","range"]
+    assert w._scroll.value==173 and not w._scroll.calls
 elif mode=="reselect":
     w._auto_audition_enabled=True; w._playback_controller.calls.clear()
     app.MainWindow._on_segment_row_selected(w,w._rows[0]); app.MainWindow._on_segment_row_selected(w,w._rows[0])
@@ -68,13 +74,15 @@ elif mode=="reselect":
 elif mode=="rapid":
     w._auto_audition_enabled=True; w._rows=[app.SegmentRow(0,1000,3000,uid="a"),app.SegmentRow(1,4000,6000,uid="b"),app.SegmentRow(2,7000,9000,uid="c")]
     w._playback_controller.calls.clear()
-    for row in w._rows: app.MainWindow._on_segment_row_selected(w,row)
+    for row in w._rows: app.MainWindow._on_waveform_segment_selected(w,row.uid)
     assert w._selected_segment_uid=="c"
     assert w._playback_controller.calls[-2:]==[("range",(7000,9000,1.0)),("schedule",)]
+    assert w._scroll.value==173 and not w._scroll.calls
 elif mode=="selected_draft":
     w._auto_audition_enabled=True; draft=app.SegmentRow(0,1000,None,uid="draft"); w._rows=[draft]; w._playback_controller.calls.clear()
-    app.MainWindow._on_segment_row_selected(w,draft)
+    app.MainWindow._on_waveform_segment_selected(w,"draft")
     assert ("schedule",) not in w._playback_controller.calls and ("cancel",) in w._playback_controller.calls
+    assert w._scroll.value==173 and not w._scroll.calls
 elif mode=="unavailable":
     w._auto_audition_enabled=True; w._playback_controller.source=False; w._playback_controller.calls.clear()
     app.MainWindow._on_segment_row_selected(w,w._rows[0])

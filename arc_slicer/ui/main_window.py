@@ -1875,7 +1875,7 @@ class MainWindow(QMainWindow):
         self._set_hovered_segment_uid(uid)
 
     def _on_waveform_segment_selected(self, uid: str) -> None:
-        self._select_segment_for_user(uid, scroll=True)
+        self._select_segment_for_user(uid)
 
     def _on_join_group_previewed(self, row: SegmentRow) -> None:
         if row in self._rows and self._row_join_mode(row):
