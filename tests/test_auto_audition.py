@@ -47,6 +47,42 @@ elif mode=="invalid":
     w._auto_audition_enabled=True; w._rows=[app.SegmentRow(0,1000,None,uid="draft")]; w._selected_segment_uid="draft"
     assert not app.MainWindow._schedule_selected_segment_auto_audition(w)
     assert ("cancel",) in w._playback_controller.calls
+elif mode=="card":
+    w._auto_audition_enabled=True; w._playback_controller.calls.clear()
+    app.MainWindow._on_segment_row_selected(w,w._rows[0])
+    assert w._selected_segment_uid=="selected"
+    assert [call[0] for call in w._playback_controller.calls]==["stop","range","schedule"]
+elif mode=="timeline":
+    w._auto_audition_enabled=True; w._playback_controller.calls.clear()
+    app.MainWindow._on_waveform_segment_selected(w,"selected")
+    assert w._selected_segment_uid=="selected"
+    assert [call[0] for call in w._playback_controller.calls]==["stop","range","schedule"]
+elif mode=="off":
+    w._auto_audition_enabled=False; w._playback_controller.calls.clear()
+    app.MainWindow._on_segment_row_selected(w,w._rows[0])
+    assert [call[0] for call in w._playback_controller.calls]==["stop","range"]
+elif mode=="reselect":
+    w._auto_audition_enabled=True; w._playback_controller.calls.clear()
+    app.MainWindow._on_segment_row_selected(w,w._rows[0]); app.MainWindow._on_segment_row_selected(w,w._rows[0])
+    assert [call[0] for call in w._playback_controller.calls]==["stop","range","schedule","stop","range","schedule"]
+elif mode=="rapid":
+    w._auto_audition_enabled=True; w._rows=[app.SegmentRow(0,1000,3000,uid="a"),app.SegmentRow(1,4000,6000,uid="b"),app.SegmentRow(2,7000,9000,uid="c")]
+    w._playback_controller.calls.clear()
+    for row in w._rows: app.MainWindow._on_segment_row_selected(w,row)
+    assert w._selected_segment_uid=="c"
+    assert w._playback_controller.calls[-2:]==[("range",(7000,9000,1.0)),("schedule",)]
+elif mode=="selected_draft":
+    w._auto_audition_enabled=True; draft=app.SegmentRow(0,1000,None,uid="draft"); w._rows=[draft]; w._playback_controller.calls.clear()
+    app.MainWindow._on_segment_row_selected(w,draft)
+    assert ("schedule",) not in w._playback_controller.calls and ("cancel",) in w._playback_controller.calls
+elif mode=="unavailable":
+    w._auto_audition_enabled=True; w._playback_controller.source=False; w._playback_controller.calls.clear()
+    app.MainWindow._on_segment_row_selected(w,w._rows[0])
+    assert ("schedule",) not in w._playback_controller.calls and ("cancel",) in w._playback_controller.calls
+elif mode=="out_of_bounds":
+    w._auto_audition_enabled=True; w._rows=[app.SegmentRow(0,9000,11000,uid="late")]; w._playback_controller.calls.clear()
+    app.MainWindow._on_segment_row_selected(w,w._rows[0])
+    assert ("schedule",) not in w._playback_controller.calls and ("cancel",) in w._playback_controller.calls
 '''
 
 
@@ -60,3 +96,11 @@ class AutoAuditionTests(unittest.TestCase):
     def test_edit_start_cancels_pending_and_stops_playback(self): self._run("edit")
     def test_manual_toggle_cancels_pending_first(self): self._run("manual")
     def test_draft_segment_is_not_scheduled(self): self._run("invalid")
+    def test_card_selection_refreshes_then_schedules(self): self._run("card")
+    def test_timeline_selection_refreshes_then_schedules(self): self._run("timeline")
+    def test_selection_does_not_schedule_when_disabled(self): self._run("off")
+    def test_reselecting_the_same_segment_reschedules(self): self._run("reselect")
+    def test_rapid_selection_ends_with_the_last_range_scheduled(self): self._run("rapid")
+    def test_draft_card_selection_cancels_without_scheduling(self): self._run("selected_draft")
+    def test_missing_source_cancels_without_scheduling(self): self._run("unavailable")
+    def test_out_of_bounds_selection_cancels_without_scheduling(self): self._run("out_of_bounds")
