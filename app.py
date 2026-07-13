@@ -1077,17 +1077,17 @@ class MainWindow(_MainWindow):
         MainWindow._ensure_facade_dependencies(self)
         return _MainWindow._refresh_arc_cut_warnings(self, *args, **kwargs)
 
-    def _save_slides(self, *args, **kwargs):
+    def _save_slides(self):
         MainWindow._ensure_facade_dependencies(self)
-        return _MainWindow._save_slides(self, *args, **kwargs)
+        return _MainWindow._save_slides(self)
 
-    def _run_slicer(self, *args, **kwargs):
+    def _run_slicer(self):
         MainWindow._ensure_facade_dependencies(self)
-        return _MainWindow._run_slicer(self, *args, **kwargs)
+        return _MainWindow._run_slicer(self)
 
-    def _open_out(self, *args, **kwargs):
+    def _open_out(self):
         MainWindow._ensure_facade_dependencies(self)
-        return _MainWindow._open_out(self, *args, **kwargs)
+        return _MainWindow._open_out(self)
 
 
 
