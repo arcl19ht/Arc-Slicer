@@ -151,6 +151,10 @@ from arc_slicer.playback import AudioPlaybackController
 from arc_slicer.ui.segment_history import (
     QUndoStack, SegmentHistoryItem, SegmentHistoryState, SegmentSnapshotCommand,
 )
+from arc_slicer.ui.styles import QSS as _APP_QSS
+from arc_slicer.ui.check_box import SemanticCheckBox
+from arc_slicer.ui.combo_box import VisualComboBox
+from arc_slicer.ui.toggle_switch import ToggleSwitch
 
 from arc_slicer import exports as _exports_core
 from arc_slicer import persistence as _persistence_core
@@ -966,169 +970,9 @@ class SlicerWorker(_workers_core.SlicerWorker):
             library_enabled_fn=effective_library_export_enabled,
         )
 
-QSS = f"""
-QWidget {{
-    font-family: "Segoe UI", system-ui, sans-serif;
-    font-size: 14px;
-    color: {C_TEXT};
-}}
-QMainWindow, #root {{
-    background-color: {C_BG};
-}}
-QScrollArea {{
-    background: transparent;
-    border: none;
-}}
-QScrollBar:vertical {{
-    background: transparent;
-    width: 6px;
-    margin: 0;
-}}
-QScrollBar::handle:vertical {{
-    background: #CBD5E1;
-    border-radius: 3px;
-    min-height: 30px;
-}}
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-    height: 0;
-}}
-QComboBox {{
-    background: #FFFFFF;
-    border: 1px solid {C_INPUT_BD};
-    border-radius: 9px;
-    padding: 9px 30px 9px 12px;
-    font-size: 14px;
-    font-weight: 500;
-    min-width: 120px;
-}}
-QComboBox:focus {{
-    border-color: {C_ACCENT};
-}}
-QComboBox::drop-down {{
-    border: none;
-    width: 26px;
-}}
-QComboBox::down-arrow {{
-    image: none;
-    width: 0; height: 0;
-    border-left: 5px solid transparent;
-    border-right: 5px solid transparent;
-    border-top: 6px solid {C_LABEL};
-    margin-right: 10px;
-}}
-QComboBox QAbstractItemView {{
-    background: #FFFFFF;
-    border: 1px solid {C_INPUT_BD};
-    border-radius: 8px;
-    selection-background-color: {C_CARD2};
-    selection-color: {C_TEXT};
-    padding: 4px;
-}}
-QLineEdit {{
-    background: {C_INPUT_BG};
-    border: 1px solid {C_INPUT_BD};
-    border-radius: 9px;
-    padding: 9px 11px;
-    font-size: 14px;
-    font-family: "Consolas", "Courier New", monospace;
-}}
-QLineEdit:focus {{
-    border-color: {C_ACCENT};
-}}
-QPushButton {{
-    font-family: "Segoe UI", sans-serif;
-    font-weight: 600;
-    border-radius: 11px;
-}}
-QPushButton#btnRun {{
-    background: {C_ACCENT};
-    color: #FFFFFF;
-    border: 1px solid {C_ACCENT_H};
-    padding: 12px 22px;
-    font-size: 14px;
-    font-weight: 750;
-}}
-QPushButton#btnRun:hover {{
-    background: {C_ACCENT_H};
-    color: #FFFFFF;
-}}
-QPushButton#btnRun:disabled {{
-    background: #E5E7EB;
-    color: #6B7280;
-    border: 1px solid #D1D5DB;
-}}
-QPushButton#btnSec {{
-    background: #F9FAFB;
-    color: {C_TEXT2};
-    border: 1px solid {C_BORDER};
-    padding: 11px 16px;
-    font-size: 14px;
-}}
-QPushButton#btnSec:hover {{
-    background: #FFFFFF;
-    border-color: {C_BORDER};
-}}
-QPushButton#btnSec:disabled {{
-    background: #E5E7EB;
-    color: #6B7280;
-    border: 1px solid #D1D5DB;
-}}
-QPushButton#btnAdd {{
-    background: {C_CARD2};
-    color: {C_LABEL};
-    border: 1.5px dashed {C_BORDER};
-    border-radius: 12px;
-    padding: 13px;
-    font-size: 14px;
-    font-weight: 600;
-}}
-QPushButton#btnAdd:hover {{
-    border-color: {C_ACCENT};
-    color: {C_ACCENT};
-    background: #EFF6FF;
-}}
-QPushButton#btnDir {{
-    background: {C_CARD};
-    color: {C_TEXT2};
-    border: 1px solid {C_BORDER};
-    border-radius: 8px;
-    padding: 6px 12px;
-    font-size: 12px;
-    font-weight: 600;
-}}
-QPushButton#btnDir:hover {{
-    background: {C_CARD2};
-    border-color: {C_ACCENT};
-    color: {C_ACCENT};
-}}
-QPushButton#btnDel {{
-    background: {C_INPUT_BG};
-    color: {C_ERR};
-    border: 1px solid {C_BORDER2};
-    border-radius: 8px;
-    padding: 0;
-    font-size: 12px;
-    font-weight: 600;
-    min-width: 30px;
-    max-width: 30px;
-    min-height: 30px;
-    max-height: 30px;
-}}
-QPushButton#btnDel:hover {{
-    background: #FEF2F2;
-    border-color: #FCA5A5;
-}}
-QTextEdit#log {{
-    background: #111827;
-    color: #E5E7EB;
-    border: none;
-    border-radius: 12px;
-    padding: 14px 16px;
-    font-family: "Consolas", "JetBrains Mono", monospace;
-    font-size: 12px;
-    line-height: 1.75;
-}}
-"""
+
+# Kept as a public compatibility alias; the facade applies the shared stylesheet.
+QSS = _APP_QSS
 
 
 # ─── 工具函数 ─────────────────────────────────────────────────────────────────
@@ -1315,13 +1159,16 @@ class MainWindow(QMainWindow):
         self._scroll.setWidgetResizable(True)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self._scroll.setStyleSheet("background: transparent; border: none;")
         self._scroll.viewport().setAutoFillBackground(False)
         outer.addWidget(self._scroll)
 
         content = QWidget()
+        content.setObjectName("contentRoot")
         content.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        content.setStyleSheet(f"QWidget {{ background: {C_BG}; }}")
+        content.setAutoFillBackground(True)
+        content_palette = content.palette()
+        content_palette.setColor(QPalette.ColorRole.Window, QColor(C_BG))
+        content.setPalette(content_palette)
         self._scroll.setWidget(content)
 
         lay = QVBoxLayout(content)
@@ -1339,9 +1186,7 @@ class MainWindow(QMainWindow):
 
         # ── songs 目录行
         dir_frame = QFrame()
-        dir_frame.setStyleSheet(
-            f"QFrame {{ background: {C_CARD2}; border: 1px solid {C_BORDER2}; border-radius: 12px; }}"
-        )
+        dir_frame.setObjectName("directoryDisplay")
         dir_lay = QHBoxLayout(dir_frame)
         dir_lay.setContentsMargins(14, 10, 14, 10)
         dir_lay.setSpacing(10)
@@ -1355,7 +1200,7 @@ class MainWindow(QMainWindow):
         )
         self._dir_path.setMinimumWidth(80)
         dir_lay.addWidget(self._dir_path, 1)
-        btn_dir = QPushButton("更改")
+        btn_dir = QPushButton("更改目录")
         btn_dir.setObjectName("btnDir")
         btn_dir.clicked.connect(self._browse_songs_dir)
         dir_lay.addWidget(btn_dir)
@@ -1372,9 +1217,7 @@ class MainWindow(QMainWindow):
 
         # ── 曲目 + 速度 topbar
         topbar = QFrame()
-        topbar.setStyleSheet(
-            f"QFrame {{ background: {C_CARD2}; border: 1px solid {C_BORDER2}; border-radius: 14px; }}"
-        )
+        topbar.setObjectName("songTopbar")
         tb_lay = QHBoxLayout(topbar)
         tb_lay.setContentsMargins(13, 13, 13, 13)
         tb_lay.setSpacing(12)
@@ -1382,7 +1225,8 @@ class MainWindow(QMainWindow):
         song_col = QVBoxLayout()
         song_col.setSpacing(7)
         song_col.addWidget(field_label("曲目 SONG ID"))
-        self._song_box = QComboBox()
+        self._song_box = VisualComboBox()
+        self._song_box.setObjectName("comboInput")
         self._song_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._song_box.currentTextChanged.connect(self._on_song_changed)
         song_col.addWidget(self._song_box)
@@ -1392,6 +1236,7 @@ class MainWindow(QMainWindow):
         speed_col.setSpacing(7)
         speed_col.addWidget(field_label("默认速度 DEFAULT SPEED"))
         self._speed_input = QLineEdit("1.0")
+        self._speed_input.setObjectName("speedInput")
         self._speed_input.setFixedWidth(124)
         self._speed_input.textChanged.connect(self._on_default_speed_changed)
         self._speed_input.editingFinished.connect(self._on_default_speed_committed)
@@ -1410,16 +1255,19 @@ class MainWindow(QMainWindow):
         self._audio_duration_label = make_label("音频时长：—", size=12, color=C_LABEL)
         seg_head.addWidget(self._audio_duration_label)
         seg_head.addSpacing(14)
-        self._auto_sort_check = QCheckBox("自动排序")
+        self._auto_sort_check = ToggleSwitch("自动排序")
+        self._auto_sort_check.setCursor(Qt.CursorShape.PointingHandCursor)
         self._auto_sort_check.setChecked(True)
         self._auto_sort_check.setStyleSheet(f"color: {C_TEXT2}; font-size: 12px; background: transparent; border: none;")
         self._auto_sort_check.clicked.connect(self._on_auto_sort_changed)
         seg_head.addWidget(self._auto_sort_check)
-        self._sort_mode_box = QComboBox()
+        seg_head.addWidget(make_label("排序规则", size=12, color=C_MUTED))
+        self._sort_mode_box = VisualComboBox()
         self._sort_mode_box.addItem("时间优先", "time")
         self._sort_mode_box.addItem("倍速优先", "speed")
-        self._sort_mode_box.addItem("手动顺序", "manual")
+        self._sort_mode_box.setObjectName("comboInput")
         self._sort_mode_box.currentIndexChanged.connect(self._on_sort_mode_changed)
+        self._sort_mode_box.setCursor(Qt.CursorShape.PointingHandCursor)
         seg_head.addWidget(self._sort_mode_box)
         seg_head.addSpacing(14)
         seg_head.addWidget(make_label("毫秒 · 对应 .aff 整数时间", size=12, color=C_LABEL))
@@ -1436,20 +1284,29 @@ class MainWindow(QMainWindow):
         self._waveform_panel.emptySelected.connect(self._clear_selected_segment)
         self._waveform_panel.timeline_quick_draft_requested.connect(self._on_timeline_quick_draft_requested)
         lay.addWidget(self._waveform_panel)
-        audition = QHBoxLayout()
-        self._play_pause_button = QPushButton("播放")
+        playback_toolbar = QFrame()
+        playback_toolbar.setObjectName("playbackToolbar")
+        audition = QHBoxLayout(playback_toolbar)
+        audition.setContentsMargins(10, 8, 10, 8)
+        audition.setSpacing(10)
+        self._play_pause_button = QPushButton("▶ 播放片段")
+        self._play_pause_button.setObjectName("btnPlayback")
         self._play_pause_button.clicked.connect(self._toggle_selected_segment_playback)
-        self._loop_check = QCheckBox("循环")
+        self._loop_check = ToggleSwitch("循环")
+        self._loop_check.setCursor(Qt.CursorShape.PointingHandCursor)
         self._loop_check.setChecked(True)
         self._loop_check.toggled.connect(self._playback_controller.set_loop_enabled)
-        self._auto_audition_check = QCheckBox("自动试听")
+        self._auto_audition_check = ToggleSwitch("自动试听")
+        self._auto_audition_check.setCursor(Qt.CursorShape.PointingHandCursor)
         self._auto_audition_check.setChecked(False)
         self._auto_audition_check.toggled.connect(self._set_auto_audition_enabled)
         self._audition_time_label = make_label("0:00.000 / 0:00.000", size=12, color=C_MUTED)
         self._audition_speed_label = make_label("1×", size=12, color=C_MUTED)
         self._audition_status_label = make_label("请选择完整片段", size=12, color=C_LABEL)
+        for label in (self._audition_time_label, self._audition_speed_label, self._audition_status_label):
+            label.setObjectName("statusChip")
         audition.addWidget(self._play_pause_button); audition.addWidget(self._loop_check); audition.addWidget(self._auto_audition_check); audition.addWidget(self._audition_time_label); audition.addWidget(self._audition_speed_label); audition.addWidget(self._audition_status_label); audition.addStretch()
-        lay.addLayout(audition)
+        lay.addWidget(playback_toolbar)
         self._playback_controller.position_changed.connect(self._on_playback_position_changed)
         self._playback_controller.state_changed.connect(self._on_playback_state_changed)
         self._playback_controller.error_changed.connect(self._on_playback_error)
@@ -1467,7 +1324,7 @@ class MainWindow(QMainWindow):
 
         # ── 添加按钮
         btn_add = QPushButton("＋ 添加时间段")
-        btn_add.setObjectName("btnAdd")
+        btn_add.setObjectName("btnAddSegment")
         btn_add.clicked.connect(self._on_add_segment_clicked)
         lay.addWidget(btn_add)
         lay.addSpacing(20)
@@ -1483,17 +1340,15 @@ class MainWindow(QMainWindow):
         # ── 导出目标
         lay.addWidget(section_title("导出目标", "EXPORT TARGETS"))
         target_frame = QFrame()
-        target_frame.setStyleSheet(
-            f"QFrame {{ background: {C_CARD}; border: 1px solid {C_BORDER}; border-radius: 12px; }}"
-        )
+        target_frame.setObjectName("exportCard")
         target_lay = QVBoxLayout(target_frame)
         target_lay.setContentsMargins(14, 10, 14, 10)
         target_lay.setSpacing(7)
         target_row = QHBoxLayout()
         target_row.setSpacing(18)
-        self._current_export_check = QCheckBox("生成本次导出包")
+        self._current_export_check = SemanticCheckBox("生成本次导出包")
         self._current_export_check.setChecked(True)
-        self._library_export_check = QCheckBox("更新总导出包")
+        self._library_export_check = SemanticCheckBox("更新总导出包")
         self._library_export_check.setChecked(True)
         self._current_export_check.clicked.connect(self._mark_current_export_dirty)
         self._library_export_check.clicked.connect(self._mark_current_export_dirty)
@@ -1514,9 +1369,7 @@ class MainWindow(QMainWindow):
         # 外部目标壳合并 EXTERNAL MERGE
         lay.addWidget(section_title("外部目标壳合并", "EXTERNAL MERGE"))
         external_frame = QFrame()
-        external_frame.setStyleSheet(
-            f"QFrame {{ background: {C_CARD}; border: 1px solid {C_BORDER}; border-radius: 12px; }}"
-        )
+        external_frame.setObjectName("externalMergeCard")
         external_lay = QVBoxLayout(external_frame)
         external_lay.setContentsMargins(14, 11, 14, 11)
         external_lay.setSpacing(8)
@@ -1531,7 +1384,7 @@ class MainWindow(QMainWindow):
         )
         self._external_merge_target_label.setMinimumWidth(80)
         external_target_row.addWidget(self._external_merge_target_label, 1)
-        self._btn_external_choose = QPushButton("选择")
+        self._btn_external_choose = QPushButton("选择目录")
         self._btn_external_choose.setObjectName("btnDir")
         self._btn_external_choose.clicked.connect(self._browse_external_merge_target)
         external_target_row.addWidget(self._btn_external_choose)
@@ -1544,7 +1397,7 @@ class MainWindow(QMainWindow):
         self._btn_external_check.clicked.connect(self._check_external_merge_plan)
         external_actions.addWidget(self._btn_external_check)
         self._btn_external_confirm = QPushButton("确认合并")
-        self._btn_external_confirm.setObjectName("btnSec")
+        self._btn_external_confirm.setObjectName("btnPrimary")
         self._btn_external_confirm.clicked.connect(self._confirm_external_merge)
         external_actions.addWidget(self._btn_external_confirm)
         external_actions.addStretch()
@@ -1564,9 +1417,7 @@ class MainWindow(QMainWindow):
 
         # ── 操作行
         action_frame = QFrame()
-        action_frame.setStyleSheet(
-            f"QFrame {{ background: {C_CARD}; border: 1px solid {C_BORDER}; border-radius: 12px; }}"
-        )
+        action_frame.setObjectName("actionBar")
         actions = QHBoxLayout(action_frame)
         actions.setContentsMargins(12, 10, 12, 10)
         actions.setSpacing(10)
@@ -1948,7 +1799,8 @@ class MainWindow(QMainWindow):
         if audition and hasattr(self, "_audition_time_label"): self._audition_time_label.setText(f"{format_duration_ms(max(0, position-audition[0]))} / {format_duration_ms(audition[1]-audition[0])}")
 
     def _on_playback_state_changed(self, state: str) -> None:
-        if hasattr(self, "_play_pause_button"): self._play_pause_button.setText("暂停" if state == "playing" else "播放")
+        if hasattr(self, "_play_pause_button"):
+            self._play_pause_button.setText("Ⅱ 暂停" if state == "playing" else "▶ 播放片段")
 
     def _on_playback_error(self, text: str) -> None:
         if hasattr(self, "_audition_status_label"): self._audition_status_label.setText(text or "音频播放失败")
@@ -2272,16 +2124,22 @@ class MainWindow(QMainWindow):
 
     def _on_auto_sort_changed(self, *_args) -> None:
         self._auto_sort_enabled = bool(self._auto_sort_check.isChecked())
+        self._sort_mode_box.setEnabled(self._auto_sort_enabled)
         if self._auto_sort_enabled:
             self._maybe_auto_sort_segments(force=True)
 
     def _on_sort_mode_changed(self, *_args) -> None:
         self._sort_mode = self._sort_mode_box.currentData() or "time"
+        # Old persisted "manual" values mean that automatic ordering is off.
         if self._sort_mode == "manual":
+            self._sort_mode = "time"
             self._auto_sort_enabled = False
             self._auto_sort_check.setChecked(False)
+            self._sort_mode_box.setCurrentIndex(0)
+            self._sort_mode_box.setEnabled(False)
         elif self._auto_sort_check.isChecked():
             self._auto_sort_enabled = True
+            self._sort_mode_box.setEnabled(True)
             self._maybe_auto_sort_segments(force=True)
 
     def _load_initial_data(self):
@@ -2323,6 +2181,19 @@ class MainWindow(QMainWindow):
 
     def _apply_slides(self, data: dict):
         self._cancel_timeline_quick_draft()
+        # V2.3 persisted manual ordering as a sort mode. The refreshed UI models
+        # it as the automatic-sort switch being off while preserving row order.
+        legacy_sort_mode = str(data.get("sort_mode") or "").strip().lower()
+        if legacy_sort_mode == "manual":
+            self._auto_sort_enabled = False
+            self._auto_sort_check.setChecked(False)
+            self._sort_mode_box.setCurrentIndex(0)
+            self._sort_mode_box.setEnabled(False)
+        elif legacy_sort_mode in {"time", "speed"}:
+            self._auto_sort_enabled = True
+            self._auto_sort_check.setChecked(True)
+            self._sort_mode_box.setCurrentIndex(0 if legacy_sort_mode == "time" else 1)
+            self._sort_mode_box.setEnabled(True)
         if data.get("speed") is not None:
             self._speed_input.setText(str(data["speed"]))
         if data.get("song_id"):

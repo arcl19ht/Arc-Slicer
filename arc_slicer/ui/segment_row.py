@@ -254,6 +254,7 @@ class SegmentRow(QFrame):
         link_group_id=None,
     ):
         super().__init__(parent)
+        self.setObjectName("segmentCard")
         self.s_val = s
         self.e_val = e
         self.uid = str(uid or f"seg_{uuid.uuid4().hex[:10]}")
@@ -533,7 +534,7 @@ class SegmentRow(QFrame):
             "padding: 7px 9px;"
             "}"
             "QLineEdit:focus {"
-            f"border-color: {C_ACCENT}; "
+            f"border: 2px solid {C_ACCENT}; "
             f"background: {C_CARD2};"
             "}"
         )
@@ -567,7 +568,7 @@ class SegmentRow(QFrame):
             border = C_BORDER2
             width = 1
         self.setStyleSheet(
-            f"QFrame {{ background: {bg}; border: {width}px solid {border}; border-radius: 12px; }}"
+            f"QFrame#segmentCard {{ background: {bg}; border: {width}px solid {border}; border-radius: 12px; }}"
         )
 
     def _install_time_validator(self, field: QLineEdit) -> None:
@@ -636,7 +637,7 @@ class SegmentRow(QFrame):
                 f"font-family: 'Consolas','Courier New',monospace; font-size: 13px; "
                 f"color: {C_ERR}; background: transparent; border: none;"
             )
-            self.setStyleSheet("QFrame { background: #FFFFFF; border: 1px solid #E6B5A8; border-radius: 12px; }")
+            self.setStyleSheet("QFrame#segmentCard { background: #FFFFFF; border: 1px solid #FDA29B; border-radius: 12px; }")
         else:
             try:
                 speed = self.effective_speed()

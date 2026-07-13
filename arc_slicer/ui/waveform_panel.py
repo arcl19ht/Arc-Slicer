@@ -102,6 +102,7 @@ class WaveformPanel(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("waveformPanel")
         self._state = "empty"
         self._message = "选择源曲后显示波形"
         self._waveform: WaveformData | None = None
@@ -146,7 +147,7 @@ class WaveformPanel(QFrame):
         self.setMinimumHeight(220)
         self.setMaximumHeight(460)
         self.setStyleSheet(
-            f"QFrame {{ background: {C_TIMELINE_BG}; border: 1px solid {C_BORDER}; border-radius: 10px; }}"
+            f"QFrame#waveformPanel {{ background: {C_TIMELINE_BG}; border: 1px solid {C_BORDER}; border-radius: 10px; }}"
         )
 
     def status_text(self) -> str:
@@ -987,12 +988,12 @@ class WaveformPanel(QFrame):
 
     def _draw_timeline_grip(self, painter: QPainter) -> None:
         grip = self._timeline_grip_rect()
-        painter.fillRect(grip, QColor("#D1D5DB" if self._timeline_grip_hover or self._timeline_resize_active else C_BORDER2))
+        painter.fillRect(grip, QColor("#98A2B3" if self._timeline_grip_hover or self._timeline_resize_active else C_BORDER2))
         painter.setPen(QPen(QColor(C_BORDER), 1))
         painter.drawLine(grip.left(), grip.top(), grip.right(), grip.top())
         center_x = grip.center().x()
         center_y = grip.center().y()
-        painter.setPen(QPen(QColor(C_MUTED), 2))
+        painter.setPen(QPen(QColor(C_TEXT2), 2))
         for offset in (-10, 0, 10):
             painter.drawLine(center_x + offset - 3, center_y, center_x + offset + 3, center_y)
 
