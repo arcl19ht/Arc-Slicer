@@ -187,6 +187,10 @@ def import_song_folder(src: Path, songs_dir: Path) -> tuple[bool, str, str | Non
         return False, "目录不存在", None
     if not src.is_dir():
         return False, "请拖入歌曲文件夹，而不是单个文件。", None
+    # Validate before making a songs directory, link, or copied target.
+    from arc_slicer.difficulties import is_multi_difficulty_song_dir
+    if not is_multi_difficulty_song_dir(src):
+        return False, "歌曲目录必须包含可读 base.ogg 和至少一个可读的 0.aff–4.aff。", None
 
     songs_dir.mkdir(parents=True, exist_ok=True)
     dest = songs_dir / src.name

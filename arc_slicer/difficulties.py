@@ -188,7 +188,15 @@ def discover_song_difficulties(song_dir: Path) -> DifficultyDiscovery:
 
 def is_multi_difficulty_song_dir(song_dir: Path) -> bool:
     song_dir = Path(song_dir)
-    return song_dir.is_dir() and (song_dir / "base.ogg").is_file() and bool(discover_song_difficulties(song_dir).available)
+    audio = song_dir / "base.ogg"
+    if not song_dir.is_dir() or audio.is_symlink() or not audio.is_file():
+        return False
+    try:
+        with audio.open("rb") as audio_file:
+            audio_file.read(1)
+    except OSError:
+        return False
+    return bool(discover_song_difficulties(song_dir).available)
 
 
 def normalize_selected_difficulties(values: Iterable[int]) -> tuple[int, ...]:
