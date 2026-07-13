@@ -60,7 +60,9 @@
 - Windows EXE 最终人工验收通过，包括真实 OGG 播放、手动/自动试听、循环、倍速、选择防抖、定位播放、整体及级联平移、撤销/重做与 viewport 稳定性。
 - 最终 EXE 构建成功，SHA-256：`6F314CDB5DE1F479E1F06A506A63B7BC29C5D8D93BB7278307E5FEACF56B37F9`。
 
-## 当前开发：V2.5-A 多难度基础与兼容模型
+## 当前开发：V2.5-B 多难度选择与正式导出
+
+V2.5-B 已接入主界面、slides、试听音源选择和正式写盘流程，尚待 Windows 源码 UI、真实多 AFF/OGG 切片与目标壳兼容的人工作业验收。曲目卡片之后、timeline 之前显示发现的标准难度；选择与每难度 metadata 按歌曲保存。每段输出始终只有一个目录与一个 song ID，包含一次 `base.ogg`、选中的 AFF 和可用的选中 `N.ogg`；songlist 聚合为一个 `difficulties` 数组。0/1/2 保留兼容占位，3/4 仅在实际选中时写入。试听音源可在 `base.ogg` 与有效专属音源间切换，不会改写 canonical base duration 或 slides。`audioOverride` 继续由目录派生，`jacketOverride` 尚未实现；V2.5-C 尚未开始。
 
 当前分支：`feature/v2.5-multi-difficulty-audit`。V2.5-A 已实现单一难度定义、目录发现、选择规范化、旧 slides 兼容解析、每难度元数据迁移、缺失/未知难度报告和多难度导出/单条 songlist 聚合计划纯逻辑；尚未接入 UI 或正式写盘。
 

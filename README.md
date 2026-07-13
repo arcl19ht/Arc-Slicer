@@ -77,8 +77,10 @@ dist\ArcSlicer.exe
 ```text
 songs/
 └── your_song_id/
-    ├── 2.aff
+    ├── 2.aff                 （至少需要 0.aff–4.aff 中的一个）
     ├── base.ogg
+    ├── 3.aff                 （可选：任意标准难度组合）
+    ├── 3.ogg                 （可选：对应 3.aff 的专属音源）
     ├── 1080_base.jpg       （可选）
     ├── base.jpg            （可选）
     └── 1080_base_256.jpg   （可选）
