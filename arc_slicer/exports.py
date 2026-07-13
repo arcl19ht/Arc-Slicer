@@ -18,6 +18,9 @@ from typing import Callable
 
 from arc_slicer.aff import _scale_bpm_string, slice_aff as default_slice_aff
 from arc_slicer.audio import _get_ffmpeg as default_get_ffmpeg, slice_ogg as default_slice_ogg
+from arc_slicer.difficulties import (
+    DifficultyDefinition, discover_song_difficulties, validate_selected_difficulties,
+)
 from arc_slicer.paths import DATA_ROOT, OUT_DIR, SONGLIST_EXAMPLE_PATH
 from arc_slicer.segments import effective_segment_speed, normalize_speed_token, validate_speed_value
 
@@ -115,6 +118,69 @@ def build_segment_export_plan(source_id: str, segments: list[dict], default_spee
             "id": segment_id,
         })
     return plan
+
+
+@dataclass(frozen=True)
+class ChartExportOperation:
+    difficulty: DifficultyDefinition
+    source_path: Path
+    output_filename: str
+
+
+@dataclass(frozen=True)
+class MultiDifficultySegmentExportPlan:
+    segment: dict
+    audio_output_filename: str
+    chart_operations: tuple[ChartExportOperation, ...]
+
+
+@dataclass(frozen=True)
+class MultiDifficultyExportPlan:
+    selected_difficulties: tuple[int, ...]
+    segments: tuple[MultiDifficultySegmentExportPlan, ...]
+
+    @property
+    def audio_operation_count(self) -> int:
+        return len(self.segments)
+
+    @property
+    def chart_operation_count(self) -> int:
+        return sum(len(item.chart_operations) for item in self.segments)
+
+
+def build_multi_difficulty_export_plan(
+    source_dir: Path,
+    source_id: str,
+    segments: list[dict],
+    default_speed: float,
+    selected_difficulties,
+) -> MultiDifficultyExportPlan:
+    """Build the V2.5-B operation order without invoking ffmpeg or writing output."""
+    source_dir = Path(source_dir)
+    discovery = discover_song_difficulties(source_dir)
+    validation = validate_selected_difficulties(selected_difficulties, discovery.available)
+    if validation.missing:
+        names = "、".join(str(item) + ".aff" for item in validation.missing)
+        raise ValueError(f"选中的难度文件不存在: {names}")
+
+    definitions = tuple(
+        item for item in discovery.available if item.rating_class in validation.selected
+    )
+    segment_plan = build_segment_export_plan(source_id, segments, default_speed)
+    return MultiDifficultyExportPlan(
+        selected_difficulties=validation.selected,
+        segments=tuple(
+            MultiDifficultySegmentExportPlan(
+                segment=dict(item),
+                audio_output_filename="base.ogg",
+                chart_operations=tuple(
+                    ChartExportOperation(definition, source_dir / definition.aff_filename, definition.aff_filename)
+                    for definition in definitions
+                ),
+            )
+            for item in segment_plan
+        ),
+    )
 
 
 def copy_song_jackets(source_dir: Path, out_dir: Path) -> list[Path]:
