@@ -284,6 +284,7 @@ class V21DoSliceFoundationTests(unittest.TestCase):
                     [{"s": 21000, "e": 22000}],
                     1.25,
                     lambda text, kind="normal": logs.append((text, kind)),
+                    duration_getter=lambda _path: 120_000,
                 )
             finally:
                 app.OUT_DIR = old_out_dir

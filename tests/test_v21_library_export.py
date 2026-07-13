@@ -194,6 +194,7 @@ class _ExportCase(unittest.TestCase):
             None,
             current,
             library,
+            duration_getter=lambda _path: 120_000,
         )
 
 

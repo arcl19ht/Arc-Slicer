@@ -212,6 +212,7 @@ class _PackExportCase(unittest.TestCase):
             current_export_enabled=current,
             library_export_enabled=library,
             packlist_enabled=packlist,
+            duration_getter=lambda _path: 120_000,
         )
 
 
@@ -398,6 +399,7 @@ class V21PackDoSliceTests(_PackExportCase):
             current_export_enabled=True,
             library_export_enabled=False,
             packlist_enabled=True,
+            duration_getter=lambda _path: 120_000,
         )
 
         self.assertEqual(code, 0, self.logs)

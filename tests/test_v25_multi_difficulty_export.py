@@ -53,6 +53,7 @@ class MultiDifficultyFormalExportTests(unittest.TestCase):
                 "chart_designer": "Chart", "jacket_designer": "Jacket", "rating": "9",
             },
             songlist, None, True, False, False, None, selected, metadata,
+            duration_getter=lambda _path: 10_000,
         )
 
     def test_ftr_only_legacy_call_keeps_base_and_two_aff(self):
@@ -88,4 +89,3 @@ class MultiDifficultyFormalExportTests(unittest.TestCase):
         self.assertEqual(self._run(selected=[2, 3], songlist=True, metadata={2: {"rating": 9}}), 1)
         self.assertFalse(app.current_export_root(self.out).exists())
         self.assertEqual(self.audio_calls, [])
-
