@@ -60,6 +60,17 @@ class DifficultyDiscoveryTests(unittest.TestCase):
         (song / "base.ogg").unlink()
         self.assertFalse(is_multi_difficulty_song_dir(song))
 
+    def test_header_only_aff_remains_a_valid_chart_and_export_plan_input(self):
+        song = self._song((3,))
+        (song / "2.aff").write_text("AudioOffset:-30\n-\n", encoding="utf-8")
+        discovery = discover_song_difficulties(song)
+        self.assertEqual(discovery.available_rating_classes, (2, 3))
+        self.assertEqual(discovery.invalid, ())
+        self.assertEqual(discovery.warnings, ())
+        self.assertEqual(default_selected_difficulties(discovery.available_rating_classes), (2, 3))
+        plan = build_multi_difficulty_export_plan(song, "song", [{"s": 0, "e": 100}], 1.0, [2, 3])
+        self.assertEqual([item.output_filename for item in plan.segments[0].chart_operations], ["2.aff", "3.aff"])
+
 
 class DifficultySelectionTests(unittest.TestCase):
     def test_normalizes_deduplicates_and_preserves_all_legal_combinations(self):

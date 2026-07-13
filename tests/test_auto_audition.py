@@ -10,7 +10,7 @@ import sys
 import app
 
 class Controller:
-    def __init__(self): self.calls=[]; self.available=True; self.source=True
+    def __init__(self): self.calls=[]; self.available=True; self.source=True; self.playing=False
     def is_available(self): return self.available
     def has_source(self): return self.source
     def stop(self, **kwargs): self.calls.append(("stop", kwargs))
@@ -20,6 +20,9 @@ class Controller:
     def schedule_auto_play(self): self.calls.append(("schedule",)); return self.available and self.source
     def cancel_pending_auto_play(self): self.calls.append(("cancel",))
     def toggle_play_pause(self): self.calls.append(("toggle",)); return True
+    def is_playing(self): return self.playing
+    def play(self): self.calls.append(("play",)); self.playing=True; return True
+    def pause(self): self.calls.append(("pause",)); self.playing=False
 
 class Speed:
     def text(self): return "1.0"
@@ -46,7 +49,17 @@ elif mode=="edit":
     assert ("cancel",) in w._playback_controller.calls and any(c[0]=="stop" for c in w._playback_controller.calls)
 elif mode=="manual":
     w._auto_audition_enabled=True; app.MainWindow._toggle_selected_segment_playback(w)
-    assert w._playback_controller.calls[0]==("cancel",) and ("toggle",) in w._playback_controller.calls
+    assert w._playback_controller.calls[0]==("cancel",) and ("play",) in w._playback_controller.calls
+elif mode=="pause_resume":
+    w._selected_audition_spec=("base.ogg",1000,3000,1.0); w._playback_controller.playing=True; w._playback_controller.calls.clear()
+    app.MainWindow._toggle_selected_segment_playback(w)
+    assert [call[0] for call in w._playback_controller.calls]==["cancel","pause"]
+    w._playback_controller.calls.clear(); app.MainWindow._toggle_selected_segment_playback(w)
+    assert [call[0] for call in w._playback_controller.calls]==["cancel","play"]
+elif mode=="spec_change":
+    w._selected_audition_spec=("base.ogg",1000,3000,1.0); w._playback_controller.calls.clear(); w._rows[0]._speed_override.setText("1.5")
+    app.MainWindow._toggle_selected_segment_playback(w)
+    assert [call[0] for call in w._playback_controller.calls]==["cancel","stop","range","play"]
 elif mode=="invalid":
     w._auto_audition_enabled=True; w._rows=[app.SegmentRow(0,1000,None,uid="draft")]; w._selected_segment_uid="draft"
     assert not app.MainWindow._schedule_selected_segment_auto_audition(w)
@@ -103,6 +116,8 @@ class AutoAuditionTests(unittest.TestCase):
     def test_toggle_schedules_and_disabling_cancels(self): self._run("toggle")
     def test_edit_start_cancels_pending_and_stops_playback(self): self._run("edit")
     def test_manual_toggle_cancels_pending_first(self): self._run("manual")
+    def test_manual_pause_then_resume_preserves_the_existing_range(self): self._run("pause_resume")
+    def test_changed_audition_spec_refreshes_before_playing(self): self._run("spec_change")
     def test_draft_segment_is_not_scheduled(self): self._run("invalid")
     def test_card_selection_refreshes_then_schedules(self): self._run("card")
     def test_timeline_selection_refreshes_then_schedules(self): self._run("timeline")
