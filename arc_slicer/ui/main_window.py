@@ -1397,6 +1397,7 @@ class MainWindow(QMainWindow):
         self._songlist_panel = SonglistPanel()
         self._songlist_panel.enabled_changed.connect(self._refresh_export_target_state)
         self._songlist_panel.enabled_changed.connect(self._refresh_difficulty_panel)
+        self._songlist_panel.difficulty_metadata_changed.connect(self._set_difficulty_metadata_from_panel)
         self._songlist_panel.enabled_changed.connect(self._mark_current_export_dirty)
         self._songlist_panel.metadata_changed.connect(self._mark_current_export_dirty)
         lay.addWidget(self._songlist_panel)
@@ -2413,7 +2414,7 @@ class MainWindow(QMainWindow):
                 badge.setObjectName(f"difficultyAudioBadge{rating_class}")
                 headline.addWidget(badge)
             row_lay.addLayout(headline)
-            if songlist_on and rating_class in self._selected_difficulties:
+            if False and songlist_on and rating_class in self._selected_difficulties:
                 metadata = self._difficulty_metadata.get(rating_class, DifficultyMetadata(rating_class, None))
                 meta_grid = QGridLayout()
                 meta_grid.setContentsMargins(25, 0, 0, 0)
@@ -2447,6 +2448,11 @@ class MainWindow(QMainWindow):
                 plus.toggled.connect(lambda _checked, rc=rating_class: self._commit_difficulty_metadata(rc))
                 row._difficulty_inputs = (rating_input, plus, chart, jacket, title)
             layout.addWidget(row)
+        if hasattr(self, "_songlist_panel"):
+            audio_names = {asset.rating_class: asset.filename for asset in discovery.usable_override_audio}
+            self._songlist_panel.set_difficulty_context(
+                available, set(self._selected_difficulties), self._difficulty_metadata, audio_names,
+            )
 
     def _load_difficulty_state_for_current_song(self, is_new_song: bool = False) -> None:
         song_dir = self._current_song_dir()
@@ -2520,6 +2526,18 @@ class MainWindow(QMainWindow):
         self._difficulty_metadata[rating_class] = DifficultyMetadata(
             rating_class, rating, plus.isChecked(), chart.text().strip(), jacket.text().strip(), title.text().strip(),
         )
+        self._capture_difficulty_state()
+        self._mark_current_export_dirty()
+
+    def _set_difficulty_metadata_from_panel(self, rating_class: int, values: dict) -> None:
+        try:
+            self._difficulty_metadata[rating_class] = DifficultyMetadata(
+                rating_class, values.get("rating"), bool(values.get("rating_plus")),
+                str(values.get("chart_designer", "")), str(values.get("jacket_designer", "")),
+                str(values.get("title_override_base", "")),
+            )
+        except ValueError:
+            return
         self._capture_difficulty_state()
         self._mark_current_export_dirty()
 

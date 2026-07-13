@@ -69,7 +69,7 @@ def default_pack_form_for_song(source_id: str) -> dict:
 def make_label(text: str, size: int = 14, weight: int = 400, color: str = C_TEXT) -> QLabel:
     lbl = QLabel(text)
     f = lbl.font()
-    f.setPointSize(size)
+    f.setPointSize(max(1, int(size)))
     f.setWeight(QFont.Weight(weight))
     lbl.setFont(f)
     lbl.setStyleSheet(f"color: {color}; background: transparent;")
@@ -234,6 +234,7 @@ class SonglistPanel(QFrame):
 
     enabled_changed = pyqtSignal()
     metadata_changed = pyqtSignal()
+    difficulty_metadata_changed = pyqtSignal(int, object)
 
     # 字段定义：(显示标签, key, 占位提示)
     _FIELDS = [
@@ -248,7 +249,6 @@ class SonglistPanel(QFrame):
         ("游戏版本 (version)",            "version",         "e.g. 5.0"),
         ("谱师 (chartDesigner)",         "chart_designer",  ""),
         ("封面画师 (jacketDesigner)",     "jacket_designer", ""),
-        ("定数 RATING",                  "rating",          "9"),
     ]
 
     def __init__(self, parent=None):
@@ -382,8 +382,6 @@ class SonglistPanel(QFrame):
                 inp.setText("single")
             elif key == "side":
                 inp.setText("0")
-            elif key == "rating":
-                inp.setText("9")
             col_lay.addWidget(inp)
             grid.addLayout(col_lay, row, col)
             self._inputs[key] = inp
@@ -391,11 +389,22 @@ class SonglistPanel(QFrame):
                 inp.textChanged.connect(self._emit_metadata_changed)
 
         body_lay.addLayout(grid)
+        # Kept only for old panel callers; it is deliberately not part of the visible form.
+        self._inputs["rating"] = QLineEdit("9")
+        self._inputs["rating"].hide()
+
+        self._difficulty_metadata_box = QFrame()
+        self._difficulty_metadata_box.setObjectName("songlistDifficultyMetadata")
+        self._difficulty_metadata_layout = QVBoxLayout(self._difficulty_metadata_box)
+        self._difficulty_metadata_layout.setContentsMargins(0, 8, 0, 0)
+        self._difficulty_metadata_layout.setSpacing(8)
+        body_lay.addWidget(self._difficulty_metadata_box)
 
         # Rating Plus 行
         rp_row = QHBoxLayout()
         rp_row.setSpacing(10)
         self._rating_plus = SemanticCheckBox("有 +（ratingPlus）")
+        self._rating_plus.hide()  # Compatibility state only; ratingPlus belongs to each difficulty card.
         self._rating_plus.setCursor(Qt.CursorShape.PointingHandCursor)
         self._rating_plus.setStyleSheet(
             f"color: {C_TEXT2}; font-size: 13px; background: transparent; border: none;"
@@ -753,6 +762,56 @@ class SonglistPanel(QFrame):
         self._last_pack_default_source = source_id
         self._update_pack_description_placeholder(new_defaults["pack_id"])
 
+    def set_difficulty_context(self, definitions, selected, metadata, audio_filenames=None) -> None:
+        """Render selected difficulty metadata; MainWindow remains its data owner."""
+        layout = self._difficulty_metadata_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        audio_filenames = audio_filenames or {}
+        for definition in definitions or ():
+            rating_class = definition.rating_class
+            if rating_class not in selected:
+                continue
+            value = metadata.get(rating_class)
+            card = QFrame()
+            card.setObjectName(f"songlistDifficultyCard{rating_class}")
+            card_lay = QGridLayout(card)
+            card_lay.setContentsMargins(10, 8, 10, 8)
+            card_lay.setHorizontalSpacing(7)
+            card_lay.addWidget(make_label(f"{definition.abbreviation} · ratingClass {rating_class}", 12, 700, C_TEXT2), 0, 0, 1, 2)
+            rating = QLineEdit("" if value is None or value.rating is None else str(value.rating))
+            rating.setObjectName(f"songlistDifficultyRating{rating_class}")
+            rating.setAccessibleName(f"{definition.abbreviation} rating")
+            plus = SemanticCheckBox("ratingPlus")
+            plus.setObjectName(f"songlistDifficultyRatingPlus{rating_class}")
+            plus.setAccessibleName(f"{definition.abbreviation} ratingPlus")
+            plus.setChecked(bool(value and value.rating_plus))
+            chart = QLineEdit("" if value is None else value.chart_designer)
+            jacket = QLineEdit("" if value is None else value.jacket_designer)
+            title = QLineEdit("" if value is None else value.title_override_base)
+            for widget, name in ((chart, "ChartDesigner"), (jacket, "JacketDesigner"), (title, "TitleOverride")):
+                widget.setObjectName(f"songlistDifficulty{name}{rating_class}")
+            title.setPlaceholderText("难度专属基础名称（可选；导出自动附加区间与倍速）")
+            chart.setPlaceholderText("留空继承公共谱师")
+            jacket.setPlaceholderText("留空继承公共封面画师")
+            card_lay.addWidget(make_label("定数", 11, color=C_LABEL), 1, 0); card_lay.addWidget(rating, 1, 1)
+            card_lay.addWidget(plus, 1, 2)
+            card_lay.addWidget(chart, 2, 0, 1, 2); card_lay.addWidget(jacket, 2, 2)
+            card_lay.addWidget(title, 3, 0, 1, 3)
+            if rating_class in audio_filenames:
+                card_lay.addWidget(make_label(f"使用 {audio_filenames[rating_class]}", 11, color=C_MUTED), 4, 0, 1, 3)
+            def emit_value(rc=rating_class, r=rating, p=plus, c=chart, j=jacket, t=title):
+                raw = r.text().strip()
+                try: parsed = None if not raw else int(raw)
+                except ValueError: return
+                self.difficulty_metadata_changed.emit(rc, {"rating": parsed, "rating_plus": p.isChecked(), "chart_designer": c.text().strip(), "jacket_designer": j.text().strip(), "title_override_base": t.text().strip()})
+            for control in (rating, chart, jacket, title): control.editingFinished.connect(emit_value)
+            plus.toggled.connect(lambda _checked, emit=emit_value: emit())
+            layout.addWidget(card)
+        self._difficulty_metadata_box.setVisible(bool(layout.count()) and self.is_songlist_enabled())
+
     def reset_for_source(self, source_id: str):
         source_id = str(source_id or "").strip()
         if not source_id or "目录为空" in source_id:
@@ -761,7 +820,7 @@ class SonglistPanel(QFrame):
         self._resetting_source = True
         try:
             for key in ("artist", "bpm", "bpm_base", "purchase", "bg", "version",
-                        "chart_designer", "jacket_designer", "rating"):
+                        "chart_designer", "jacket_designer"):
                 self._inputs[key].setText("")
             self._inputs["side"].setText("0")
             self._inputs["title_base"].setText(source_id)
@@ -787,7 +846,8 @@ class SonglistPanel(QFrame):
         pack_value = self._pack_inputs["pack_id"].text().strip()
         shared_pack_id = pack_value if pack_value and set_value in ("", "single") else (set_value or pack_value)
         data["set"] = shared_pack_id
-        data["rating_plus"] = self._rating_plus.isChecked()
+        data["rating"] = 9
+        data["rating_plus"] = False
         for key, inp in self._pack_inputs.items():
             data[key] = inp.text().strip()
         data["pack_id"] = shared_pack_id
@@ -817,8 +877,8 @@ class SonglistPanel(QFrame):
                 "version":         self._inputs["version"].text().strip(),
                 "chart_designer":  self._inputs["chart_designer"].text().strip(),
                 "jacket_designer": self._inputs["jacket_designer"].text().strip(),
-                "rating":          int(self._inputs["rating"].text() or "9"),
-                "rating_plus":     self._rating_plus.isChecked(),
+                "rating":          9,
+                "rating_plus":     False,
             }
         except ValueError:
             return None
@@ -845,7 +905,7 @@ class SonglistPanel(QFrame):
             self._pack_upload_check.setChecked(str(meta.get("pack_cover_source")).lower() == "upload")
         if "pack_cover_path" in meta:
             self._pack_cover_path.setText(str(meta["pack_cover_path"]))
-        for k in ("bpm_base", "side", "rating"):
+        for k in ("bpm_base", "side"):
             if k in meta:
                 self._inputs[k].setText(str(meta[k]))
         if "rating_plus" in meta:
