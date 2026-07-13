@@ -36,20 +36,20 @@ QPushButton:disabled {{ background: #EAECF0; color: #667085; border-color: #98A2
 QPushButton#btnRun, QPushButton#btnPrimary, QPushButton#btnPlayback {{ background: {C_ACCENT}; color: white; border-color: {C_ACCENT}; }}
 QPushButton#btnRun:hover, QPushButton#btnPrimary:hover, QPushButton#btnPlayback:hover {{ background: {C_ACCENT_H}; border-color: {C_ACCENT_H}; }}
 QPushButton#btnRun:pressed, QPushButton#btnPrimary:pressed, QPushButton#btnPlayback:pressed {{ background: {C_ACCENT_P}; border-color: {C_ACCENT_P}; }}
-QPushButton#btnRun:disabled, QPushButton#btnPrimary:disabled, QPushButton#btnPlayback:disabled {{ background: #B2CCFF; color: #FFFFFF; border-color: #98A2B3; }}
+QPushButton#btnRun:disabled, QPushButton#btnPrimary:disabled, QPushButton#btnPlayback:disabled {{ background: #D0D5DD; color: #475467; border-color: #98A2B3; }}
 QPushButton#btnAdd, QPushButton#btnAddSegment {{ background: {C_ACCENT_SOFT}; color: {C_ACCENT}; border-color: #84ADFF; min-height: 30px; }}
 QPushButton#btnAdd:hover, QPushButton#btnAddSegment:hover {{ background: #DCE8FF; border-color: {C_ACCENT}; }}
 QPushButton#btnDel, QPushButton#btnDanger {{ background: #FEF3F2; color: {C_ERR}; border-color: #FDA29B; }}
 QPushButton#btnDel:hover, QPushButton#btnDanger:hover {{ background: #FEE4E2; border-color: {C_ERR}; }}
 QPushButton#btnDir, QPushButton#btnSecondary, QPushButton#btnSec, QPushButton#btnSegCopy {{ background: {C_CARD}; color: {C_TEXT2}; border-color: {C_INPUT_BD}; }}
 
-QCheckBox {{ color: {C_TEXT2}; font-weight: 600; spacing: 8px; }}
-QCheckBox::indicator {{ width: 34px; height: 18px; border-radius: 9px; background: #98A2B3; border: 1px solid #667085; }}
-QCheckBox::indicator:checked {{ background: {C_ACCENT}; border-color: {C_ACCENT}; }}
-QCheckBox::indicator:hover {{ border: 2px solid {C_TEXT2}; }}
-QCheckBox::indicator:checked:hover {{ border-color: {C_ACCENT_P}; }}
-QCheckBox::indicator:disabled {{ background: #D0D5DD; border-color: #98A2B3; }}
-QCheckBox::indicator:focus {{ border: 2px solid {C_ACCENT}; }}
+QCheckBox {{ color: {C_TEXT2}; font-weight: 600; spacing: 7px; }}
+QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 3px; background: #FFFFFF; border: 2px solid #667085; }}
+QCheckBox::indicator:checked {{ background: {C_ACCENT}; border-color: {C_ACCENT}; image: none; }}
+QCheckBox::indicator:unchecked:hover {{ border-color: {C_ACCENT}; background: {C_ACCENT_SOFT}; }}
+QCheckBox::indicator:checked:hover {{ background: {C_ACCENT_H}; border-color: {C_ACCENT_H}; }}
+QCheckBox::indicator:disabled {{ background: #EAECF0; border-color: #98A2B3; }}
+QCheckBox::indicator:checked:disabled {{ background: #98A2B3; }}
 
 QFrame#songTopbar, QFrame#exportCard, QFrame#externalMergeCard, QFrame#actionBar, QFrame#directoryDisplay {{ background: {C_CARD}; border: 1px solid {C_BORDER}; border-radius: 10px; }}
 QFrame#playbackToolbar {{ background: {C_CARD2}; border: 1px solid {C_BORDER}; border-radius: 8px; }}

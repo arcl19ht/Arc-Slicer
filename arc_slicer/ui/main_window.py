@@ -152,6 +152,9 @@ from arc_slicer.ui.segment_history import (
     QUndoStack, SegmentHistoryItem, SegmentHistoryState, SegmentSnapshotCommand,
 )
 from arc_slicer.ui.styles import QSS as _APP_QSS
+from arc_slicer.ui.check_box import SemanticCheckBox
+from arc_slicer.ui.combo_box import VisualComboBox
+from arc_slicer.ui.toggle_switch import ToggleSwitch
 
 from arc_slicer import exports as _exports_core
 from arc_slicer import persistence as _persistence_core
@@ -1156,13 +1159,16 @@ class MainWindow(QMainWindow):
         self._scroll.setWidgetResizable(True)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self._scroll.setStyleSheet("background: transparent; border: none;")
         self._scroll.viewport().setAutoFillBackground(False)
         outer.addWidget(self._scroll)
 
         content = QWidget()
+        content.setObjectName("contentRoot")
         content.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        content.setStyleSheet(f"QWidget {{ background: {C_BG}; }}")
+        content.setAutoFillBackground(True)
+        content_palette = content.palette()
+        content_palette.setColor(QPalette.ColorRole.Window, QColor(C_BG))
+        content.setPalette(content_palette)
         self._scroll.setWidget(content)
 
         lay = QVBoxLayout(content)
@@ -1181,9 +1187,6 @@ class MainWindow(QMainWindow):
         # ── songs 目录行
         dir_frame = QFrame()
         dir_frame.setObjectName("directoryDisplay")
-        dir_frame.setStyleSheet(
-            f"QFrame#directoryDisplay {{ background: {C_CARD2}; border: 1px solid {C_BORDER2}; border-radius: 12px; }}"
-        )
         dir_lay = QHBoxLayout(dir_frame)
         dir_lay.setContentsMargins(14, 10, 14, 10)
         dir_lay.setSpacing(10)
@@ -1215,9 +1218,6 @@ class MainWindow(QMainWindow):
         # ── 曲目 + 速度 topbar
         topbar = QFrame()
         topbar.setObjectName("songTopbar")
-        topbar.setStyleSheet(
-            f"QFrame#songTopbar {{ background: {C_CARD2}; border: 1px solid {C_BORDER2}; border-radius: 14px; }}"
-        )
         tb_lay = QHBoxLayout(topbar)
         tb_lay.setContentsMargins(13, 13, 13, 13)
         tb_lay.setSpacing(12)
@@ -1225,7 +1225,7 @@ class MainWindow(QMainWindow):
         song_col = QVBoxLayout()
         song_col.setSpacing(7)
         song_col.addWidget(field_label("曲目 SONG ID"))
-        self._song_box = QComboBox()
+        self._song_box = VisualComboBox()
         self._song_box.setObjectName("comboInput")
         self._song_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._song_box.currentTextChanged.connect(self._on_song_changed)
@@ -1255,14 +1255,14 @@ class MainWindow(QMainWindow):
         self._audio_duration_label = make_label("音频时长：—", size=12, color=C_LABEL)
         seg_head.addWidget(self._audio_duration_label)
         seg_head.addSpacing(14)
-        self._auto_sort_check = QCheckBox("自动排序")
+        self._auto_sort_check = ToggleSwitch("自动排序")
         self._auto_sort_check.setCursor(Qt.CursorShape.PointingHandCursor)
         self._auto_sort_check.setChecked(True)
         self._auto_sort_check.setStyleSheet(f"color: {C_TEXT2}; font-size: 12px; background: transparent; border: none;")
         self._auto_sort_check.clicked.connect(self._on_auto_sort_changed)
         seg_head.addWidget(self._auto_sort_check)
         seg_head.addWidget(make_label("排序规则", size=12, color=C_MUTED))
-        self._sort_mode_box = QComboBox()
+        self._sort_mode_box = VisualComboBox()
         self._sort_mode_box.addItem("时间优先", "time")
         self._sort_mode_box.addItem("倍速优先", "speed")
         self._sort_mode_box.setObjectName("comboInput")
@@ -1292,11 +1292,11 @@ class MainWindow(QMainWindow):
         self._play_pause_button = QPushButton("▶ 播放片段")
         self._play_pause_button.setObjectName("btnPlayback")
         self._play_pause_button.clicked.connect(self._toggle_selected_segment_playback)
-        self._loop_check = QCheckBox("循环")
+        self._loop_check = ToggleSwitch("循环")
         self._loop_check.setCursor(Qt.CursorShape.PointingHandCursor)
         self._loop_check.setChecked(True)
         self._loop_check.toggled.connect(self._playback_controller.set_loop_enabled)
-        self._auto_audition_check = QCheckBox("自动试听")
+        self._auto_audition_check = ToggleSwitch("自动试听")
         self._auto_audition_check.setCursor(Qt.CursorShape.PointingHandCursor)
         self._auto_audition_check.setChecked(False)
         self._auto_audition_check.toggled.connect(self._set_auto_audition_enabled)
@@ -1341,17 +1341,14 @@ class MainWindow(QMainWindow):
         lay.addWidget(section_title("导出目标", "EXPORT TARGETS"))
         target_frame = QFrame()
         target_frame.setObjectName("exportCard")
-        target_frame.setStyleSheet(
-            f"QFrame#exportCard {{ background: {C_CARD}; border: 1px solid {C_BORDER}; border-radius: 12px; }}"
-        )
         target_lay = QVBoxLayout(target_frame)
         target_lay.setContentsMargins(14, 10, 14, 10)
         target_lay.setSpacing(7)
         target_row = QHBoxLayout()
         target_row.setSpacing(18)
-        self._current_export_check = QCheckBox("生成本次导出包")
+        self._current_export_check = SemanticCheckBox("生成本次导出包")
         self._current_export_check.setChecked(True)
-        self._library_export_check = QCheckBox("更新总导出包")
+        self._library_export_check = SemanticCheckBox("更新总导出包")
         self._library_export_check.setChecked(True)
         self._current_export_check.clicked.connect(self._mark_current_export_dirty)
         self._library_export_check.clicked.connect(self._mark_current_export_dirty)
@@ -1373,9 +1370,6 @@ class MainWindow(QMainWindow):
         lay.addWidget(section_title("外部目标壳合并", "EXTERNAL MERGE"))
         external_frame = QFrame()
         external_frame.setObjectName("externalMergeCard")
-        external_frame.setStyleSheet(
-            f"QFrame#externalMergeCard {{ background: {C_CARD}; border: 1px solid {C_BORDER}; border-radius: 12px; }}"
-        )
         external_lay = QVBoxLayout(external_frame)
         external_lay.setContentsMargins(14, 11, 14, 11)
         external_lay.setSpacing(8)
@@ -1424,9 +1418,6 @@ class MainWindow(QMainWindow):
         # ── 操作行
         action_frame = QFrame()
         action_frame.setObjectName("actionBar")
-        action_frame.setStyleSheet(
-            f"QFrame#actionBar {{ background: {C_CARD}; border: 1px solid {C_BORDER}; border-radius: 12px; }}"
-        )
         actions = QHBoxLayout(action_frame)
         actions.setContentsMargins(12, 10, 12, 10)
         actions.setSpacing(10)
