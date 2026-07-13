@@ -115,7 +115,20 @@ class AudioPlaybackController(QObject):
     def _on_position_changed(self, position: int) -> None:
         self.position_changed.emit(int(position))
     def _on_playback_state_changed(self, state) -> None:
-        if self._state == "playing" and int(state) == 0: self._timer.stop(); self._set_state("paused")
+        if QMediaPlayer is None:
+            return
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            if self._range is not None:
+                self._timer.start()
+            self._set_state("playing")
+        elif state == QMediaPlayer.PlaybackState.PausedState:
+            self._timer.stop()
+            if self._range is not None:
+                self._set_state("paused")
+        elif state == QMediaPlayer.PlaybackState.StoppedState:
+            self._timer.stop()
+            if self._range is not None:
+                self._set_state("ready")
     def _on_error(self, *_args) -> None:
         self._timer.stop(); self._error = self._player.errorString() if self._player is not None else "音频播放失败"
         self.error_changed.emit(self._error); self._set_state("error")
