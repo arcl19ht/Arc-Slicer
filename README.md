@@ -16,7 +16,7 @@ Arcaea 谱面切片工具。可将完整谱面按多个时间段导出为独立�
 
 ## V2.5-B Validation
 
-V2.5-B validates the duration of every source audio used by an export before staging is created. Previewing an override `N.ogg` keeps the canonical `base.ogg` duration intact and rejects preview ranges outside that selected source. Windows source, real-song, and EXE acceptance remain pending.
+V2.5-B validates the duration of every source audio used by an export before staging is created. Previewing an override `N.ogg` keeps the canonical `base.ogg` duration intact and rejects preview ranges outside that selected source. Header-only AFF files such as `AudioOffset:-30` followed by `-` remain valid charts. Waveform workers now remain owned until `QThread.finished`, and manual Space/button playback pauses and resumes without resetting an unchanged audition range. Windows source, real-song, and EXE acceptance remain pending.
 
 ## UI 清晰度改造
 
@@ -147,7 +147,7 @@ V2.4-C 已完成 Windows EXE/OGG 稳定性专项。时间线选择不会推动�
 
 V2.5-A 已建立多难度的纯逻辑基础，但当前正式切片仍固定处理 `2.aff`。已确认的标准映射为 `0.aff` = Past/PST、`1.aff` = Present/PRS、`2.aff` = Future/FTR、`3.aff` = Beyond/BYD、`4.aff` = Eternal/ETR；歌曲目录实际存在哪些标准 AFF，就可发现哪些难度。任意子集都合法，不要求 0/1/2 同时存在，3/4 同时存在也合法。
 
-难度专属音源同样按目录发现：`N.aff` 与可用 `N.ogg` 同时存在时，N 使用派生的 `audioOverride: true`；仅有 `N.ogg` 时作为孤立音源警告，不参与输出。每个片段始终保留 `base.ogg`，并为每个实际选中的专属音源建立一条额外音频操作。纯 songlist 计划将一个片段的所有真实难度聚合为同一个 song ID 和一个 `difficulties` 数组；0/1/2 保持壳兼容占位，3/4 仅在真实选中时出现。难度选择 UI、每难度元数据 UI、试听音源选择、多 AFF/OGG 正式写盘和 songlist 导出接线仍属于 V2.5-B。
+难度专属音源同样按目录发现：`N.aff` 与可用 `N.ogg` 同时存在时，N 使用派生的 `audioOverride: true`；仅有 `N.ogg` 时作为孤立音源警告，不参与输出。每个片段始终保留 `base.ogg`，并为每个实际选中的专属音源建立一条额外音频操作。songlist 将一个片段的所有真实难度聚合为同一个 song ID 和一个 `difficulties` 数组；0/1/2 保持壳兼容占位，3/4 仅在真实选中时出现。V2.5-B 已接入难度选择、每难度元数据、试听音源和多 AFF/OGG 正式写盘；人工验收仍待执行。
 
 ## Songlist 填写说明
 
@@ -209,8 +209,8 @@ ArcSlicerData/out/<export_target>/songs/pack/<img>
 
 - 源码运行时，ffmpeg 需自行准备并放在项目根目录，或加入系统 `PATH`。
 - 歌曲曲绘按源文件存在情况迁移：`1080_base.jpg`、`base.jpg`、`1080_base_256.jpg`。
-- 当前正式导出固定处理 `2.aff`，即 FTR 谱面；V2.5-A 的目录发现与导出计划尚未接入正式写盘。
+- 多难度正式导出按实际选中的标准 `0.aff`–`4.aff` 写入；无事件但有合法 AFF 头部的文件仍是有效谱面。
 - 非线性 Arc 在片段边界被截断时，界面会显示提示：边界坐标会按原缓动计算，但 Arc 片段内部轨迹可能与原谱存在轻微差异。
 - 非零 AudioOffset、以及部分 Camera / Scenecontrol 持续时间在变速切片时，仍建议人工复核。
-- 尚未实现多难度切片、官方曲包封面 / topbar 资源库与谱面预览。
+- 尚未实现官方曲包封面 / topbar 资源库与谱面预览。
 - Combo snapping 已取消：当前用户需求和实际收益不足，近期不会实现 combo 时间解析、端点吸附、snapping UI 或配置；除非未来出现新的明确需求，不应自行恢复。

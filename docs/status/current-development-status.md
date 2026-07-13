@@ -62,9 +62,9 @@
 
 ## 当前开发：V2.5-B 多难度选择与正式导出
 
-V2.5-B 已接入主界面、slides、试听音源选择和正式写盘流程，尚待 Windows 源码 UI、真实多 AFF/OGG 切片与目标壳兼容的人工作业验收。曲目卡片之后、timeline 之前显示发现的标准难度；选择与每难度 metadata 按歌曲保存。每段输出始终只有一个目录与一个 song ID，包含一次 `base.ogg`、选中的 AFF 和可用的选中 `N.ogg`；songlist 聚合为一个 `difficulties` 数组。0/1/2 保留兼容占位，3/4 仅在实际选中时写入。试听音源可在 `base.ogg` 与有效专属音源间切换，不会改写 canonical base duration 或 slides。`audioOverride` 继续由目录派生，`jacketOverride` 尚未实现；V2.5-C 尚未开始。
+V2.5-B 已接入主界面、slides、试听音源选择和正式写盘流程，尚待 Windows 源码 UI、真实多 AFF/OGG 切片与目标壳兼容的人工作业验收。曲目卡片之后、timeline 之前显示发现的标准难度；选择与每难度 metadata 按歌曲保存。每段输出始终只有一个目录与一个 song ID，包含一次 `base.ogg`、选中的 AFF 和可用的选中 `N.ogg`；songlist 聚合为一个 `difficulties` 数组。0/1/2 保留兼容占位，3/4 仅在实际选中时写入。试听音源可在 `base.ogg` 与有效专属音源间切换，不会改写 canonical base duration 或 slides。合法但无事件的 AFF 头部（如 `AudioOffset:-30` 加 `-`）仍作为真实难度处理。Waveform worker 的结果信号不再提前释放运行线程；关闭会等待所有 active waveform worker 完成。手动 Space/播放按钮在试听 spec 未变化时暂停和原位恢复。`audioOverride` 继续由目录派生，`jacketOverride` 尚未实现；V2.5-C 尚未开始。
 
-当前分支：`feature/v2.5-multi-difficulty-audit`。V2.5-A 已实现单一难度定义、目录发现、选择规范化、旧 slides 兼容解析、每难度元数据迁移、缺失/未知难度报告和多难度导出/单条 songlist 聚合计划纯逻辑；尚未接入 UI 或正式写盘。
+当前分支：`feature/v2.5-multi-difficulty-export`。V2.5-A 已提供单一难度定义、目录发现、选择规范化、旧 slides 兼容解析、每难度元数据迁移、缺失/未知难度报告和多难度导出/单条 songlist 聚合计划；V2.5-B 已接入 UI 与正式写盘。
 
 已确认标准映射：`0.aff` = Past/PST/ratingClass 0，`1.aff` = Present/PRS/ratingClass 1，`2.aff` = Future/FTR/ratingClass 2，`3.aff` = Beyond/BYD/ratingClass 3，`4.aff` = Eternal/ETR/ratingClass 4。以目录实际存在的普通可读文件为准：任意 0–4 子集都合法，不要求 0/1/2 同时存在，3/4 同时存在也合法；未知名称 `.aff` 单独报告且不参与计划。
 
@@ -91,7 +91,7 @@ Combo snapping 已取消，原因是当前用户需求和实际收益不足。�
 
 ## V2.5-B 验证状态
 
-自动化边界校验已补齐：导入会在链接或复制前验证可读 `base.ogg` 和至少一个标准 AFF；试听 `N.ogg` 使用独立时长且不会覆盖 canonical base duration；任何实际导出音源在 staging 前逐一探测并校验全部片段终点。已保存但缺失的难度会显示明确状态并可单独清除，元数据保留。Windows 源码、真实歌曲和 EXE 人工验收仍待执行。
+自动化边界校验已补齐：导入会在链接或复制前验证可读 `base.ogg` 和至少一个标准 AFF；试听 `N.ogg` 使用独立时长且不会覆盖 canonical base duration；任何实际导出音源在 staging 前逐一探测并校验全部片段终点。已保存但缺失的难度会显示明确状态并可单独清除，元数据保留。另已覆盖 waveform QThread 生命周期、暂停/恢复和无事件合法 AFF。Windows 源码、真实歌曲和 EXE 人工验收仍待执行。
 
 ## 文档更新规则
 
