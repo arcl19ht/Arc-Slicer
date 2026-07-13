@@ -125,6 +125,18 @@ class WaveformUiTests(unittest.TestCase):
         self.assertEqual(panel._waveform_rect().height(), waveform.height())
         self.assertEqual(panel.x_to_time_ms(panel.time_ms_to_x(5000)), 5000)
 
+    def test_playback_head_position_clamps_and_uses_existing_time_mapping(self):
+        panel = app.WaveformPanel()
+        panel.resize(1024, 220)
+        panel.set_waveform(app.WaveformData(duration_ms=10000, samples_per_second=100, peaks=[(-0.1, 0.2)]))
+        panel.set_quick_draft_anchor(3000)
+        panel.set_playback_position_ms(12000)
+        self.assertEqual(panel.playback_position_ms(), 10000)
+        self.assertEqual(panel.x_to_time_ms(panel.time_ms_to_x(panel.playback_position_ms())), 10000)
+        self.assertEqual(panel.quick_draft_anchor_ms(), 3000)
+        panel.set_playback_position_ms(None)
+        self.assertIsNone(panel.playback_position_ms())
+
     def test_timeline_expanded_prefers_enough_height_for_five_lanes(self):
         panel = app.WaveformPanel()
         panel.set_segments([
