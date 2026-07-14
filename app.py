@@ -1013,69 +1013,69 @@ class MainWindow(_MainWindow):
             target._deps = _main_window_dependencies()
             target._deps_from_app_facade = True
 
-    def _load_initial_data(self, *args, **kwargs):
+    def _load_initial_data(self):
         MainWindow._ensure_facade_dependencies(self)
-        return _MainWindow._load_initial_data(self, *args, **kwargs)
+        return _MainWindow._load_initial_data(self)
 
-    def _invalidate_external_merge_plan(self, *args, **kwargs):
+    def _invalidate_external_merge_plan(self, message: str = ""):
         MainWindow._ensure_facade_dependencies(self)
-        return _MainWindow._invalidate_external_merge_plan(self, *args, **kwargs)
+        return _MainWindow._invalidate_external_merge_plan(self, message)
 
-    def _restore_external_merge_target_from_config(self, *args, **kwargs):
+    def _restore_external_merge_target_from_config(self):
         MainWindow._ensure_facade_dependencies(self)
-        return _MainWindow._restore_external_merge_target_from_config(self, *args, **kwargs)
+        return _MainWindow._restore_external_merge_target_from_config(self)
 
-    def _browse_external_merge_target(self, *args, **kwargs):
+    def _browse_external_merge_target(self):
         MainWindow._ensure_facade_dependencies(self)
-        return _MainWindow._browse_external_merge_target(self, *args, **kwargs)
+        return _MainWindow._browse_external_merge_target(self)
 
-    def _check_external_merge_plan(self, *args, **kwargs):
+    def _check_external_merge_plan(self):
         MainWindow._ensure_facade_dependencies(self)
-        return _MainWindow._check_external_merge_plan(self, *args, **kwargs)
+        return _MainWindow._check_external_merge_plan(self)
 
-    def _confirm_external_merge(self, *args, **kwargs):
+    def _confirm_external_merge(self):
         MainWindow._ensure_facade_dependencies(self)
-        return _MainWindow._confirm_external_merge(self, *args, **kwargs)
+        return _MainWindow._confirm_external_merge(self)
 
-    def _on_external_merge_done(self, *args, **kwargs):
+    def _on_external_merge_done(self, mode: str, generation: int, payload: object, error: str):
         MainWindow._ensure_facade_dependencies(self)
-        return _MainWindow._on_external_merge_done(self, *args, **kwargs)
+        return _MainWindow._on_external_merge_done(self, mode, generation, payload, error)
 
-    def _browse_songs_dir(self, *args, **kwargs):
+    def _browse_songs_dir(self):
         MainWindow._ensure_facade_dependencies(self)
-        return _MainWindow._browse_songs_dir(self, *args, **kwargs)
+        return _MainWindow._browse_songs_dir(self)
 
-    def _add_song_folder(self, *args, **kwargs):
+    def _add_song_folder(self, src_path: str):
         MainWindow._ensure_facade_dependencies(self)
-        return _MainWindow._add_song_folder(self, *args, **kwargs)
+        return _MainWindow._add_song_folder(self, src_path)
 
-    def _current_audio_path(self, *args, **kwargs):
+    def _current_audio_path(self):
         MainWindow._ensure_facade_dependencies(self)
-        return _MainWindow._current_audio_path(self, *args, **kwargs)
+        return _MainWindow._current_audio_path(self)
 
-    def _request_waveform_for_current_song(self, *args, **kwargs):
+    def _request_waveform_for_current_song(self):
         MainWindow._ensure_facade_dependencies(self)
-        return _MainWindow._request_waveform_for_current_song(self, *args, **kwargs)
+        return _MainWindow._request_waveform_for_current_song(self)
 
-    def _refresh_current_audio_duration(self, *args, **kwargs):
+    def _refresh_current_audio_duration(self):
         MainWindow._ensure_facade_dependencies(self)
-        return _MainWindow._refresh_current_audio_duration(self, *args, **kwargs)
+        return _MainWindow._refresh_current_audio_duration(self)
 
-    def _show_segment_speed_error(self, *args, **kwargs):
+    def _show_segment_speed_error(self, index: int, row, message: str):
         MainWindow._ensure_facade_dependencies(self)
-        return _MainWindow._show_segment_speed_error(self, *args, **kwargs)
+        return _MainWindow._show_segment_speed_error(self, index, row, message)
 
-    def _show_duplicate_segment_id_error(self, *args, **kwargs):
+    def _show_duplicate_segment_id_error(self, title: str, message: str):
         MainWindow._ensure_facade_dependencies(self)
-        return _MainWindow._show_duplicate_segment_id_error(self, *args, **kwargs)
+        return _MainWindow._show_duplicate_segment_id_error(self, title, message)
 
-    def _show_segment_validation_error(self, *args, **kwargs):
+    def _show_segment_validation_error(self, index: int, row, result):
         MainWindow._ensure_facade_dependencies(self)
-        return _MainWindow._show_segment_validation_error(self, *args, **kwargs)
+        return _MainWindow._show_segment_validation_error(self, index, row, result)
 
-    def _refresh_arc_cut_warnings(self, *args, **kwargs):
+    def _refresh_arc_cut_warnings(self):
         MainWindow._ensure_facade_dependencies(self)
-        return _MainWindow._refresh_arc_cut_warnings(self, *args, **kwargs)
+        return _MainWindow._refresh_arc_cut_warnings(self)
 
     def _save_slides(self):
         MainWindow._ensure_facade_dependencies(self)
