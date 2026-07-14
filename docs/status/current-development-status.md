@@ -91,7 +91,9 @@ Combo snapping 已取消，原因是当前用户需求和实际收益不足。�
 
 ## V2.5-B 验证状态
 
-自动化边界校验已补齐：导入会在链接或复制前验证可读 `base.ogg` 和至少一个标准 AFF；试听 `N.ogg` 使用独立时长且不会覆盖 canonical base duration；任何实际导出音源在 staging 前逐一探测并校验全部片段终点。已保存但缺失的难度会显示明确状态并可单独清除，元数据保留。另已覆盖 waveform QThread 生命周期、暂停/恢复和无事件合法 AFF。Windows 源码、真实歌曲和 EXE 人工验收仍待执行。
+自动化边界校验已补齐：导入会在链接或复制前验证可读 `base.ogg` 和至少一个标准 AFF；试听 `N.ogg` 使用独立时长且不会覆盖 canonical base duration；任何实际导出音源在 staging 前逐一探测并校验全部片段终点。已保存但缺失的难度会显示明确状态并可单独清除，元数据保留。另已覆盖 waveform QThread 生命周期、暂停/恢复和无事件合法 AFF。当前自动化基线为 `421 passed, 12 skipped, 89 subtests passed`；`app.py` facade 的明确签名和外部合并“选择目录”取消点击已通过 subprocess 回归，避免污染 Gate0 的替身 Qt 进程。Windows 源码、真实歌曲和 EXE 人工验收仍待执行，尤其需要复验外部合并目标选择器、最终 metadata UI、真实多 AFF/OGG 导出矩阵和多难度缩减重导出的旧文件清理。真实 external merge 尚未执行，仓库外截图尚未补齐，V2.5-C 尚未开始。
+
+旅行交接与 macOS 源码恢复步骤见 `docs/status/travel-handoff-2026-07-14.md` 和 `docs/setup/macos-development.md`。
 
 ## 文档更新规则
 

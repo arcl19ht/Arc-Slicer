@@ -45,6 +45,8 @@ python -m pip install PyQt6
 python app.py
 ```
 
+macOS 源码开发与旅行恢复步骤见 [`docs/setup/macos-development.md`](docs/setup/macos-development.md) 和 [`docs/status/travel-handoff-2026-07-14.md`](docs/status/travel-handoff-2026-07-14.md)。
+
 ### 运行测试
 
 ```bash
