@@ -8,7 +8,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QMimeData
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QDragLeaveEvent, QFont
 from PyQt6.QtWidgets import (
     QFileDialog, QFrame, QGridLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget,
+    QApplication, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
 from arc_slicer.theme import C_ACCENT, C_BORDER, C_BORDER2, C_CARD, C_CARD2, C_LABEL, C_MUTED, C_TEXT, C_TEXT2
@@ -69,7 +69,12 @@ def default_pack_form_for_song(source_id: str) -> dict:
 def make_label(text: str, size: int = 14, weight: int = 400, color: str = C_TEXT) -> QLabel:
     lbl = QLabel(text)
     f = lbl.font()
-    f.setPointSize(max(1, int(size)))
+    requested_size = int(size)
+    if requested_size > 0:
+        f.setPointSize(requested_size)
+    elif f.pointSizeF() <= 0 and f.pixelSize() <= 0:
+        fallback = QApplication.font().pointSizeF()
+        f.setPointSizeF(fallback if fallback > 0 else 10.0)
     f.setWeight(QFont.Weight(weight))
     lbl.setFont(f)
     lbl.setStyleSheet(f"color: {color}; background: transparent;")
@@ -768,6 +773,7 @@ class SonglistPanel(QFrame):
         while layout.count():
             item = layout.takeAt(0)
             if item.widget() is not None:
+                item.widget().setParent(None)
                 item.widget().deleteLater()
         audio_filenames = audio_filenames or {}
         for definition in definitions or ():
