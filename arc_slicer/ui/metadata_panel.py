@@ -772,9 +772,10 @@ class SonglistPanel(QFrame):
         layout = self._difficulty_metadata_layout
         while layout.count():
             item = layout.takeAt(0)
-            if item.widget() is not None:
-                item.widget().setParent(None)
-                item.widget().deleteLater()
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
         audio_filenames = audio_filenames or {}
         for definition in definitions or ():
             rating_class = definition.rating_class
