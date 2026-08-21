@@ -857,11 +857,12 @@ def external_merge_plan_view_model(
 
 
 def external_merge_result_view_model(result: external_merge.ExternalMergeResult) -> dict:
-    backup_text = str(result.backup_dir) if result.backup_dir else "未创建"
+    backup_text = str(result.backup_dir) if result.backup_dir and result.backup_verified else "未验证"
     lines = [
         f"状态: {result.status}",
         f"变更路径数: {len(result.changed_paths)}",
         f"备份目录: {backup_text}",
+        f"备份验证: {'可用' if result.backup_verified else '不可用或未验证'}",
     ]
     if result.status == "failed_rollback_incomplete":
         lines.insert(0, "合并失败，且自动恢复不完整。")
@@ -882,6 +883,7 @@ def external_merge_result_view_model(result: external_merge.ExternalMergeResult)
     )
     titles = {
         "completed": completed_title,
+        "completed_cleanup_incomplete": "外部目标壳合并：主体完成，但临时清理未完成",
         "stale_plan": "外部目标壳合并：计划已过期",
         "rejected": "外部目标壳合并：已拒绝",
         "failed_rolled_back": "外部目标壳合并：失败，已恢复",
@@ -916,7 +918,7 @@ def external_merge_confirmation_text(
 
 
 def external_merge_log_line(result: external_merge.ExternalMergeResult) -> tuple[str, str]:
-    backup_text = str(result.backup_dir) if result.backup_dir else "未创建"
+    backup_text = str(result.backup_dir) if result.backup_dir and result.backup_verified else "未验证"
     if result.status == "completed":
         return (
             f"[外部合并] 完成：修改 {len(result.changed_paths)} 项；备份：{backup_text}",
@@ -928,6 +930,8 @@ def external_merge_log_line(result: external_merge.ExternalMergeResult) -> tuple
         return (f"[外部合并] 失败，但已自动恢复；备份：{backup_text}", "err")
     if result.status == "failed_rollback_incomplete":
         return (f"[外部合并] 恢复不完整，请立即停止继续操作目标壳；备份：{backup_text}", "err")
+    if result.status == "completed_cleanup_incomplete":
+        return (f"[外部合并] 主体完成，但临时清理被拒绝；请检查执行问题；备份：{backup_text}", "err")
     return (f"[外部合并] 未执行：{result.status}", "err")
 
 

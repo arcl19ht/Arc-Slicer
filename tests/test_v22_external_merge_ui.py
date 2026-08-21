@@ -137,6 +137,7 @@ def _plan(*, blockers=None, warnings=None, actions=True):
         target_songs_dir=Path("target/songs"),
         current_root_identity=None,
         target_root_identity=None,
+        target_object_bindings=None,
     )
     plan.blockers.extend(blockers or [])
     plan.warnings.extend(warnings or [])
@@ -702,6 +703,7 @@ class ExternalMergeUiStateTests(unittest.TestCase):
                     status=status,
                     plan=plan,
                     backup_dir=Path("backup/dir"),
+                    backup_verified=True,
                     message="message",
                     changed_paths=["songlist"],
                 )
@@ -718,6 +720,7 @@ class ExternalMergeUiStateTests(unittest.TestCase):
             status="completed",
             plan=plan,
             backup_dir=Path("backup/dir"),
+            backup_verified=True,
             changed_paths=["songlist"],
             execution_issues=[issue],
         )
@@ -730,6 +733,7 @@ class ExternalMergeUiStateTests(unittest.TestCase):
             status="failed_rollback_incomplete",
             plan=plan,
             backup_dir=Path("backup/dir"),
+            backup_verified=True,
             rollback_errors=["rollback broke"],
             execution_issues=[external_merge.MergeIssue(external_merge.BLOCKER, "execution_failed", "boom")],
         )
@@ -739,6 +743,23 @@ class ExternalMergeUiStateTests(unittest.TestCase):
         self.assertIn("rollback broke", failed_view["detail"])
         self.assertIn("execution_failed", failed_view["detail"])
 
+    def test_cleanup_incomplete_and_unverified_backup_are_explicit(self):
+        result = external_merge.ExternalMergeResult(
+            success=True,
+            status="completed_cleanup_incomplete",
+            plan=_plan(),
+            backup_dir=Path("backup/replaced"),
+            backup_verified=False,
+            execution_issues=[external_merge.MergeIssue(external_merge.BLOCKER, "owned_temporary_identity_changed", "replaced")],
+        )
+
+        view = app.external_merge_result_view_model(result)
+        log_line = app.external_merge_log_line(result)
+
+        self.assertIn("临时清理未完成", view["title"])
+        self.assertIn("备份验证: 不可用或未验证", view["detail"])
+        self.assertIn("备份：未验证", log_line[0])
+
     def test_external_merge_result_logs_are_written_for_current_generation_only(self):
         panel = _Panel()
         result = external_merge.ExternalMergeResult(
@@ -746,6 +767,7 @@ class ExternalMergeUiStateTests(unittest.TestCase):
             status="completed",
             plan=_plan(),
             backup_dir=Path("backup/dir"),
+            backup_verified=True,
             changed_paths=["songlist", "packlist"],
         )
 

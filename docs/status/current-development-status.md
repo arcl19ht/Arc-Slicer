@@ -16,6 +16,7 @@
 - `current_export` 与 `library_export`、songlist/packlist、曲包封面和固定 section 选项。
 - 外部目标壳 `songs` 根目录的安全合并：验证目标、检查计划、显式确认、备份、manifest、失败恢复和目标目录记忆。
 - 外部合并计划及其动作会固定到计划时的 canonical 实际路径，并绑定目录身份；执行前、staging 后、安装前及回滚前均复验该绑定，防止祖先链接在计划后被重定向。该安全修复不改变 V2.5-B/V2.5-C 的人工验收状态。
+- 2026-08-21：外部合并进一步绑定 staging、backup、swap 和每个会被覆盖、创建或删除的 action 对象；创建后、备份/manifest 读写、安装、回滚与清理前均复验身份。对象替换、类型变化、链接或不可用 inode 均 fail closed：不会删除替换后的临时目录，不能验证的 backup 不会作为可恢复备份报告；主体写入完成但临时清理被拒绝会报告独立状态。macOS 默认临时路径正常通过测试；Windows NTFS 仍需真实环境验收。身份不可用的 FAT/exFAT 或网络卷会拒绝 external merge，不作兼容降级。该安全修复不改变 V2.5-B/V2.5-C 的人工验收状态。
 
 ## V2.3 已完成
 

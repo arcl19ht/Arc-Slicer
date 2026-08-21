@@ -4,6 +4,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import external_merge
@@ -584,6 +585,40 @@ class ExternalMergePlanTests(unittest.TestCase):
 
             self.assertIn("target_pack_image_is_link", _codes(plan))
             self.assertEqual(_actions(plan, "pack_image", "add"), [])
+
+    def test_object_identity_rejects_zero_inode_and_stat_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "object"
+            path.write_text("x", encoding="utf-8")
+            zero_inode = SimpleNamespace(st_dev=1, st_ino=0, st_mode=stat.S_IFREG)
+            with mock.patch.object(Path, "stat", return_value=zero_inode):
+                with self.assertRaisesRegex(OSError, "inode identity unavailable"):
+                    external_merge._capture_object_identity(path)
+            with mock.patch.object(Path, "stat", side_effect=OSError("stat unsupported")):
+                with self.assertRaisesRegex(OSError, "stat unsupported"):
+                    external_merge._capture_object_identity(path)
+
+    def test_object_identity_allows_zero_device_with_nonzero_inode(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "object"
+            path.write_text("x", encoding="utf-8")
+            fake_stat = SimpleNamespace(st_dev=0, st_ino=42, st_mode=stat.S_IFREG)
+            with mock.patch.object(Path, "stat", return_value=fake_stat):
+                identity = external_merge._capture_object_identity(path)
+            self.assertEqual(identity.device, 0)
+            self.assertEqual(identity.inode, 42)
+            self.assertTrue(stat.S_ISREG(identity.mode))
+
+    def test_object_identity_detects_replacement_and_file_type_change(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "object"
+            path.write_text("x", encoding="utf-8")
+            identity = external_merge._capture_object_identity(path)
+            path.unlink()
+            path.mkdir()
+
+            with self.assertRaisesRegex(OSError, "identity changed"):
+                external_merge._validate_object_identity(identity, "test object")
 
 
 if __name__ == "__main__":

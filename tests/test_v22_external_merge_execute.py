@@ -383,8 +383,8 @@ class ExternalMergeExecuteTests(unittest.TestCase):
             old_snapshot = _snapshot(target)
             original_install_pack = external_merge._install_pack_image
 
-            def failing_install_pack(source, target_path, *, replace):
-                original_install_pack(source, target_path, replace=replace)
+            def failing_install_pack(source, target_path, *, replace, **kwargs):
+                original_install_pack(source, target_path, replace=replace, **kwargs)
                 raise OSError("boom after pack image")
 
             with mock.patch("external_merge._install_pack_image", side_effect=failing_install_pack):
@@ -445,8 +445,8 @@ class ExternalMergeExecuteTests(unittest.TestCase):
             _setup_target(target, [_song("song_b", title="old")], [_pack("pack_a")])
             original_install_song = external_merge._install_song_directory
 
-            def failing_install_song(source, target_path, swap, ctx):
-                original_install_song(source, target_path, swap, ctx)
+            def failing_install_song(source, target_path, swap, ctx, **kwargs):
+                original_install_song(source, target_path, swap, ctx, **kwargs)
                 raise OSError("song install fail")
 
             with mock.patch("external_merge._install_song_directory", side_effect=failing_install_song), \
@@ -568,9 +568,9 @@ class ExternalMergeExecuteTests(unittest.TestCase):
             _setup_target(target, [], [_pack("pack_a")])
             original_install = external_merge._install_song_directory
 
-            def racing_install(source, target_path, swap, ctx):
+            def racing_install(source, target_path, swap, ctx, **kwargs):
                 _make_song_dir(target, "new_song", b"external")
-                original_install(source, target_path, swap, ctx)
+                original_install(source, target_path, swap, ctx, **kwargs)
 
             with mock.patch("external_merge._install_song_directory", side_effect=racing_install):
                 result = external_merge.execute_external_merge(_plan(current, target), backup_root=backup_root)
@@ -588,9 +588,9 @@ class ExternalMergeExecuteTests(unittest.TestCase):
             _setup_target(target, [], [_pack("pack_old", "old.png")])
             original_install = external_merge._install_pack_image
 
-            def racing_install(source, target_path, *, replace):
+            def racing_install(source, target_path, *, replace, **kwargs):
                 (target / "pack" / "select_pack_a.png").write_bytes(b"external image")
-                original_install(source, target_path, replace=replace)
+                original_install(source, target_path, replace=replace, **kwargs)
 
             with mock.patch("external_merge._install_pack_image", side_effect=racing_install):
                 result = external_merge.execute_external_merge(_plan(current, target), backup_root=backup_root)
@@ -613,10 +613,10 @@ class ExternalMergeExecuteTests(unittest.TestCase):
             occupied = {"active": False}
             raced_target = Path(plan.pack_image_actions[0].target_path)
 
-            def racing_install(source, target_path, *, replace):
+            def racing_install(source, target_path, *, replace, **kwargs):
                 self.assertEqual(Path(target_path), raced_target)
                 occupied["active"] = True
-                original_install(source, target_path, replace=replace)
+                original_install(source, target_path, replace=replace, **kwargs)
 
             def lexical_exists(path):
                 return occupied["active"] if Path(path) == raced_target else original_path_exists(path)
@@ -747,6 +747,201 @@ class ExternalMergeExecuteTests(unittest.TestCase):
             self.assertTrue(result.backup_dir.exists())
             self.assertIn("completed manifest write fail", "\n".join(issue.message for issue in result.execution_issues))
             self.assertFalse(_arc_tmp_paths(target))
+
+    def test_replaced_staging_directory_is_not_deleted(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current, target, backup_root = base / "current", base / "target", base / "backups"
+            _setup_current(current, [_song("new_song")], None)
+            _setup_target(target, [], [_pack("pack_a")])
+            original_cleanup = external_merge._cleanup_swaps
+            replacement: dict[str, Path] = {}
+
+            def replace_staging_before_cleanup(ctx):
+                stage = Path(ctx["owned_temporary_objects"]["staging"].binding.canonical_path)
+                stage.rename(stage.with_name("captured_staging"))
+                stage.mkdir()
+                marker = stage / "external-marker"
+                marker.write_text("do not delete", encoding="utf-8")
+                replacement["marker"] = marker
+                return original_cleanup(ctx)
+
+            with mock.patch("external_merge._cleanup_swaps", side_effect=replace_staging_before_cleanup):
+                result = external_merge.execute_external_merge(_plan(current, target), backup_root=backup_root)
+
+            self.assertTrue(result.success, result)
+            self.assertEqual(result.status, "completed_cleanup_incomplete")
+            self.assertTrue(replacement["marker"].exists())
+            self.assertTrue((target / "new_song" / "base.ogg").exists())
+            self.assertTrue(result.backup_verified)
+            self.assertIn("owned_temporary_identity_changed", {issue.code for issue in result.execution_issues})
+
+    def test_replaced_backup_directory_refuses_target_write_and_is_not_verified(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current, target, backup_root = base / "current", base / "target", base / "backups"
+            _setup_current(current, [_song("new_song")], None)
+            _setup_target(target, [], [_pack("pack_a")])
+            original_backup = external_merge._backup_affected_items
+            replacement: dict[str, Path] = {}
+
+            def replace_backup_after_copy(plan, backup_dir, ctx, checkpoint):
+                original_backup(plan, backup_dir, ctx, checkpoint)
+                backup_dir.rename(backup_dir.with_name("captured_backup"))
+                backup_dir.mkdir()
+                marker = backup_dir / "external-marker"
+                marker.write_text("do not trust", encoding="utf-8")
+                replacement["dir"] = backup_dir
+                replacement["marker"] = marker
+
+            with mock.patch("external_merge._backup_affected_items", side_effect=replace_backup_after_copy):
+                result = external_merge.execute_external_merge(_plan(current, target), backup_root=backup_root)
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.status, "failed_rollback_incomplete")
+            self.assertFalse(result.backup_verified)
+            self.assertIsNone(result.backup_dir)
+            self.assertTrue(replacement["marker"].exists())
+            self.assertFalse((replacement["dir"] / "manifest.json").exists())
+            self.assertFalse((target / "new_song").exists())
+            self.assertIn("owned_temporary_identity_changed", {issue.code for issue in result.execution_issues})
+
+    def test_replaced_swap_directory_is_not_deleted(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current, target, backup_root = base / "current", base / "target", base / "backups"
+            _setup_current(current, [_song("song_b", title="new")], None)
+            _setup_target(target, [_song("song_b", title="old")], [_pack("pack_a")])
+            original_cleanup = external_merge._cleanup_swaps
+            replacement: dict[str, Path] = {}
+
+            def replace_swap_before_cleanup(ctx):
+                swap = Path(ctx["swaps"][0])
+                swap.rename(swap.with_name("captured_swap"))
+                swap.mkdir()
+                marker = swap / "external-marker"
+                marker.write_text("do not delete", encoding="utf-8")
+                replacement["marker"] = marker
+                return original_cleanup(ctx)
+
+            with mock.patch("external_merge._cleanup_swaps", side_effect=replace_swap_before_cleanup):
+                result = external_merge.execute_external_merge(_plan(current, target), backup_root=backup_root)
+
+            self.assertTrue(result.success, result)
+            self.assertEqual(result.status, "completed_cleanup_incomplete")
+            self.assertEqual((target / "song_b" / "base.ogg").read_bytes(), b"current:song_b")
+            self.assertTrue(replacement["marker"].exists())
+            self.assertIn("owned_temporary_identity_changed", {issue.code for issue in result.execution_issues})
+
+    def test_replaced_existing_action_object_is_rejected_before_backup(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current, target, backup_root = base / "current", base / "target", base / "backups"
+            _setup_current(current, [_song("song_b", title="new")], None)
+            _setup_target(target, [_song("song_b", title="old")], [_pack("pack_a")])
+            plan = _plan(current, target)
+            original = target / "original_song_b"
+            (target / "song_b").rename(original)
+            _make_song_dir(target, "song_b", b"external replacement")
+
+            result = external_merge.execute_external_merge(plan, backup_root=backup_root)
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.status, "rejected")
+            self.assertIn("target_object_identity_changed", {issue.code for issue in result.execution_issues})
+            self.assertEqual((target / "song_b" / "base.ogg").read_bytes(), b"external replacement")
+            self.assertFalse(backup_root.exists())
+
+    def test_same_content_action_replacement_during_staging_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current, target, backup_root = base / "current", base / "target", base / "backups"
+            _setup_current(current, [_song("song_b", title="new")], None)
+            _setup_target(target, [_song("song_b", title="old")], [_pack("pack_a")])
+            plan = _plan(current, target)
+            original_stage = external_merge._stage_inputs
+            original_bytes = (target / "song_b" / "base.ogg").read_bytes()
+
+            def stage_then_replace(current_plan, stage_dir):
+                original_stage(current_plan, stage_dir)
+                old = target / "captured_song_b"
+                (target / "song_b").rename(old)
+                _make_song_dir(target, "song_b", original_bytes)
+
+            with mock.patch("external_merge._stage_inputs", side_effect=stage_then_replace):
+                result = external_merge.execute_external_merge(plan, backup_root=backup_root)
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.status, "rejected")
+            self.assertIn("target_object_identity_changed", {issue.code for issue in result.execution_issues})
+            self.assertEqual((target / "song_b" / "base.ogg").read_bytes(), original_bytes)
+            self.assertFalse(backup_root.exists())
+
+    def test_appeared_absent_action_object_is_rejected_before_backup(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current, target, backup_root = base / "current", base / "target", base / "backups"
+            _setup_current(current, [_song("new_song")], None)
+            _setup_target(target, [], [_pack("pack_a")])
+            plan = _plan(current, target)
+            _make_song_dir(target, "new_song", b"external")
+
+            result = external_merge.execute_external_merge(plan, backup_root=backup_root)
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.status, "rejected")
+            self.assertIn("target_object_identity_changed", {issue.code for issue in result.execution_issues})
+            self.assertEqual((target / "new_song" / "base.ogg").read_bytes(), b"external")
+            self.assertFalse(backup_root.exists())
+
+    def test_replaced_pack_image_and_songlist_are_rejected_before_backup(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current, target, backup_root = base / "current", base / "target", base / "backups"
+            _setup_current(current, [_song("song_a")], [_pack("pack_a")])
+            _setup_target(target, [], [_pack("pack_a")])
+            plan = _plan(current, target)
+            image = target / "pack" / "select_pack_a.png"
+            image_bytes = image.read_bytes()
+            image.unlink()
+            image.write_bytes(image_bytes)
+            songlist = target / "songlist"
+            songlist_bytes = songlist.read_bytes()
+            songlist.unlink()
+            songlist.write_bytes(songlist_bytes)
+
+            result = external_merge.execute_external_merge(plan, backup_root=backup_root)
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.status, "rejected")
+            self.assertIn("target_object_identity_changed", {issue.code for issue in result.execution_issues})
+            self.assertEqual(image.read_bytes(), image_bytes)
+            self.assertEqual(songlist.read_bytes(), songlist_bytes)
+            self.assertFalse(backup_root.exists())
+
+    def test_rollback_refuses_replaced_installed_action_object(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current, target, backup_root = base / "current", base / "target", base / "backups"
+            _setup_current(current, [_song("song_b", title="new")], None)
+            _setup_target(target, [_song("song_b", title="old")], [_pack("pack_a")])
+            original_install = external_merge._install_song_directory
+
+            def install_then_replace(source, target_path, swap, ctx, **kwargs):
+                original_install(source, target_path, swap, ctx, **kwargs)
+                moved = Path(target_path).with_name("installed_song_b")
+                Path(target_path).rename(moved)
+                _make_song_dir(target, "song_b", b"external replacement")
+                raise OSError("forced rollback after replacement")
+
+            with mock.patch("external_merge._install_song_directory", side_effect=install_then_replace):
+                result = external_merge.execute_external_merge(_plan(current, target), backup_root=backup_root)
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.status, "failed_rollback_incomplete")
+            self.assertEqual((target / "song_b" / "base.ogg").read_bytes(), b"external replacement")
+            self.assertTrue(result.backup_verified)
+            self.assertIn("rollback refused", "\n".join(result.rollback_errors))
 
 
 if __name__ == "__main__":

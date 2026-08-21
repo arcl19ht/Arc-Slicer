@@ -58,6 +58,8 @@ Playback state, position, loop state, automatic-audition switch, and pending tim
 
 Do not change external merge, backup/manifest handling, `current_export` safety, or `library_export` behavior unless the task explicitly requires it. Never run a real external merge without explicit user instruction.
 
+External merge must bind and revalidate canonical roots, owned temporary objects (staging, backup, swap), and every destructive action target immediately before destructive work. Missing, replaced, linked, or identity-unavailable objects fail closed; do not weaken this invariant for a platform-specific temporary-path workaround.
+
 `affintro.md` is a local AFF reference. Do not modify it unless explicitly asked; its absence in a clean clone must not block work.
 
 Never modify, delete, stage, or commit these paths unless explicitly asked:

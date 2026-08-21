@@ -41,8 +41,8 @@ class MergeAction:
 
 
 @dataclass(frozen=True)
-class DirectoryIdentity:
-    """Stable, cross-platform identity for an existing directory."""
+class ObjectIdentity:
+    """Stable, cross-platform identity for an existing file-system object."""
 
     canonical_path: str
     device: int
@@ -51,11 +51,28 @@ class DirectoryIdentity:
 
 
 @dataclass(frozen=True)
+class ObjectBinding:
+    """Canonical path plus the expected existing or absent object state."""
+
+    canonical_path: str
+    expected_exists: bool
+    identity: ObjectIdentity | None
+
+
+@dataclass(frozen=True)
 class WritablePathBinding:
     """Canonical future path plus the identity of its existing anchor."""
 
     canonical_path: str
-    anchor: DirectoryIdentity
+    anchor: ObjectIdentity
+
+
+@dataclass(frozen=True)
+class OwnedTemporaryObject:
+    """A temporary object this execution created and may later delete."""
+
+    purpose: str
+    binding: ObjectBinding
 
 
 @dataclass
@@ -64,8 +81,9 @@ class ExternalMergePlan:
     target_songs_dir: Path
     # These are required plan fields.  A legacy caller may explicitly supply
     # None for display-only data, but execute_external_merge fails it closed.
-    current_root_identity: DirectoryIdentity | None
-    target_root_identity: DirectoryIdentity | None
+    current_root_identity: ObjectIdentity | None
+    target_root_identity: ObjectIdentity | None
+    target_object_bindings: dict[str, ObjectBinding] | None
     song_actions: list[MergeAction] = field(default_factory=list)
     pack_actions: list[MergeAction] = field(default_factory=list)
     pack_image_actions: list[MergeAction] = field(default_factory=list)
@@ -102,6 +120,7 @@ class ExternalMergeResult:
     status: str
     plan: ExternalMergePlan
     backup_dir: Path | None = None
+    backup_verified: bool = False
     message: str = ""
     changed_paths: list[str] = field(default_factory=list)
     rollback_errors: list[str] = field(default_factory=list)
@@ -134,6 +153,7 @@ def build_external_merge_plan(current_songs_dir: Path, target_songs_dir: Path) -
         target_songs_dir=target_input,
         current_root_identity=None,
         target_root_identity=None,
+        target_object_bindings=None,
     )
 
     _validate_root(plan, current_input, "current", "current_songs_dir")
@@ -290,51 +310,86 @@ def execute_external_merge(plan: ExternalMergePlan, *, backup_root: Path) -> Ext
         "rollback_errors": [],
         "swaps": [],
         "checkpoints": [],
+        "owned_temporary_objects": {},
+        "installed_target_objects": {},
     }
     try:
         stage_dir = _create_staging_dir(fresh.target_songs_dir)
+        _bind_owned_temporary_object(ctx, "staging", stage_dir, "staging directory")
         _stage_inputs(fresh, stage_dir)
+        _validate_owned_temporary_object(ctx, "staging")
+
+        # A rebuilt snapshot cannot prove that an action object is still the
+        # same object the user reviewed: a replacement may have identical
+        # bytes.  Keep the original plan bindings live across staging.
+        original_binding_issues = _plan_binding_issues(plan)
+        if original_binding_issues:
+            cleanup_issues = _cleanup_owned_temporary_object(ctx, "staging")
+            return ExternalMergeResult(
+                success=False,
+                status="rejected",
+                plan=plan,
+                message="execution target objects changed after staging; no target writes were performed.",
+                execution_issues=original_binding_issues + cleanup_issues,
+            )
 
         final = build_external_merge_plan(plan.current_songs_dir, plan.target_songs_dir)
         if final.snapshot_fingerprint != fresh.snapshot_fingerprint or final.blockers:
-            _cleanup_staging_dir(final, stage_parent_binding, stage_dir)
+            cleanup_issues = _cleanup_owned_temporary_object(ctx, "staging")
             return ExternalMergeResult(
                 success=False,
                 status="stale_plan",
                 plan=final,
                 message="stale plan detected after staging; no target writes were performed.",
                 changed_paths=[],
+                execution_issues=cleanup_issues,
             )
 
         safety_issues = _execution_safety_issues(final, backup_binding)
         if safety_issues:
-            _cleanup_staging_dir(final, stage_parent_binding, stage_dir)
+            cleanup_issues = _cleanup_owned_temporary_object(ctx, "staging")
             return ExternalMergeResult(
                 success=False,
                 status="rejected",
                 plan=final,
                 message="execution path safety changed after staging; no writes were performed.",
-                execution_issues=safety_issues,
+                execution_issues=safety_issues + cleanup_issues,
             )
 
         _validate_writable_path_binding(backup_binding)
         _validate_writable_path_binding(stage_parent_binding)
         backup_dir = _create_backup_dir(Path(backup_binding.canonical_path))
+        _bind_owned_temporary_object(ctx, "backup", backup_dir, "backup directory")
+        _bind_owned_temporary_object(ctx, "backup_before", backup_dir / "before", "backup before directory")
         manifest = _base_manifest(fresh, backup_dir, "in_progress")
-        _write_manifest(backup_dir, manifest)
+        _write_owned_backup_manifest(ctx, backup_dir, manifest)
         _checkpoint(backup_dir, manifest, ctx, "manifest_created")
         _backup_affected_items(fresh, backup_dir, ctx, lambda label: _checkpoint(backup_dir, manifest, ctx, label))
         _checkpoint(backup_dir, manifest, ctx, "staging_completed")
+        # The backup is now the recovery source for every following target
+        # mutation.  Bindings must still name the objects we created before
+        # any action is allowed to alter the target shell.
+        _validate_owned_temporary_object(ctx, "backup")
+        _validate_owned_temporary_object(ctx, "backup_before")
+        _validate_owned_temporary_object(ctx, "backup_manifest")
+
+        original_binding_issues = _plan_binding_issues(plan)
+        if original_binding_issues:
+            raise RuntimeError(
+                "execution target objects changed after backup: "
+                + ", ".join(issue.code for issue in original_binding_issues)
+            )
 
         refreshed = build_external_merge_plan(plan.current_songs_dir, plan.target_songs_dir)
         if refreshed.snapshot_fingerprint != fresh.snapshot_fingerprint or refreshed.blockers:
-            manifest_issues = _try_write_manifest_status(backup_dir, manifest, ctx, "stale_no_write")
-            _cleanup_staging_dir(refreshed, stage_parent_binding, stage_dir, manifest_issues)
+            manifest_issues = _try_write_manifest_status(ctx, backup_dir, manifest, "stale_no_write")
+            manifest_issues.extend(_cleanup_owned_temporary_object(ctx, "staging"))
             return ExternalMergeResult(
                 success=False,
                 status="stale_plan",
                 plan=refreshed,
-                backup_dir=backup_dir,
+                backup_dir=_verified_backup_dir(ctx, backup_dir),
+                backup_verified=_verified_backup_dir(ctx, backup_dir) is not None,
                 message="stale plan detected after backup; no target writes were performed.",
                 changed_paths=[],
                 execution_issues=manifest_issues,
@@ -342,45 +397,63 @@ def execute_external_merge(plan: ExternalMergePlan, *, backup_root: Path) -> Ext
 
         safety_issues = _execution_safety_issues(refreshed, backup_binding)
         if safety_issues:
-            manifest_issues = _try_write_manifest_status(backup_dir, manifest, ctx, "stale_no_write")
-            _cleanup_staging_dir(refreshed, stage_parent_binding, stage_dir, manifest_issues)
+            manifest_issues = _try_write_manifest_status(ctx, backup_dir, manifest, "stale_no_write")
+            manifest_issues.extend(_cleanup_owned_temporary_object(ctx, "staging"))
             return ExternalMergeResult(
                 success=False,
                 status="rejected",
                 plan=refreshed,
-                backup_dir=backup_dir,
+                backup_dir=_verified_backup_dir(ctx, backup_dir),
+                backup_verified=_verified_backup_dir(ctx, backup_dir) is not None,
                 message="execution path safety changed after backup; no target writes were performed.",
                 execution_issues=manifest_issues + safety_issues,
             )
 
+        _validate_owned_temporary_object(ctx, "staging")
         _install_song_directories(refreshed, stage_dir, ctx, lambda label: _checkpoint(backup_dir, manifest, ctx, label))
         _install_pack_images(refreshed, stage_dir, ctx, lambda label: _checkpoint(backup_dir, manifest, ctx, label))
+        _validate_plan_target_object(refreshed, "songlist")
         _write_json_atomic(refreshed.target_songs_dir / "songlist", refreshed.merged_songlist_data)
+        _bind_installed_target_object(ctx, "songlist", refreshed.target_songs_dir / "songlist", "written target songlist")
         ctx["changed_paths"].append("songlist")
         _checkpoint(backup_dir, manifest, ctx, "songlist_written")
         if refreshed.pack_actions:
+            _validate_plan_target_object(refreshed, "packlist")
             _write_json_atomic(refreshed.target_songs_dir / "packlist", refreshed.merged_packlist_data)
+            _bind_installed_target_object(ctx, "packlist", refreshed.target_songs_dir / "packlist", "written target packlist")
             ctx["changed_paths"].append("packlist")
             _checkpoint(backup_dir, manifest, ctx, "packlist_written")
 
         # Swap and staging cleanup delete paths, so do not perform either if a
         # root was replaced while the install work was in progress.
-        post_install_issues = _execution_safety_issues(refreshed, backup_binding)
+        post_install_issues = _execution_safety_issues(refreshed, backup_binding, include_target_objects=False)
         if post_install_issues:
             raise RuntimeError(
                 "execution path safety changed after install: "
                 + ", ".join(issue.code for issue in post_install_issues)
             )
         _validate_writable_path_binding(stage_parent_binding)
-        _cleanup_swaps(ctx)
-        _cleanup_staging_dir(refreshed, stage_parent_binding, stage_dir)
+        cleanup_issues = _cleanup_swaps(ctx) + _cleanup_owned_temporary_object(ctx, "staging")
+        if cleanup_issues:
+            manifest_issues = _try_write_manifest_status(ctx, backup_dir, manifest, "completed_cleanup_incomplete")
+            return ExternalMergeResult(
+                success=True,
+                status="completed_cleanup_incomplete",
+                plan=refreshed,
+                backup_dir=_verified_backup_dir(ctx, backup_dir),
+                backup_verified=_verified_backup_dir(ctx, backup_dir) is not None,
+                message="external merge completed, but temporary cleanup was refused.",
+                changed_paths=list(ctx["changed_paths"]),
+                execution_issues=cleanup_issues + manifest_issues,
+            )
         _checkpoint(backup_dir, manifest, ctx, "temporary_paths_cleaned")
-        manifest_issues = _try_write_manifest_status(backup_dir, manifest, ctx, "completed")
+        manifest_issues = _try_write_manifest_status(ctx, backup_dir, manifest, "completed")
         return ExternalMergeResult(
             success=True,
             status="completed",
             plan=refreshed,
-            backup_dir=backup_dir,
+            backup_dir=_verified_backup_dir(ctx, backup_dir),
+            backup_verified=_verified_backup_dir(ctx, backup_dir) is not None,
             message="external merge completed.",
             changed_paths=list(ctx["changed_paths"]),
             execution_issues=manifest_issues,
@@ -400,7 +473,7 @@ def execute_external_merge(plan: ExternalMergePlan, *, backup_root: Path) -> Ext
             pre_backup_errors: list[str] = []
             if stage_dir is not None:
                 try:
-                    _cleanup_staging_dir(fresh, stage_parent_binding, stage_dir)
+                    pre_backup_errors.extend(issue.message for issue in _cleanup_owned_temporary_object(ctx, "staging"))
                 except Exception as cleanup_ex:
                     pre_backup_errors.append(f"cleanup staging failed: {cleanup_ex}")
             return ExternalMergeResult(
@@ -413,7 +486,7 @@ def execute_external_merge(plan: ExternalMergePlan, *, backup_root: Path) -> Ext
             )
 
         rollback_plan = fresh
-        identity_errors = _plan_binding_issues(rollback_plan)
+        identity_errors = _plan_binding_issues(rollback_plan, include_target_objects=False)
         if identity_errors:
             rollback_errors = [f"rollback refused: {issue.code}" for issue in identity_errors]
         else:
@@ -426,14 +499,14 @@ def execute_external_merge(plan: ExternalMergePlan, *, backup_root: Path) -> Ext
         rollback_errors.extend(manifest_errors)
         if stage_dir is not None and stage_parent_binding is not None:
             try:
-                _cleanup_staging_dir(rollback_plan, stage_parent_binding, stage_dir)
+                rollback_errors.extend(issue.message for issue in _cleanup_owned_temporary_object(ctx, "staging"))
             except Exception as cleanup_ex:
                 rollback_errors.append(f"cleanup staging failed: {cleanup_ex}")
         status = "failed_rollback_incomplete" if rollback_errors else "failed_rolled_back"
         if backup_dir is not None:
             final_manifest = _base_manifest(fresh, backup_dir, "rollback_incomplete" if rollback_errors else "rolled_back")
             ctx["rollback_errors"] = rollback_errors
-            final_manifest_issues = _try_write_manifest_status(backup_dir, final_manifest, ctx, final_manifest["status"])
+            final_manifest_issues = _try_write_manifest_status(ctx, backup_dir, final_manifest, final_manifest["status"])
             if final_manifest_issues:
                 rollback_errors.extend(issue.message for issue in final_manifest_issues)
                 ctx["rollback_errors"] = rollback_errors
@@ -442,15 +515,20 @@ def execute_external_merge(plan: ExternalMergePlan, *, backup_root: Path) -> Ext
             success=False,
             status=status,
             plan=fresh,
-            backup_dir=backup_dir,
+            backup_dir=_verified_backup_dir(ctx, backup_dir),
+            backup_verified=_verified_backup_dir(ctx, backup_dir) is not None,
             message=f"merge failed; {'rollback incomplete' if rollback_errors else 'rolled back'}: {ex}",
             changed_paths=list(ctx["changed_paths"]),
             rollback_errors=rollback_errors,
-            execution_issues=[MergeIssue(BLOCKER, "execution_failed", str(ex))],
+            execution_issues=_owned_temporary_issues(
+                ctx, ("backup", "backup_before", "backup_manifest", "staging")
+            ) + [MergeIssue(BLOCKER, "execution_failed", str(ex))],
         )
 
 
 def _finalize_plan(plan: ExternalMergePlan) -> ExternalMergePlan:
+    if not plan.blockers:
+        _bind_plan_target_objects(plan)
     plan.snapshot_fingerprint = _compute_snapshot_fingerprint(plan)
     return plan
 
@@ -496,7 +574,7 @@ def _compute_snapshot_fingerprint(plan: ExternalMergePlan) -> str:
 
 
 def _fingerprint_directory_identity(
-    h: "hashlib._Hash", label: str, identity: DirectoryIdentity | None,
+    h: "hashlib._Hash", label: str, identity: ObjectIdentity | None,
 ) -> None:
     h.update(f"ROOT\0{label}\0".encode())
     if identity is None:
@@ -542,13 +620,18 @@ def _fingerprint_path(h: "hashlib._Hash", label: str, path: Path) -> None:
     h.update(b"OTHER\0")
 
 
-def _execution_safety_issues(plan: ExternalMergePlan, backup_binding: WritablePathBinding) -> list[MergeIssue]:
+def _execution_safety_issues(
+    plan: ExternalMergePlan,
+    backup_binding: WritablePathBinding,
+    *,
+    include_target_objects: bool = True,
+) -> list[MergeIssue]:
     issues: list[MergeIssue] = []
     target = plan.target_songs_dir
     current = plan.current_songs_dir
     backup_root = Path(backup_binding.canonical_path)
 
-    issues.extend(_plan_binding_issues(plan))
+    issues.extend(_plan_binding_issues(plan, include_target_objects=include_target_objects))
     try:
         _validate_writable_path_binding(backup_binding)
     except OSError as ex:
@@ -639,21 +722,27 @@ def _manifest_runtime_fields(ctx: dict[str, Any], status: str) -> dict[str, Any]
 def _checkpoint(backup_dir: Path, manifest: dict[str, Any], ctx: dict[str, Any], label: str) -> None:
     ctx.setdefault("checkpoints", []).append(label)
     manifest.update(_manifest_runtime_fields(ctx, "in_progress"))
+    _write_owned_backup_manifest(ctx, backup_dir, manifest)
+
+
+def _write_owned_backup_manifest(ctx: dict[str, Any], backup_dir: Path, manifest: dict[str, Any]) -> None:
+    _validate_owned_temporary_object(ctx, "backup")
     _write_manifest(backup_dir, manifest)
+    _bind_owned_temporary_object(ctx, "backup_manifest", backup_dir / "manifest.json", "backup manifest")
 
 
 def _try_write_manifest_status(
+    ctx: dict[str, Any],
     backup_dir: Path,
     manifest: dict[str, Any],
-    ctx: dict[str, Any],
     status: str,
 ) -> list[MergeIssue]:
     manifest.update(_manifest_runtime_fields(ctx, status))
     try:
-        _write_manifest(backup_dir, manifest)
+        _write_owned_backup_manifest(ctx, backup_dir, manifest)
         return []
     except Exception as ex:
-        return [MergeIssue(WARNING, "manifest_write_failed", f"manifest write failed: {ex}", (str(backup_dir / "manifest.json"),))]
+        return [MergeIssue(BLOCKER, "backup_manifest_write_refused", f"manifest write refused: {ex}", (str(backup_dir / "manifest.json"),))]
 
 
 def _action_to_json(action: MergeAction) -> dict[str, Any]:
@@ -672,20 +761,25 @@ def _write_manifest(backup_dir: Path, manifest: dict[str, Any]) -> None:
 
 
 def _backup_affected_items(plan: ExternalMergePlan, backup_dir: Path, ctx: dict[str, Any], checkpoint) -> None:
+    _validate_owned_temporary_object(ctx, "backup")
+    _validate_owned_temporary_object(ctx, "backup_before")
     before = backup_dir / "before"
     _backup_file(plan.target_songs_dir / "songlist", before / "songlist", "songlist", ctx)
     checkpoint("backup:songlist")
     if plan.pack_actions:
+        _validate_owned_temporary_object(ctx, "backup_before")
         _backup_file(plan.target_songs_dir / "packlist", before / "packlist", "packlist", ctx)
         checkpoint("backup:packlist")
     for action in plan.song_actions:
         if action.operation == "update" and action.target_path:
+            _validate_owned_temporary_object(ctx, "backup_before")
             rel = f"songs/{action.identifier}"
             _backup_dir(Path(action.target_path), before / rel, rel, ctx)
             checkpoint(f"backup:{rel}")
     for action in plan.pack_image_actions:
         target = Path(action.target_path) if action.target_path else None
         if action.operation == "replace" and target is not None:
+            _validate_owned_temporary_object(ctx, "backup_before")
             rel = f"pack/{action.identifier}"
             _backup_file(target, before / rel, rel, ctx)
             checkpoint(f"backup:{rel}")
@@ -764,20 +858,36 @@ def _install_song_directories(plan: ExternalMergePlan, stage_dir: Path, ctx: dic
     for action in plan.song_actions:
         source = stage_dir / "songs" / action.identifier
         target = Path(action.target_path) if action.target_path else plan.target_songs_dir / action.identifier
+        key = f"song:{action.identifier}"
+        _validate_plan_target_object(plan, key)
         rel = _rel_to_target(target, plan.target_songs_dir)
         if action.operation == "add":
-            _install_song_directory(source, target, None, ctx)
+            _install_song_directory(
+                source, target, None, ctx,
+                binding_key=key, binding_role=f"installed song directory {action.identifier}",
+            )
             ctx["created_target_items"].append(rel)
             ctx["changed_paths"].append(rel)
             checkpoint(f"song_added:{rel}")
         elif action.operation == "update":
             swap = target.parent / f".arc_slicer_swap_{target.name}_{uuid.uuid4().hex[:8]}"
-            _install_song_directory(source, target, swap, ctx)
+            _install_song_directory(
+                source, target, swap, ctx,
+                binding_key=key, binding_role=f"installed song directory {action.identifier}",
+            )
             ctx["changed_paths"].append(rel)
             checkpoint(f"song_updated:{rel}")
 
 
-def _install_song_directory(staged_source: Path, target: Path, swap: Path | None, ctx: dict[str, Any] | None = None) -> None:
+def _install_song_directory(
+    staged_source: Path,
+    target: Path,
+    swap: Path | None,
+    ctx: dict[str, Any] | None = None,
+    *,
+    binding_key: str | None = None,
+    binding_role: str | None = None,
+) -> None:
     if swap is None and path_exists_lexically(target):
         raise RuntimeError(f"target song directory appeared before add install: {target}")
     if swap is not None:
@@ -786,14 +896,18 @@ def _install_song_directory(staged_source: Path, target: Path, swap: Path | None
         target.rename(swap)
         if ctx is not None:
             ctx.setdefault("swaps", []).append(str(swap))
+            _bind_owned_temporary_object(ctx, f"swap:{swap}", swap, "swap directory")
     try:
         staged_source.rename(target)
+        if ctx is not None and binding_key is not None:
+            _bind_installed_target_object(ctx, binding_key, target, binding_role or binding_key)
     except Exception:
         if swap is not None and swap.exists() and not target.exists():
             try:
                 swap.rename(target)
                 if ctx is not None and str(swap) in ctx.get("swaps", []):
                     ctx["swaps"].remove(str(swap))
+                    _forget_owned_temporary_object(ctx, f"swap:{swap}")
             except Exception:
                 pass
         raise
@@ -805,7 +919,13 @@ def _install_pack_images(plan: ExternalMergePlan, stage_dir: Path, ctx: dict[str
             continue
         source = stage_dir / "pack" / action.identifier
         target = Path(action.target_path) if action.target_path else plan.target_songs_dir / "pack" / action.identifier
-        _install_pack_image(source, target, replace=action.operation == "replace")
+        _validate_plan_target_object(plan, "pack_dir")
+        key = f"pack_image:{action.identifier}"
+        _validate_plan_target_object(plan, key)
+        _install_pack_image(
+            source, target, replace=action.operation == "replace", ctx=ctx,
+            binding_key=key, binding_role=f"installed pack image {action.identifier}",
+        )
         rel = _rel_to_target(target, plan.target_songs_dir)
         if action.operation == "add":
             ctx["created_target_items"].append(rel)
@@ -813,7 +933,15 @@ def _install_pack_images(plan: ExternalMergePlan, stage_dir: Path, ctx: dict[str
         checkpoint(f"pack_image_{action.operation}:{rel}")
 
 
-def _install_pack_image(staged_source: Path, target: Path, *, replace: bool) -> None:
+def _install_pack_image(
+    staged_source: Path,
+    target: Path,
+    *,
+    replace: bool,
+    ctx: dict[str, Any] | None = None,
+    binding_key: str | None = None,
+    binding_role: str | None = None,
+) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f".arc_slicer_tmp_{target.name}_{uuid.uuid4().hex[:8]}")
     created_target = False
@@ -832,6 +960,8 @@ def _install_pack_image(staged_source: Path, target: Path, *, replace: bool) -> 
                 dst.flush()
                 os.fsync(dst.fileno())
             tmp.unlink()
+        if ctx is not None and binding_key is not None:
+            _bind_installed_target_object(ctx, binding_key, target, binding_role or binding_key)
     except Exception:
         try:
             if tmp.exists():
@@ -870,32 +1000,68 @@ def _rollback(plan: ExternalMergePlan, backup_dir: Path | None, ctx: dict[str, A
     errors: list[str] = []
     if backup_dir is None:
         return ["backup directory is missing; cannot restore"]
-    before = backup_dir / "before"
+    try:
+        backup = _validate_owned_temporary_object(ctx, "backup")
+        before_owned = _validate_owned_temporary_object(ctx, "backup_before")
+        _validate_owned_temporary_object(ctx, "backup_manifest")
+    except OSError as ex:
+        return [f"rollback refused: {ex}"]
+    backup_dir = Path(backup.binding.canonical_path)
+    before = Path(before_owned.binding.canonical_path)
 
     for rel in ("songlist", "packlist"):
         backup = before / rel
-        if backup.exists():
+        if backup.exists() and rel in ctx.get("installed_target_objects", {}):
+            try:
+                _validate_installed_target_object(ctx, rel, f"installed target {rel}")
+            except OSError as ex:
+                errors.append(f"{rel}: rollback refused: {ex}")
+                continue
             _restore_file(backup, plan.target_songs_dir / rel, rel, errors)
             if checkpoint is not None:
                 checkpoint(f"rollback:{rel}")
     for action in plan.pack_image_actions:
         if action.operation == "replace":
             rel = f"pack/{action.identifier}"
+            key = f"pack_image:{action.identifier}"
+            if key not in ctx.get("installed_target_objects", {}):
+                continue
+            try:
+                _validate_installed_target_object(ctx, key, f"installed target {rel}")
+            except OSError as ex:
+                errors.append(f"{rel}: rollback refused: {ex}")
+                continue
             _restore_file(before / rel, plan.target_songs_dir / rel, rel, errors)
             if checkpoint is not None:
                 checkpoint(f"rollback:{rel}")
     for action in plan.song_actions:
         if action.operation == "update":
             rel = f"songs/{action.identifier}"
+            key = f"song:{action.identifier}"
+            if key not in ctx.get("installed_target_objects", {}):
+                continue
+            try:
+                _validate_installed_target_object(ctx, key, f"installed target {rel}")
+            except OSError as ex:
+                errors.append(f"{rel}: rollback refused: {ex}")
+                continue
             _restore_dir(before / rel, plan.target_songs_dir / action.identifier, rel, errors)
             if checkpoint is not None:
                 checkpoint(f"rollback:{rel}")
     for rel in reversed(ctx.get("created_target_items", [])):
+        key = _target_item_binding_key(rel)
+        try:
+            _validate_installed_target_object(ctx, key, f"installed target {rel}")
+        except OSError as ex:
+            errors.append(f"{rel}: rollback refused: {ex}")
+            continue
         _delete_target_item(plan.target_songs_dir / rel, rel, errors)
         if checkpoint is not None:
             checkpoint(f"rollback_delete:{rel}")
     for swap in list(ctx.get("swaps", [])):
-        _cleanup_temp_path(Path(swap), errors)
+        key = f"swap:{swap}"
+        for issue in _cleanup_owned_temporary_object(ctx, key):
+            errors.append(f"{swap}: {issue.message}")
         if checkpoint is not None:
             checkpoint(f"rollback_cleanup:{swap}")
     ctx["rollback_errors"] = errors
@@ -944,10 +1110,16 @@ def _delete_target_item(path: Path, rel: str, errors: list[str]) -> None:
         errors.append(f"{rel}: {ex}")
 
 
-def _cleanup_swaps(ctx: dict[str, Any]) -> None:
+def _cleanup_swaps(ctx: dict[str, Any]) -> list[MergeIssue]:
+    issues: list[MergeIssue] = []
     for swap in list(ctx.get("swaps", [])):
-        _cleanup_temp_path(Path(swap))
+        key = f"swap:{swap}"
+        cleanup_issues = _cleanup_owned_temporary_object(ctx, key)
+        if cleanup_issues:
+            issues.extend(cleanup_issues)
+            continue
         ctx["swaps"].remove(swap)
+    return issues
 
 
 def _cleanup_temp_path(path: Path, errors: list[str] | None = None) -> None:
@@ -961,26 +1133,17 @@ def _cleanup_temp_path(path: Path, errors: list[str] | None = None) -> None:
             raise
 
 
-def _cleanup_staging_dir(
-    plan: ExternalMergePlan,
-    stage_parent_binding: WritablePathBinding,
-    stage_dir: Path,
-    issues: list[MergeIssue] | None = None,
-) -> None:
-    """Remove staging only while its fixed parent and plan roots still match."""
-    safety_issues = _plan_binding_issues(plan)
+def _cleanup_owned_temporary_object(ctx: dict[str, Any], key: str) -> list[MergeIssue]:
     try:
-        _validate_writable_path_binding(stage_parent_binding)
+        owned = _validate_owned_temporary_object(ctx, key)
     except OSError as ex:
-        safety_issues.append(
-            MergeIssue(BLOCKER, "staging_parent_identity_changed", str(ex), (stage_parent_binding.canonical_path,))
-        )
-    if safety_issues:
-        if issues is not None:
-            issues.extend(safety_issues)
-            return
-        raise RuntimeError("refusing to clean staging after path binding changed")
-    _cleanup_temp_path(stage_dir)
+        return [MergeIssue(BLOCKER, "owned_temporary_identity_changed", str(ex), (key,))]
+    try:
+        _remove_tree_or_file(Path(owned.binding.canonical_path))
+    except Exception as ex:
+        return [MergeIssue(BLOCKER, "owned_temporary_cleanup_failed", str(ex), (key,))]
+    _forget_owned_temporary_object(ctx, key)
+    return []
 
 
 def _remove_tree_or_file(path: Path) -> None:
@@ -1003,6 +1166,15 @@ def _rel_to_target(path: Path, target_songs_dir: Path) -> str:
         return path.relative_to(target_songs_dir).as_posix()
     except ValueError:
         return path.as_posix()
+
+
+def _target_item_binding_key(rel: str) -> str:
+    parts = Path(rel).parts
+    if len(parts) == 1:
+        return f"song:{parts[0]}"
+    if len(parts) == 2 and parts[0] == "pack":
+        return f"pack_image:{parts[1]}"
+    return f"target:{rel}"
 
 
 def _path_contains_or_equals(parent: Path, child: Path) -> bool:
@@ -1033,20 +1205,18 @@ def _canonicalize_path(path: Path, *, strict: bool) -> Path:
     return Path(_norm_abs(Path(path).resolve(strict=strict)))
 
 
-def _capture_directory_identity(path: Path) -> DirectoryIdentity:
+def _capture_object_identity(path: Path) -> ObjectIdentity:
     canonical = Path(path)
     st = canonical.stat()
-    if not stat.S_ISDIR(st.st_mode):
-        raise OSError(f"path is not a directory: {canonical}")
     device = getattr(st, "st_dev", None)
     inode = getattr(st, "st_ino", None)
-    # A platform that cannot provide a meaningful directory identity must fail
+    # A platform that cannot provide a meaningful object identity must fail
     # closed rather than silently treating every replacement as unchanged.
     if isinstance(device, bool) or not isinstance(device, int) or device < 0:
-        raise OSError(f"directory device identity unavailable: {canonical}")
+        raise OSError(f"object device identity unavailable: {canonical}")
     if isinstance(inode, bool) or not isinstance(inode, int) or inode <= 0:
-        raise OSError(f"directory inode identity unavailable: {canonical}")
-    return DirectoryIdentity(
+        raise OSError(f"object inode identity unavailable: {canonical}")
+    return ObjectIdentity(
         canonical_path=_norm_abs(canonical),
         device=device,
         inode=inode,
@@ -1054,12 +1224,25 @@ def _capture_directory_identity(path: Path) -> DirectoryIdentity:
     )
 
 
-def _validate_directory_identity(identity: DirectoryIdentity | None, role: str) -> None:
+def _capture_directory_identity(path: Path) -> ObjectIdentity:
+    identity = _capture_object_identity(path)
+    if not stat.S_ISDIR(identity.mode):
+        raise OSError(f"path is not a directory: {path}")
+    return identity
+
+
+def _validate_object_identity(identity: ObjectIdentity | None, role: str) -> None:
     if identity is None:
         raise OSError(f"{role} identity is missing")
-    current = _capture_directory_identity(Path(identity.canonical_path))
+    current = _capture_object_identity(Path(identity.canonical_path))
     if current != identity:
         raise OSError(f"{role} identity changed: {identity.canonical_path}")
+
+
+def _validate_directory_identity(identity: ObjectIdentity | None, role: str) -> None:
+    _validate_object_identity(identity, role)
+    if identity is None or not stat.S_ISDIR(identity.mode):
+        raise OSError(f"{role} is no longer a directory")
 
 
 def _bind_writable_path(path: Path) -> WritablePathBinding:
@@ -1080,7 +1263,121 @@ def _validate_writable_path_binding(binding: WritablePathBinding) -> None:
     _validate_directory_identity(binding.anchor, "backup anchor")
 
 
-def _plan_binding_issues(plan: ExternalMergePlan) -> list[MergeIssue]:
+def _bind_object(path: Path, *, expected_exists: bool, role: str) -> ObjectBinding:
+    raw = Path(path)
+    if is_link_or_junction(raw):
+        raise OSError(f"{role} must not be a link or Junction: {raw}")
+    canonical = _canonicalize_path(raw, strict=False)
+    if expected_exists:
+        if not path_exists_lexically(raw):
+            raise OSError(f"{role} is missing: {raw}")
+        if is_link_or_junction(canonical):
+            raise OSError(f"{role} must not be a link or Junction: {canonical}")
+        return ObjectBinding(_norm_abs(canonical), True, _capture_object_identity(canonical))
+    if path_exists_lexically(raw):
+        raise OSError(f"{role} appeared unexpectedly: {raw}")
+    return ObjectBinding(_norm_abs(canonical), False, None)
+
+
+def _validate_object_binding(binding: ObjectBinding | None, role: str) -> None:
+    if binding is None:
+        raise OSError(f"{role} binding is missing")
+    path = Path(binding.canonical_path)
+    if is_link_or_junction(path):
+        raise OSError(f"{role} became a link or Junction: {path}")
+    canonical = _canonicalize_path(path, strict=False)
+    if not _same_path(path, canonical):
+        raise OSError(f"{role} is no longer canonical: {path}")
+    exists = path_exists_lexically(path)
+    if exists != binding.expected_exists:
+        state = "appeared unexpectedly" if exists else "is missing"
+        raise OSError(f"{role} {state}: {path}")
+    if binding.expected_exists:
+        _validate_object_identity(binding.identity, role)
+
+
+def _bind_owned_temporary_object(ctx: dict[str, Any], key: str, path: Path, purpose: str) -> OwnedTemporaryObject:
+    owned = OwnedTemporaryObject(purpose, _bind_object(path, expected_exists=True, role=purpose))
+    ctx.setdefault("owned_temporary_objects", {})[key] = owned
+    return owned
+
+
+def _validate_owned_temporary_object(ctx: dict[str, Any], key: str) -> OwnedTemporaryObject:
+    owned = ctx.get("owned_temporary_objects", {}).get(key)
+    if not isinstance(owned, OwnedTemporaryObject):
+        raise OSError(f"owned temporary object binding is missing: {key}")
+    _validate_object_binding(owned.binding, owned.purpose)
+    return owned
+
+
+def _verified_backup_dir(ctx: dict[str, Any], backup_dir: Path | None) -> Path | None:
+    if backup_dir is None:
+        return None
+    try:
+        _validate_owned_temporary_object(ctx, "backup")
+        _validate_owned_temporary_object(ctx, "backup_manifest")
+    except OSError:
+        return None
+    return backup_dir
+
+
+def _owned_temporary_issues(ctx: dict[str, Any], keys: tuple[str, ...]) -> list[MergeIssue]:
+    issues: list[MergeIssue] = []
+    for key in keys:
+        if key not in ctx.get("owned_temporary_objects", {}):
+            continue
+        try:
+            _validate_owned_temporary_object(ctx, key)
+        except OSError as ex:
+            issues.append(MergeIssue(BLOCKER, "owned_temporary_identity_changed", str(ex), (key,)))
+    return issues
+
+
+def _forget_owned_temporary_object(ctx: dict[str, Any], key: str) -> None:
+    ctx.get("owned_temporary_objects", {}).pop(key, None)
+
+
+def _bind_installed_target_object(ctx: dict[str, Any], key: str, path: Path, role: str) -> ObjectBinding:
+    binding = _bind_object(path, expected_exists=True, role=role)
+    ctx.setdefault("installed_target_objects", {})[key] = binding
+    return binding
+
+
+def _validate_installed_target_object(ctx: dict[str, Any], key: str, role: str) -> None:
+    _validate_object_binding(ctx.get("installed_target_objects", {}).get(key), role)
+
+
+def _bind_plan_target_objects(plan: ExternalMergePlan) -> None:
+    bindings: dict[str, ObjectBinding] = {}
+    try:
+        bindings["songlist"] = _bind_object(plan.target_songs_dir / "songlist", expected_exists=True, role="target songlist")
+        if plan.pack_actions:
+            bindings["packlist"] = _bind_object(plan.target_songs_dir / "packlist", expected_exists=True, role="target packlist")
+        if any(action.operation != "reuse" for action in plan.pack_image_actions):
+            bindings["pack_dir"] = _bind_object(plan.target_songs_dir / "pack", expected_exists=True, role="target pack directory")
+        for action in plan.song_actions:
+            if action.target_path:
+                bindings[f"song:{action.identifier}"] = _bind_object(
+                    Path(action.target_path), expected_exists=action.operation == "update", role=f"target song directory {action.identifier}"
+                )
+        for action in plan.pack_image_actions:
+            if action.operation in {"add", "replace"} and action.target_path:
+                bindings[f"pack_image:{action.identifier}"] = _bind_object(
+                    Path(action.target_path), expected_exists=action.operation == "replace", role=f"target pack image {action.identifier}"
+                )
+    except OSError as ex:
+        _block(plan, "target_object_binding_failed", f"cannot bind target object: {ex}")
+    plan.target_object_bindings = bindings
+
+
+def _validate_plan_target_object(plan: ExternalMergePlan, key: str) -> None:
+    bindings = plan.target_object_bindings
+    if bindings is None or key not in bindings:
+        raise OSError(f"target object binding is missing: {key}")
+    _validate_object_binding(bindings[key], key)
+
+
+def _plan_binding_issues(plan: ExternalMergePlan, *, include_target_objects: bool = True) -> list[MergeIssue]:
     issues: list[MergeIssue] = []
     for role, path, identity in (
         ("current_root", plan.current_songs_dir, plan.current_root_identity),
@@ -1105,6 +1402,28 @@ def _plan_binding_issues(plan: ExternalMergePlan) -> list[MergeIssue]:
             canonical = _canonicalize_path(target, strict=False)
             if not _same_path(target, canonical) or not _path_contains_or_equals(plan.target_songs_dir, canonical):
                 issues.append(MergeIssue(BLOCKER, "action_target_not_canonical", "action target is not bound to canonical target root.", (str(target), str(canonical))))
+    if not include_target_objects:
+        return issues
+    bindings = plan.target_object_bindings
+    if bindings is None:
+        issues.append(MergeIssue(BLOCKER, "target_object_bindings_missing", "plan target object bindings are missing."))
+        return issues
+    required_keys = {"songlist"}
+    if plan.pack_actions:
+        required_keys.add("packlist")
+    if any(action.operation != "reuse" for action in plan.pack_image_actions):
+        required_keys.add("pack_dir")
+    required_keys.update(f"song:{action.identifier}" for action in plan.song_actions if action.target_path)
+    required_keys.update(
+        f"pack_image:{action.identifier}"
+        for action in plan.pack_image_actions
+        if action.operation in {"add", "replace"} and action.target_path
+    )
+    for key in sorted(required_keys):
+        try:
+            _validate_plan_target_object(plan, key)
+        except OSError as ex:
+            issues.append(MergeIssue(BLOCKER, "target_object_identity_changed", str(ex), (key,)))
     return issues
 
 
