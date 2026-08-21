@@ -15,6 +15,7 @@
 - AFF 与 `base.ogg` 切片、任意正数倍速和片段级倍速覆盖。
 - `current_export` 与 `library_export`、songlist/packlist、曲包封面和固定 section 选项。
 - 外部目标壳 `songs` 根目录的安全合并：验证目标、检查计划、显式确认、备份、manifest、失败恢复和目标目录记忆。
+- 外部合并计划及其动作会固定到计划时的 canonical 实际路径，并绑定目录身份；执行前、staging 后、安装前及回滚前均复验该绑定，防止祖先链接在计划后被重定向。该安全修复不改变 V2.5-B/V2.5-C 的人工验收状态。
 
 ## V2.3 已完成
 

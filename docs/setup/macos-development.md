@@ -43,6 +43,8 @@ python app.py
 
 macOS 没有 Windows 的 `CREATE_NO_WINDOW` 行为，也不使用 `ffmpeg.exe` 或 `ArcSlicer.exe`。源码运行时，`ffmpeg`/`ffprobe` 必须由 PATH 提供。真实歌曲、运行数据和导出结果不随仓库同步；请在应用中重新选择自己的本地歌曲目录，且不要提交这些资产。
 
+外部合并的合成测试可直接使用 macOS 默认临时目录；测试和合并计划会固定既有祖先链接解析后的真实路径，不需要设置 `TMPDIR`。
+
 ## 当前交接状态
 
 V2.5-B 仍在人工验收阶段。开始新功能前，请阅读 [旅行交接](../status/travel-handoff-2026-07-14.md)、`AGENT.md` 和 [当前开发状态](../status/current-development-status.md)，先完成其中列出的真实歌曲与 Windows 验收缺口。

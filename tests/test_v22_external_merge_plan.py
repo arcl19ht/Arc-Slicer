@@ -372,17 +372,20 @@ class ExternalMergePlanTests(unittest.TestCase):
             base = Path(td)
             real_current = base / "real_current"
             link_current = base / "link_current"
-            target = base / "target"
+            real_target = base / "real_target"
+            link_target = base / "link_target"
             _setup_current(real_current, [_song("song_a")], None)
-            _setup_target(target, [], [_pack("pack_a")])
+            _setup_target(real_target, [], [_pack("pack_a")])
             try:
                 os.symlink(real_current, link_current, target_is_directory=True)
+                os.symlink(real_target, link_target, target_is_directory=True)
             except (OSError, NotImplementedError):
                 self.skipTest("symlink creation is unavailable")
 
-            plan = external_merge.build_external_merge_plan(link_current, target)
+            plan = external_merge.build_external_merge_plan(link_current, link_target)
 
             self.assertIn("current_songs_dir_is_link", _codes(plan))
+            self.assertIn("target_songs_dir_is_link", _codes(plan))
 
     def test_reparse_point_detection_uses_file_attributes(self):
         class FakeStat:

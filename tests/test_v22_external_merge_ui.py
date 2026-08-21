@@ -135,6 +135,8 @@ def _plan(*, blockers=None, warnings=None, actions=True):
     plan = external_merge.ExternalMergePlan(
         current_songs_dir=Path("current_export/songs"),
         target_songs_dir=Path("target/songs"),
+        current_root_identity=None,
+        target_root_identity=None,
     )
     plan.blockers.extend(blockers or [])
     plan.warnings.extend(warnings or [])

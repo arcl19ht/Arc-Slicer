@@ -40,10 +40,32 @@ class MergeAction:
     details: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class DirectoryIdentity:
+    """Stable, cross-platform identity for an existing directory."""
+
+    canonical_path: str
+    device: int
+    inode: int
+    mode: int
+
+
+@dataclass(frozen=True)
+class WritablePathBinding:
+    """Canonical future path plus the identity of its existing anchor."""
+
+    canonical_path: str
+    anchor: DirectoryIdentity
+
+
 @dataclass
 class ExternalMergePlan:
     current_songs_dir: Path
     target_songs_dir: Path
+    # These are required plan fields.  A legacy caller may explicitly supply
+    # None for display-only data, but execute_external_merge fails it closed.
+    current_root_identity: DirectoryIdentity | None
+    target_root_identity: DirectoryIdentity | None
     song_actions: list[MergeAction] = field(default_factory=list)
     pack_actions: list[MergeAction] = field(default_factory=list)
     pack_image_actions: list[MergeAction] = field(default_factory=list)
@@ -105,13 +127,28 @@ def _has_root_blocker(plan: ExternalMergePlan) -> bool:
 
 
 def build_external_merge_plan(current_songs_dir: Path, target_songs_dir: Path) -> ExternalMergePlan:
-    current_songs_dir = Path(_norm_abs(current_songs_dir))
-    target_songs_dir = Path(_norm_abs(target_songs_dir))
-    plan = ExternalMergePlan(current_songs_dir=current_songs_dir, target_songs_dir=target_songs_dir)
+    current_input = Path(_norm_abs(current_songs_dir))
+    target_input = Path(_norm_abs(target_songs_dir))
+    plan = ExternalMergePlan(
+        current_songs_dir=current_input,
+        target_songs_dir=target_input,
+        current_root_identity=None,
+        target_root_identity=None,
+    )
 
-    _validate_root(plan, current_songs_dir, "current", "current_songs_dir")
-    _validate_root(plan, target_songs_dir, "target", "target_songs_dir")
+    _validate_root(plan, current_input, "current", "current_songs_dir")
+    _validate_root(plan, target_input, "target", "target_songs_dir")
     if _has_root_blocker(plan):
+        return _finalize_root_blocked_plan(plan)
+    try:
+        current_songs_dir = _canonical_existing_root(current_input)
+        target_songs_dir = _canonical_existing_root(target_input)
+        plan.current_songs_dir = current_songs_dir
+        plan.target_songs_dir = target_songs_dir
+        plan.current_root_identity = _capture_directory_identity(current_songs_dir)
+        plan.target_root_identity = _capture_directory_identity(target_songs_dir)
+    except OSError as ex:
+        _block(plan, "root_canonicalization_failed", f"cannot bind external merge root: {ex}")
         return _finalize_root_blocked_plan(plan)
     if _is_library_export_songs_dir(current_songs_dir):
         _block(plan, "current_is_library_export", "library_export/songs must not be used as external merge input.", current_songs_dir)
@@ -171,7 +208,16 @@ def build_external_merge_plan(current_songs_dir: Path, target_songs_dir: Path) -
 def execute_external_merge(plan: ExternalMergePlan, *, backup_root: Path) -> ExternalMergeResult:
     if not isinstance(plan, ExternalMergePlan):
         raise TypeError("plan must be an ExternalMergePlan")
-    backup_root = Path(backup_root)
+    try:
+        backup_binding = _bind_writable_path(backup_root)
+    except OSError as ex:
+        return ExternalMergeResult(
+            success=False,
+            status="rejected",
+            plan=plan,
+            message="backup path safety check failed; no writes were performed.",
+            execution_issues=[MergeIssue(BLOCKER, "backup_root_canonicalization_failed", str(ex), (str(backup_root),))],
+        )
     if plan.blockers:
         return ExternalMergeResult(
             success=False,
@@ -181,6 +227,18 @@ def execute_external_merge(plan: ExternalMergePlan, *, backup_root: Path) -> Ext
             execution_issues=list(plan.blockers),
         )
 
+    safety_issues = _execution_safety_issues(plan, backup_binding)
+    if safety_issues:
+        return ExternalMergeResult(
+            success=False,
+            status="rejected",
+            plan=plan,
+            message="execution path safety check failed; no writes were performed.",
+            execution_issues=safety_issues,
+        )
+
+    # Rebuild only from roots already fixed in the checked plan, never from a
+    # UI alias that could now resolve to a different external shell.
     fresh = build_external_merge_plan(plan.current_songs_dir, plan.target_songs_dir)
     if fresh.blockers:
         return ExternalMergeResult(
@@ -198,7 +256,7 @@ def execute_external_merge(plan: ExternalMergePlan, *, backup_root: Path) -> Ext
             message="external target or current export changed after plan check.",
         )
 
-    safety_issues = _execution_safety_issues(fresh, backup_root)
+    safety_issues = _execution_safety_issues(fresh, backup_binding)
     if safety_issues:
         return ExternalMergeResult(
             success=False,
@@ -206,6 +264,20 @@ def execute_external_merge(plan: ExternalMergePlan, *, backup_root: Path) -> Ext
             plan=fresh,
             message="execution path safety check failed; no writes were performed.",
             execution_issues=safety_issues,
+        )
+
+    # Bind staging's parent before creating either staging or a backup.  This
+    # is an independent write root because staging is a sibling of target.
+    try:
+        stage_parent_binding = _bind_writable_path(fresh.target_songs_dir.parent)
+        _validate_writable_path_binding(stage_parent_binding)
+    except OSError as ex:
+        return ExternalMergeResult(
+            success=False,
+            status="rejected",
+            plan=fresh,
+            message="staging path safety check failed; no writes were performed.",
+            execution_issues=[MergeIssue(BLOCKER, "staging_parent_canonicalization_failed", str(ex), (str(fresh.target_songs_dir.parent),))],
         )
 
     backup_dir: Path | None = None
@@ -220,15 +292,44 @@ def execute_external_merge(plan: ExternalMergePlan, *, backup_root: Path) -> Ext
         "checkpoints": [],
     }
     try:
-        backup_dir = _create_backup_dir(backup_root)
+        stage_dir = _create_staging_dir(fresh.target_songs_dir)
+        _stage_inputs(fresh, stage_dir)
+
+        final = build_external_merge_plan(plan.current_songs_dir, plan.target_songs_dir)
+        if final.snapshot_fingerprint != fresh.snapshot_fingerprint or final.blockers:
+            _cleanup_staging_dir(final, stage_parent_binding, stage_dir)
+            return ExternalMergeResult(
+                success=False,
+                status="stale_plan",
+                plan=final,
+                message="stale plan detected after staging; no target writes were performed.",
+                changed_paths=[],
+            )
+
+        safety_issues = _execution_safety_issues(final, backup_binding)
+        if safety_issues:
+            _cleanup_staging_dir(final, stage_parent_binding, stage_dir)
+            return ExternalMergeResult(
+                success=False,
+                status="rejected",
+                plan=final,
+                message="execution path safety changed after staging; no writes were performed.",
+                execution_issues=safety_issues,
+            )
+
+        _validate_writable_path_binding(backup_binding)
+        _validate_writable_path_binding(stage_parent_binding)
+        backup_dir = _create_backup_dir(Path(backup_binding.canonical_path))
         manifest = _base_manifest(fresh, backup_dir, "in_progress")
         _write_manifest(backup_dir, manifest)
         _checkpoint(backup_dir, manifest, ctx, "manifest_created")
         _backup_affected_items(fresh, backup_dir, ctx, lambda label: _checkpoint(backup_dir, manifest, ctx, label))
+        _checkpoint(backup_dir, manifest, ctx, "staging_completed")
 
         refreshed = build_external_merge_plan(plan.current_songs_dir, plan.target_songs_dir)
         if refreshed.snapshot_fingerprint != fresh.snapshot_fingerprint or refreshed.blockers:
             manifest_issues = _try_write_manifest_status(backup_dir, manifest, ctx, "stale_no_write")
+            _cleanup_staging_dir(refreshed, stage_parent_binding, stage_dir, manifest_issues)
             return ExternalMergeResult(
                 success=False,
                 status="stale_plan",
@@ -239,42 +340,46 @@ def execute_external_merge(plan: ExternalMergePlan, *, backup_root: Path) -> Ext
                 execution_issues=manifest_issues,
             )
 
-        stage_dir = _create_staging_dir(fresh.target_songs_dir)
-        _stage_inputs(fresh, stage_dir)
-        _checkpoint(backup_dir, manifest, ctx, "staging_completed")
-
-        final = build_external_merge_plan(plan.current_songs_dir, plan.target_songs_dir)
-        if final.snapshot_fingerprint != fresh.snapshot_fingerprint or final.blockers:
-            _cleanup_temp_path(stage_dir)
+        safety_issues = _execution_safety_issues(refreshed, backup_binding)
+        if safety_issues:
             manifest_issues = _try_write_manifest_status(backup_dir, manifest, ctx, "stale_no_write")
+            _cleanup_staging_dir(refreshed, stage_parent_binding, stage_dir, manifest_issues)
             return ExternalMergeResult(
                 success=False,
-                status="stale_plan",
-                plan=final,
+                status="rejected",
+                plan=refreshed,
                 backup_dir=backup_dir,
-                message="stale plan detected after staging; no target writes were performed.",
-                changed_paths=[],
-                execution_issues=manifest_issues,
+                message="execution path safety changed after backup; no target writes were performed.",
+                execution_issues=manifest_issues + safety_issues,
             )
 
-        _install_song_directories(fresh, stage_dir, ctx, lambda label: _checkpoint(backup_dir, manifest, ctx, label))
-        _install_pack_images(fresh, stage_dir, ctx, lambda label: _checkpoint(backup_dir, manifest, ctx, label))
-        _write_json_atomic(fresh.target_songs_dir / "songlist", fresh.merged_songlist_data)
+        _install_song_directories(refreshed, stage_dir, ctx, lambda label: _checkpoint(backup_dir, manifest, ctx, label))
+        _install_pack_images(refreshed, stage_dir, ctx, lambda label: _checkpoint(backup_dir, manifest, ctx, label))
+        _write_json_atomic(refreshed.target_songs_dir / "songlist", refreshed.merged_songlist_data)
         ctx["changed_paths"].append("songlist")
         _checkpoint(backup_dir, manifest, ctx, "songlist_written")
-        if fresh.pack_actions:
-            _write_json_atomic(fresh.target_songs_dir / "packlist", fresh.merged_packlist_data)
+        if refreshed.pack_actions:
+            _write_json_atomic(refreshed.target_songs_dir / "packlist", refreshed.merged_packlist_data)
             ctx["changed_paths"].append("packlist")
             _checkpoint(backup_dir, manifest, ctx, "packlist_written")
 
+        # Swap and staging cleanup delete paths, so do not perform either if a
+        # root was replaced while the install work was in progress.
+        post_install_issues = _execution_safety_issues(refreshed, backup_binding)
+        if post_install_issues:
+            raise RuntimeError(
+                "execution path safety changed after install: "
+                + ", ".join(issue.code for issue in post_install_issues)
+            )
+        _validate_writable_path_binding(stage_parent_binding)
         _cleanup_swaps(ctx)
-        _cleanup_temp_path(stage_dir)
+        _cleanup_staging_dir(refreshed, stage_parent_binding, stage_dir)
         _checkpoint(backup_dir, manifest, ctx, "temporary_paths_cleaned")
         manifest_issues = _try_write_manifest_status(backup_dir, manifest, ctx, "completed")
         return ExternalMergeResult(
             success=True,
             status="completed",
-            plan=fresh,
+            plan=refreshed,
             backup_dir=backup_dir,
             message="external merge completed.",
             changed_paths=list(ctx["changed_paths"]),
@@ -291,16 +396,37 @@ def execute_external_merge(plan: ExternalMergePlan, *, backup_root: Path) -> Ext
             except Exception as manifest_ex:
                 manifest_errors.append(f"manifest checkpoint {label}: {manifest_ex}")
 
-        rollback_errors = _rollback(
-            fresh,
+        if backup_dir is None:
+            pre_backup_errors: list[str] = []
+            if stage_dir is not None:
+                try:
+                    _cleanup_staging_dir(fresh, stage_parent_binding, stage_dir)
+                except Exception as cleanup_ex:
+                    pre_backup_errors.append(f"cleanup staging failed: {cleanup_ex}")
+            return ExternalMergeResult(
+                success=False,
+                status="rejected",
+                plan=fresh,
+                message=f"staging failed before backup; no target writes were performed: {ex}",
+                rollback_errors=pre_backup_errors,
+                execution_issues=[MergeIssue(BLOCKER, "staging_failed", str(ex))],
+            )
+
+        rollback_plan = fresh
+        identity_errors = _plan_binding_issues(rollback_plan)
+        if identity_errors:
+            rollback_errors = [f"rollback refused: {issue.code}" for issue in identity_errors]
+        else:
+            rollback_errors = _rollback(
+            rollback_plan,
             backup_dir,
             ctx,
             rollback_checkpoint if backup_dir is not None and manifest is not None else None,
         ) if backup_dir is not None else [str(ex)]
         rollback_errors.extend(manifest_errors)
-        if stage_dir is not None:
+        if stage_dir is not None and stage_parent_binding is not None:
             try:
-                _cleanup_temp_path(stage_dir)
+                _cleanup_staging_dir(rollback_plan, stage_parent_binding, stage_dir)
             except Exception as cleanup_ex:
                 rollback_errors.append(f"cleanup staging failed: {cleanup_ex}")
         status = "failed_rollback_incomplete" if rollback_errors else "failed_rolled_back"
@@ -350,6 +476,8 @@ def _finalize_root_blocked_plan(plan: ExternalMergePlan) -> ExternalMergePlan:
 
 def _compute_snapshot_fingerprint(plan: ExternalMergePlan) -> str:
     h = hashlib.sha256()
+    _fingerprint_directory_identity(h, "current/root", plan.current_root_identity)
+    _fingerprint_directory_identity(h, "target/root", plan.target_root_identity)
     _fingerprint_path(h, "current/songlist", plan.current_songs_dir / "songlist")
     _fingerprint_path(h, "current/packlist", plan.current_songs_dir / "packlist")
     _fingerprint_path(h, "target/songlist", plan.target_songs_dir / "songlist")
@@ -365,6 +493,23 @@ def _compute_snapshot_fingerprint(plan: ExternalMergePlan) -> str:
         if action.target_path:
             _fingerprint_path(h, f"pack_image/target/{action.identifier}", Path(action.target_path))
     return h.hexdigest()
+
+
+def _fingerprint_directory_identity(
+    h: "hashlib._Hash", label: str, identity: DirectoryIdentity | None,
+) -> None:
+    h.update(f"ROOT\0{label}\0".encode())
+    if identity is None:
+        h.update(b"UNBOUND\0")
+        return
+    h.update(identity.canonical_path.encode("utf-8", errors="surrogateescape"))
+    h.update(b"\0")
+    h.update(str(identity.device).encode())
+    h.update(b"\0")
+    h.update(str(identity.inode).encode())
+    h.update(b"\0")
+    h.update(str(identity.mode).encode())
+    h.update(b"\0")
 
 
 def _fingerprint_path(h: "hashlib._Hash", label: str, path: Path) -> None:
@@ -397,22 +542,23 @@ def _fingerprint_path(h: "hashlib._Hash", label: str, path: Path) -> None:
     h.update(b"OTHER\0")
 
 
-def _execution_safety_issues(plan: ExternalMergePlan, backup_root: Path) -> list[MergeIssue]:
+def _execution_safety_issues(plan: ExternalMergePlan, backup_binding: WritablePathBinding) -> list[MergeIssue]:
     issues: list[MergeIssue] = []
     target = plan.target_songs_dir
     current = plan.current_songs_dir
-    backup_root = Path(backup_root)
+    backup_root = Path(backup_binding.canonical_path)
 
+    issues.extend(_plan_binding_issues(plan))
+    try:
+        _validate_writable_path_binding(backup_binding)
+    except OSError as ex:
+        issues.append(MergeIssue(BLOCKER, "backup_root_identity_changed", str(ex), (backup_binding.canonical_path,)))
     if _path_contains_or_equals(target, backup_root):
         issues.append(MergeIssue(BLOCKER, "backup_root_inside_target", "backup root must not be inside target songs.", (str(backup_root), str(target))))
     if _path_contains_or_equals(current, backup_root) or _same_path(current, backup_root):
         issues.append(MergeIssue(BLOCKER, "backup_root_inside_current", "backup root must not be inside current export.", (str(backup_root), str(current))))
     if _same_path(current, target):
         issues.append(MergeIssue(BLOCKER, "target_equals_current_input", "target songs directory must not equal current input.", (str(target),)))
-    for parent in _existing_parents(backup_root):
-        if is_link_or_junction(parent):
-            issues.append(MergeIssue(BLOCKER, "backup_parent_is_link", "backup parent must not be a link or Junction.", (str(parent),)))
-            break
     for path in _write_candidate_paths(plan):
         if not _path_contains_or_equals(target, path):
             issues.append(MergeIssue(BLOCKER, "write_path_escape", "candidate write path escapes target songs root.", (str(path), str(target))))
@@ -815,6 +961,28 @@ def _cleanup_temp_path(path: Path, errors: list[str] | None = None) -> None:
             raise
 
 
+def _cleanup_staging_dir(
+    plan: ExternalMergePlan,
+    stage_parent_binding: WritablePathBinding,
+    stage_dir: Path,
+    issues: list[MergeIssue] | None = None,
+) -> None:
+    """Remove staging only while its fixed parent and plan roots still match."""
+    safety_issues = _plan_binding_issues(plan)
+    try:
+        _validate_writable_path_binding(stage_parent_binding)
+    except OSError as ex:
+        safety_issues.append(
+            MergeIssue(BLOCKER, "staging_parent_identity_changed", str(ex), (stage_parent_binding.canonical_path,))
+        )
+    if safety_issues:
+        if issues is not None:
+            issues.extend(safety_issues)
+            return
+        raise RuntimeError("refusing to clean staging after path binding changed")
+    _cleanup_temp_path(stage_dir)
+
+
 def _remove_tree_or_file(path: Path) -> None:
     if is_link_or_junction(path):
         raise RuntimeError(f"refusing to delete link or Junction: {path}")
@@ -853,6 +1021,91 @@ def _same_path(a: Path, b: Path) -> bool:
 
 def _norm_abs(path: Path) -> str:
     return os.path.normcase(os.path.normpath(os.path.abspath(os.fspath(path))))
+
+
+def _canonical_existing_root(path: Path) -> Path:
+    """Resolve ancestor aliases once after lexical root validation succeeds."""
+    return _canonicalize_path(path, strict=True)
+
+
+def _canonicalize_path(path: Path, *, strict: bool) -> Path:
+    """Return one absolute, normcase canonical path on every supported OS."""
+    return Path(_norm_abs(Path(path).resolve(strict=strict)))
+
+
+def _capture_directory_identity(path: Path) -> DirectoryIdentity:
+    canonical = Path(path)
+    st = canonical.stat()
+    if not stat.S_ISDIR(st.st_mode):
+        raise OSError(f"path is not a directory: {canonical}")
+    device = getattr(st, "st_dev", None)
+    inode = getattr(st, "st_ino", None)
+    # A platform that cannot provide a meaningful directory identity must fail
+    # closed rather than silently treating every replacement as unchanged.
+    if isinstance(device, bool) or not isinstance(device, int) or device < 0:
+        raise OSError(f"directory device identity unavailable: {canonical}")
+    if isinstance(inode, bool) or not isinstance(inode, int) or inode <= 0:
+        raise OSError(f"directory inode identity unavailable: {canonical}")
+    return DirectoryIdentity(
+        canonical_path=_norm_abs(canonical),
+        device=device,
+        inode=inode,
+        mode=stat.S_IFMT(st.st_mode),
+    )
+
+
+def _validate_directory_identity(identity: DirectoryIdentity | None, role: str) -> None:
+    if identity is None:
+        raise OSError(f"{role} identity is missing")
+    current = _capture_directory_identity(Path(identity.canonical_path))
+    if current != identity:
+        raise OSError(f"{role} identity changed: {identity.canonical_path}")
+
+
+def _bind_writable_path(path: Path) -> WritablePathBinding:
+    canonical = _canonicalize_path(path, strict=False)
+    existing = canonical
+    while not existing.exists() and existing.parent != existing:
+        existing = existing.parent
+    return WritablePathBinding(
+        canonical_path=_norm_abs(canonical),
+        anchor=_capture_directory_identity(existing),
+    )
+
+
+def _validate_writable_path_binding(binding: WritablePathBinding) -> None:
+    canonical = _canonicalize_path(Path(binding.canonical_path), strict=False)
+    if not _same_path(Path(binding.canonical_path), canonical):
+        raise OSError(f"writable path is no longer canonical: {binding.canonical_path}")
+    _validate_directory_identity(binding.anchor, "backup anchor")
+
+
+def _plan_binding_issues(plan: ExternalMergePlan) -> list[MergeIssue]:
+    issues: list[MergeIssue] = []
+    for role, path, identity in (
+        ("current_root", plan.current_songs_dir, plan.current_root_identity),
+        ("target_root", plan.target_songs_dir, plan.target_root_identity),
+    ):
+        canonical = _canonicalize_path(path, strict=False)
+        if not _same_path(path, canonical):
+            issues.append(MergeIssue(BLOCKER, f"{role}_not_canonical", "plan root is not canonical.", (str(path), str(canonical))))
+            continue
+        try:
+            _validate_directory_identity(identity, role)
+        except OSError as ex:
+            issues.append(MergeIssue(BLOCKER, f"{role}_identity_changed", str(ex), (str(path),)))
+    for action in plan.song_actions + plan.pack_image_actions:
+        if action.source_path:
+            source = Path(action.source_path)
+            canonical = _canonicalize_path(source, strict=False)
+            if not _same_path(source, canonical) or not _path_contains_or_equals(plan.current_songs_dir, canonical):
+                issues.append(MergeIssue(BLOCKER, "action_source_not_canonical", "action source is not bound to canonical current root.", (str(source), str(canonical))))
+        if action.target_path:
+            target = Path(action.target_path)
+            canonical = _canonicalize_path(target, strict=False)
+            if not _same_path(target, canonical) or not _path_contains_or_equals(plan.target_songs_dir, canonical):
+                issues.append(MergeIssue(BLOCKER, "action_target_not_canonical", "action target is not bound to canonical target root.", (str(target), str(canonical))))
+    return issues
 
 
 def path_exists_lexically(path: Path) -> bool:

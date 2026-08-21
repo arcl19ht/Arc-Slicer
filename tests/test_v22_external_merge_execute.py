@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -88,6 +89,151 @@ def _plan(current: Path, target: Path):
 
 
 class ExternalMergeExecuteTests(unittest.TestCase):
+    def test_plan_canonicalizes_ancestor_aliases_and_actions(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current = base / "current"
+            real_parent = base / "real_parent"
+            target = real_parent / "target"
+            alias_parent = base / "alias_parent"
+            _setup_current(current, [_song("new_song")], None)
+            _setup_target(target, [], [_pack("pack_a")])
+            try:
+                os.symlink(real_parent, alias_parent, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink creation is unavailable")
+
+            plan = _plan(current, alias_parent / "target")
+
+            self.assertEqual(plan.target_songs_dir, target.resolve())
+            self.assertEqual(plan.target_root_identity.canonical_path, str(target.resolve()))
+            if str(base).startswith("/var/"):
+                self.assertTrue(str(plan.target_songs_dir).startswith("/private/var/"))
+            self.assertTrue(all(
+                Path(action.target_path).is_relative_to(target.resolve())
+                for action in plan.song_actions + plan.pack_image_actions
+                if action.target_path
+            ))
+
+    def test_alias_retarget_after_plan_keeps_writes_in_original_canonical_target(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current = base / "current"
+            real_parent_a = base / "real_parent_a"
+            real_parent_b = base / "real_parent_b"
+            target_a = real_parent_a / "container" / "target"
+            target_b = real_parent_b / "container" / "target"
+            alias_parent = base / "alias_parent"
+            backup_root = base / "backups"
+            _setup_current(current, [_song("new_song")], None)
+            _setup_target(target_a, [], [_pack("pack_a")])
+            _setup_target(target_b, [], [_pack("pack_a")])
+            try:
+                os.symlink(real_parent_a, alias_parent, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink creation is unavailable")
+
+            plan = _plan(current, alias_parent / "container" / "target")
+            alias_parent.unlink()
+            os.symlink(real_parent_b, alias_parent, target_is_directory=True)
+            result = external_merge.execute_external_merge(plan, backup_root=backup_root)
+
+            self.assertTrue(result.success, result)
+            self.assertTrue((target_a / "new_song" / "base.ogg").exists())
+            self.assertFalse((target_b / "new_song").exists())
+            self.assertEqual(_read_json(result.backup_dir / "manifest.json")["target_songs_dir"], str(target_a.resolve()))
+
+    def test_direct_parent_alias_retarget_keeps_writes_in_original_canonical_target(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current = base / "current"
+            real_parent_a = base / "real_parent_a"
+            real_parent_b = base / "real_parent_b"
+            target_a = real_parent_a / "target"
+            target_b = real_parent_b / "target"
+            alias_parent = base / "alias_parent"
+            _setup_current(current, [_song("new_song")], None)
+            _setup_target(target_a, [], [_pack("pack_a")])
+            _setup_target(target_b, [], [_pack("pack_a")])
+            try:
+                os.symlink(real_parent_a, alias_parent, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink creation is unavailable")
+
+            plan = _plan(current, alias_parent / "target")
+            alias_parent.unlink()
+            os.symlink(real_parent_b, alias_parent, target_is_directory=True)
+            result = external_merge.execute_external_merge(plan, backup_root=base / "backups")
+
+            self.assertTrue(result.success, result)
+            self.assertTrue((target_a / "new_song").exists())
+            self.assertFalse((target_b / "new_song").exists())
+
+    def test_fingerprint_distinguishes_same_content_canonical_targets(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current = base / "current"
+            target_a = base / "target_a"
+            target_b = base / "target_b"
+            _setup_current(current, [_song("new_song")], None)
+            _setup_target(target_a, [], [_pack("pack_a")])
+            _setup_target(target_b, [], [_pack("pack_a")])
+
+            plan_a = _plan(current, target_a)
+            plan_b = _plan(current, target_b)
+
+            self.assertNotEqual(plan_a.snapshot_fingerprint, plan_b.snapshot_fingerprint)
+
+    def test_replaced_target_root_is_rejected_before_backup_or_write(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current, target, backup_root = base / "current", base / "target", base / "backups"
+            _setup_current(current, [_song("new_song")], None)
+            _setup_target(target, [], [_pack("pack_a")])
+            plan = _plan(current, target)
+            before = _snapshot(target)
+            original_target = base / "original_target"
+            target.rename(original_target)
+            _setup_target(target, [], [_pack("pack_a")])
+
+            result = external_merge.execute_external_merge(plan, backup_root=backup_root)
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.status, "rejected")
+            self.assertIn("target_root_identity_changed", {issue.code for issue in result.execution_issues})
+            self.assertFalse(backup_root.exists())
+            self.assertEqual(_snapshot(original_target), before)
+            self.assertFalse((target / "new_song").exists())
+
+    def test_missing_root_identity_plan_is_rejected_before_backup(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current, target, backup_root = base / "current", base / "target", base / "backups"
+            _setup_current(current, [_song("new_song")], None)
+            _setup_target(target, [], [_pack("pack_a")])
+            plan = _plan(current, target)
+            plan.target_root_identity = None
+
+            result = external_merge.execute_external_merge(plan, backup_root=backup_root)
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.status, "rejected")
+            self.assertIn("target_root_identity_changed", {issue.code for issue in result.execution_issues})
+            self.assertFalse(backup_root.exists())
+
+    def test_staging_creation_failure_does_not_create_backup(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            current, target, backup_root = base / "current", base / "target", base / "backups"
+            _setup_current(current, [_song("new_song")], None)
+            _setup_target(target, [], [_pack("pack_a")])
+
+            with mock.patch("external_merge._create_staging_dir", side_effect=OSError("unsafe staging parent")):
+                result = external_merge.execute_external_merge(_plan(current, target), backup_root=backup_root)
+
+            self.assertFalse(result.success)
+            self.assertFalse(backup_root.exists())
+
     def test_execute_adds_song_and_pack_with_backup_manifest(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
@@ -341,7 +487,7 @@ class ExternalMergeExecuteTests(unittest.TestCase):
                 target_path=str(base / "escape"),
             )
 
-            issues = external_merge._execution_safety_issues(plan, backup_root)
+            issues = external_merge._execution_safety_issues(plan, external_merge._bind_writable_path(backup_root))
 
             self.assertIn("write_path_escape", {issue.code for issue in issues})
 
@@ -366,9 +512,8 @@ class ExternalMergeExecuteTests(unittest.TestCase):
             self.assertEqual(result.changed_paths, [])
             self.assertFalse((target / "new_song").exists())
             self.assertFalse(list(target.parent.glob(".arc_slicer_merge_stage_*")))
-            manifest = _read_json(result.backup_dir / "manifest.json")
-            self.assertEqual(manifest["status"], "stale_no_write")
-            self.assertEqual(manifest["changed_paths"], [])
+            self.assertIsNone(result.backup_dir)
+            self.assertFalse(backup_root.exists())
             self.assertNotEqual(_snapshot(target), before)
             self.assertEqual([s["id"] for s in _read_json(target / "songlist")["songs"]], ["external"])
 
@@ -466,7 +611,7 @@ class ExternalMergeExecuteTests(unittest.TestCase):
             original_path_exists = external_merge.path_exists_lexically
             original_is_link = external_merge.is_link_or_junction
             occupied = {"active": False}
-            raced_target = target / "pack" / "select_pack_a.png"
+            raced_target = Path(plan.pack_image_actions[0].target_path)
 
             def racing_install(source, target_path, *, replace):
                 self.assertEqual(Path(target_path), raced_target)
