@@ -1,16 +1,33 @@
-# Arc Slicer Agent Handoff
+# Arc Slicer Agent Guide
 
-Read this document before changing the project. V2.4 is complete and has passed Windows source-environment and final EXE acceptance.
+Read this document before changing the project. Arc Slicer is a PyQt6 desktop tool that slices Arcaea AFF charts and OGG audio into independently exportable practice-song directories. `app.py` is the compatibility/startup entry, `arc_slicer/` contains the implementation, and JSON songlist/packlist plus AFF are the main external formats. V2.4 is the accepted stable product; V2.5-B is implemented and automated but is not yet manually accepted on Windows.
 
-## Current Baseline
+## Development Environment
 
-- Stable branch: `main`
-- Stable version: V2.4
-- V2.3 closing commit: `8316bba feat(v2.3): add timeline quick draft gesture`
-- Main stable baseline: `d7bbaed` (V2.4 PR #4 merge)
-- V2.4 closing documentation: `9ff4f05 docs: close v2.4 and plan multi-difficulty slicing`
-- Current feature branch: `feature/v2.5-multi-difficulty-export`
-- Current task: V2.5-B multi-difficulty export manual acceptance preparation. Travel handoff: `docs/status/travel-handoff-2026-07-14.md`.
+- Supported Python: 3.10 or newer. On Windows prefer `.venv\Scripts\python.exe`; never reuse `.venv/bin/python`, `/private/tmp`, or a user-specific macOS path.
+- The repository has no dependency manifest or lock file. PyQt6 is required at runtime; pytest is required for the pytest suite. Report a missing dependency and ask before installing or upgrading it.
+- Standard Windows validation:
+  - `.venv\Scripts\python.exe -m pytest -q tests/test_v22_external_merge_plan.py tests/test_v22_external_merge_execute.py tests/test_v22_external_merge_ui.py`
+  - `.venv\Scripts\python.exe -m pytest -q`
+  - `.venv\Scripts\python.exe -m compileall -q app.py external_merge.py arc_slicer`
+  - `.venv\Scripts\python.exe -c "import app, external_merge, arc_slicer"`
+  - `git diff --check`
+- If the repository venv lacks pytest, do not install it silently. A separately discovered Python may be used only after recording its executable and imports. `python -m unittest discover -s tests -q` is not equivalent here: one real-Qt isolation test deliberately launches pytest in a subprocess.
+- Never commit local songs, AFF/OGG/jacket assets, `ArcSlicerData/`, `out/`, build products, caches, external shells, or machine-specific paths.
+
+## Dated Handoff Snapshot
+
+This section is a 2026-09-01 snapshot, not a permanent invariant. Refresh it after later commits or validation.
+
+- Branch and current repository HEAD: `feature/v2.5-multi-difficulty-export` at `7f1e207cc8bee4c270ea50dc1e9c748eb919b436` (`7f1e207`). This commit changes only `AGENT.md`.
+- Product-code baseline: `7ac8c127138ca862466dfd00cd8a2bf98be3e0ea` (`7ac8c12`).
+- Remote state after `git fetch origin --prune`: tracking `origin/feature/v2.5-multi-difficulty-export`, 1 ahead / 0 behind. Both `1a613b0` and product baseline `7ac8c12` are present on that remote branch.
+- `main` and `origin/main` are at `9044148`; `main` is the product baseline's merge base, and that product baseline is 21 commits ahead, 0 behind `main`. Continue V2.5 work on the feature branch, not `main`.
+- Worktree before this snapshot correction contained only the pre-existing untracked `test_shell_songs/`; it is user/test-shell data and was not inspected, modified, staged, or committed.
+- Windows interpreters: repository venv Python 3.13.9 imports PyQt6 but lacks pytest. System Python 3.12.7 imports PyQt6 and pytest 9.0.3.
+- 2026-09-01 system-Python pytest: external-merge focus `92 passed, 8 skipped, 21 subtests passed`; full suite `437 passed, 15 skipped, 89 subtests passed`. Both exited 0. Repository-venv focused unittest also passed 100 tests with 8 skipped; full unittest is not a valid green baseline for the isolation reason above.
+- Repository-venv compileall and `app`/`external_merge`/`arc_slicer` imports passed. This is automated source validation only, not V2.5 Windows GUI, real-song, external-shell, or EXE acceptance.
+- Stable version: V2.4. V2.3 closed at `8316bba`; V2.4 merged at `d7bbaed` and closed in `9ff4f05`.
 
 V2.2 is complete: AFF/audio slicing, `current_export` and `library_export`, songlist/packlist export, fixed pack sections, per-segment speed overrides, duplicate output-ID blocking, copy segment, and safe external shell merge. External merge uses an explicit plan and confirmation, backs up affected content, writes a manifest, attempts recovery on failure, and remembers a verified target `songs` directory.
 
@@ -19,6 +36,24 @@ V2.3 is complete: waveform data and caching; waveform, time ruler, and timeline 
 V2.4-A provides manual audition of a selected complete segment from source `base.ogg`. V2.4-B adds a default-off, non-persistent 200ms debounce. V2.4-C makes explicit card/timeline selection refresh the selected range and schedule that debounce; rapid selection leaves only the final segment pending. A second click on an already selected timeline body seeks and plays from that point without changing its range, dirty state, or history. Dragging that selected body past the platform drag threshold translates its full interval, preserves its duration, and commits one history entry; linked members move together. Endpoint handles retain priority, and a first click on an unselected body only selects it. Looping always returns to the original segment start, never the last seek position. `textChanged` and timeline `mouseMove` do not schedule playback. Manual play/pause, input editing, drag start, and lifecycle changes cancel pending playback. Neither playback state nor the switch affects dirty state, history, or exports. V2.4 source and EXE acceptance are complete.
 
 The UI clarity refresh corrected interactive control rendering without changing behavior: auto sort, loop, and auto audition use true switches; form and export choices use square checkboxes; primary enabled/disabled states are visually distinct. `arc_slicer.ui.styles` is the sole global QSS source; `app.QSS` and `main_window.QSS` remain compatibility aliases.
+
+## Current Development Status
+
+| Area | Status | Evidence and remaining boundary |
+| --- | --- | --- |
+| V2.2 export, current/library publication, songlist/packlist | Complete with automated coverage | Existing V2.1/V2.2 suites cover staging, replacement, rollback, metadata, covers, and fixed pack sections. |
+| V2.3 waveform, selection, history, linking | Complete with automated coverage | Timeline/card selection, endpoint edits, group cascades, sorting, shortcuts, drafts, and undo/redo are covered. |
+| V2.4 playback and timeline seek/translation | Complete and previously accepted on Windows source and EXE | Manual/automatic audition, debounce, loop, pause/resume, seek, translation, and runtime-only state have regression coverage. |
+| V2.5 difficulty discovery and compatibility model | Complete with automated coverage | Readable regular `0.aff` through `4.aff` files define availability; any subset is valid. New songs select all; legacy slides prefer FTR when present; explicit empty/missing selections remain blocking states. |
+| V2.5 dedicated audio | Complete with automated coverage | `base.ogg` is always exported once per segment. A usable selected `N.ogg` produces one additional audio operation and derived `audioOverride: true`; orphan/unusable audio is warned or rejected, never silently substituted. |
+| V2.5 metadata and formal export | Implemented with automated coverage; Windows/manual acceptance pending | Per-song selection and per-difficulty metadata persist in slides; selected AFF/OGG files share one segment directory and one aggregated songlist entry. Optional distinct difficulty titles serialize as `title_localized`; `jacketOverride` is not implemented. |
+| External merge canonical-root binding | Complete with automated coverage; committed and on origin | `1a613b0` fixes post-plan ancestor/root redirection. |
+| External merge temporary/action identity binding | Complete with automated coverage; committed and on origin; Windows NTFS manual acceptance pending | `7ac8c12` binds staging, backup, manifest, swaps, installed/action targets, exposes cleanup-incomplete/unverified-backup states, and fails closed if identity cannot be proved. |
+| V2.5-C compatibility and acceptance | Not started as a separate phase | Requires real multi-AFF/OGG matrices, reduced-difficulty re-export cleanup checks, target-shell compatibility, Windows UI/source and EXE acceptance. A real external merge still requires explicit user authorization. |
+| Combo snapping | Cancelled | Do not revive combo parsing, endpoint snapping, UI, or configuration without a new explicit requirement. |
+| Chart preview, official pack/topbar library, second player, DAW workflow | Out of scope / future candidates | They are not part of V2.5-B/C. |
+
+`docs/status/current-development-status.md` remains useful but is partly stale: its `421 passed, 12 skipped` baseline predates the two external-merge safety commits, and its later “多难度切片尚未实现” bullet conflicts with the implemented-and-tested V2.5-B code described earlier in the same document. Treat current code, tests, and this dated snapshot as the stronger handoff evidence until that status document is intentionally synchronized.
 
 ## Module Routing
 
@@ -30,13 +65,16 @@ The UI clarity refresh corrected interactive control rendering without changing 
 - `arc_slicer/ui/metadata_panel.py`: songlist/packlist metadata UI.
 - `arc_slicer/playback.py`: the only audition controller. It must not import `app` or UI classes.
 - `arc_slicer/segments.py`: segment parsing, validation, IDs, speed tokens, and group helpers.
+- `arc_slicer/difficulties.py`: canonical 0–4 definitions, directory discovery, selection migration/validation, dedicated-audio discovery, and per-difficulty metadata serialization.
 - `arc_slicer/waveform.py`: waveform data, cache, and decoding helpers.
 - `arc_slicer/aff.py`: AFF slicing and warnings.
 - `arc_slicer/audio.py`: ffmpeg/ffprobe helpers and audio slicing.
-- `arc_slicer/exports.py`: current/library exports, songlist/packlist, and cover rendering.
+- `arc_slicer/exports.py`: segment and multi-difficulty operation plans, pre-staging duration validation, AFF/OGG execution, current/library publication, songlist/packlist, and cover rendering.
 - `arc_slicer/persistence.py`: config and runtime-data migration.
 - `arc_slicer/workers.py`: Qt worker classes.
 - `external_merge.py`: external target-shell merge engine with strict safety boundaries.
+- `tests/`: unittest-style tests collected by pytest. V2.1 covers export/metadata, V2.2 external merge, V2.3 waveform/history/selection, V2.4 playback/timeline interaction, and V2.5 difficulty/UI/export/lifecycle boundaries.
+- `build.spec` and `build.bat`: Windows PyInstaller entry. Building is an explicit task only; `build.bat` may install dependencies and delete build outputs, so never run it during ordinary validation.
 
 Never import `app` from inside `arc_slicer/`; pass compatibility dependencies through `MainWindowDependencies` instead.
 
@@ -51,6 +89,8 @@ Segment export IDs use:
 `speed_override = null` inherits the default speed. `uid` and `link_group_id` are UI-only fields and must never affect exported IDs.
 
 All user-visible segment edits must use `MainWindow` history transactions. Do not push history from `textChanged` or timeline `mouseMove`; input edits and endpoint drags each commit one snapshot command. Loading, source switching, and snapshot restoration suspend/reset history as appropriate.
+
+Delete and Backspace operate on `selected_segment_uid`, not visual row position, hover, or a stale index. Selection-only, hover, seek, playback, loop, and preview-source changes are runtime state: they must not create history entries, persist into slides unless explicitly documented, or mark `current_export` dirty. Export-affecting changes must mark it dirty and invalidate any checked `ExternalMergePlan`; a plan is never reusable after its inputs, target snapshot, or bound identities change.
 
 Playback state, position, loop state, automatic-audition switch, and pending timer are runtime-only. They must not enter undo history or mark exports dirty. `AudioPlaybackController` owns separate boundary and automatic-audition timers; do not add a second player, use ffmpeg temporary audition clips, or repeatedly restart playback from drag `mouseMove`. MainWindow coordinates selection/source/UI; WaveformPanel only draws the playhead.
 
@@ -80,3 +120,19 @@ Prefer restrained, low-noise PyQt UI with stable layouts and minimal configurati
 The V2.3 plan is historical. Use `README.md` and `docs/status/current-development-status.md` for current product status. Work beyond V2.3 must state clearly whether it is implemented, in development, awaiting manual acceptance, or not implemented.
 
 V2.5-B wires the same model into the main window and formal exporter: only discovered standard AFF files are selectable; selection and per-difficulty metadata are song-level slides state; an empty or missing saved selection blocks export, and a visible action can remove only unavailable saved selections while preserving metadata. A header-only but legal AFF, including `AudioOffset:-30\n-\n`, remains selectable and exportable. A preview source selector is runtime-only and can choose `base.ogg` or a usable `N.ogg`; canonical segment bounds remain based on `base.ogg`, while playback uses a separately probed preview duration. Waveform workers must remain strongly referenced until `QThread.finished`; `done_signal` only delivers a result. Formal export validates each used source audio once before staging, then creates one directory per segment, slices `base.ogg` once, then selected override audio and selected charts, and writes one aggregated songlist entry. Current/library replacement and external-merge safety keep treating that directory as one song ID. The compatibility facade now uses explicit slot signatures; its subprocess regression includes the external-merge target chooser cancel click without contaminating Gate0's fake Qt process. Manual source/UI and real-song acceptance, including a Windows recheck of that chooser, are still required; do not claim V2.5-B is accepted merely because automated tests pass. `jacketOverride`, combo snapping, chart preview, a second playback engine, and DAW-style workflows remain out of scope.
+
+## Recommended Next Work
+
+1. **Windows source/UI acceptance for V2.5-B.** Verify the final difficulty metadata cards, missing-selection recovery, source switching, `base.ogg`/`N.ogg` preview duration separation, Space/button pause-resume, waveform worker shutdown, and the external-target chooser cancel path. Acceptance requires observed GUI behavior; no EXE is needed for this step.
+2. **Real-song export matrix.** With explicit permission to use user-provided fixtures, cover arbitrary difficulty subsets (including 3/4-only and header-only AFF), selected/unselected/orphan override audio, per-difficulty `title_localized`, and durations near source boundaries. Verify one segment directory, one `base.ogg`, only selected `N.aff`/`N.ogg`, and one correctly aggregated songlist entry. This requires real Windows source execution but not a real external merge.
+3. **Current/library reduced-difficulty re-export.** Export many difficulties, then fewer under the same segment ID; confirm full-directory replacement removes stale AFF/OGG while unrelated song IDs and pack metadata remain safe. Cover rollback/failure paths with synthetic fixtures before any user data.
+4. **V2.5-C target-shell compatibility and EXE acceptance.** Only after the preceding source checks, use an explicitly approved disposable external shell for a real merge, verify backup/manifest/result-state behavior on NTFS, then build and accept a V2.5 EXE as a separate authorized task. Do not build or merge merely to advance this checklist.
+5. **Synchronize product documentation after acceptance.** Update README, `docs/status/current-development-status.md`, the V2.5 plan, and this dated snapshot together. Do not mark V2.5 complete until the manual acceptance evidence exists.
+
+## Standard Working Flow
+
+1. Before editing, run `git rev-parse --show-toplevel`, `git branch --show-current`, `git status --branch --short`, `git branch -vv`, and fetch when remote accuracy matters. Preserve all pre-existing changes and untracked user data.
+2. Read the relevant module, tests, current status, and recent commits. Prefer a small, explicit patch; do not change `main`, external data, or unrelated files.
+3. Run the narrowest relevant pytest modules first, then the full pytest suite, compileall, imports, and `git diff --check`. Record the interpreter, command, exit code, pass/skip/subtest counts, and first meaningful error. Never add skips, xfails, or test changes merely to obtain green output.
+4. Inspect `git diff -- <explicit files>` and `git status --short`. Stage only named files with `git add <path>`; never use `git add .` or `git add -A`.
+5. After an authorized commit, run `git status --short`, `git log -1 --oneline --decorate`, and `git show --check --stat HEAD`. Never push, merge, rebase, reset, amend, force-push, build an EXE, or run a real external merge without explicit user authorization.
