@@ -1,52 +1,46 @@
 @echo off
+setlocal
+set "ROOT=%~dp0"
+set "PYTHON=%ROOT%.venv\Scripts\python.exe"
+
 echo ========================================
 echo  Arc Slicer - PyInstaller Build
 echo ========================================
 echo.
 
-if not exist "%~dp0ffmpeg.exe" (
-    echo [WARN] ffmpeg.exe not found.
+if not exist "%ROOT%ffmpeg.exe" (
+    echo [ERROR] ffmpeg.exe not found.
     echo        Download from https://ffmpeg.org/download.html
     echo        and place ffmpeg.exe in this folder before building.
     echo.
-    pause
     exit /b 1
 )
 
-where python > nul 2>&1
-if errorlevel 1 (
-    echo [ERROR] python not found. Install Python and add it to PATH.
-    pause
+if not exist "%PYTHON%" (
+    echo [ERROR] Repository Python not found: %PYTHON%
+    echo        Create the repository .venv before building.
     exit /b 1
 )
 
 echo Checking dependencies...
-python -m pip show PyQt6 > nul 2>&1
+"%PYTHON%" -c "import PyQt6, PyInstaller" > nul 2>&1
 if errorlevel 1 (
-    echo Installing PyQt6...
-    python -m pip install PyQt6
-)
-python -m pip show pyinstaller > nul 2>&1
-if errorlevel 1 (
-    echo Installing PyInstaller...
-    python -m pip install pyinstaller
+    echo [ERROR] PyQt6 and PyInstaller must be installed in the repository .venv.
+    echo        This build entry does not install or upgrade dependencies.
+    exit /b 1
 )
 
 echo.
-echo [1/2] Cleaning old build artifacts...
-if exist "%~dp0dist"  rmdir /s /q "%~dp0dist"
-if exist "%~dp0build" rmdir /s /q "%~dp0build"
-if exist "%~dp0__pycache__" rmdir /s /q "%~dp0__pycache__"
-if exist "%~dp0tests\__pycache__" rmdir /s /q "%~dp0tests\__pycache__"
+echo Running PyInstaller with the repository .venv...
+pushd "%ROOT%"
+"%PYTHON%" -m PyInstaller "%ROOT%build.spec" --clean --noconfirm
+set "BUILD_EXIT=%ERRORLEVEL%"
+popd
 
-echo [2/2] Running PyInstaller...
-python -m PyInstaller "%~dp0build.spec" --clean
-
-if errorlevel 1 (
+if not "%BUILD_EXIT%"=="0" (
     echo.
     echo [FAILED] Build failed. See output above.
-    pause
-    exit /b 1
+    exit /b %BUILD_EXIT%
 )
 
 echo.
@@ -54,5 +48,4 @@ echo ========================================
 echo  Done! Output: dist\ArcSlicer.exe
 echo ========================================
 echo.
-explorer "%~dp0dist"
-pause
+exit /b 0
