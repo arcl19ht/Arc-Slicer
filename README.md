@@ -16,7 +16,7 @@ Arcaea 谱面切片工具。可将完整谱面按多个时间段导出为独立�
 
 ## V2.5-B Validation
 
-V2.5-B validates the duration of every source audio used by an export before staging is created. Previewing an override `N.ogg` keeps the canonical `base.ogg` duration intact and rejects preview ranges outside that selected source. Header-only AFF files such as `AudioOffset:-30` followed by `-` remain valid charts. Waveform workers now remain owned until `QThread.finished`, and manual Space/button playback pauses and resumes without resetting an unchanged audition range. Windows source, real-song, and EXE acceptance remain pending.
+V2.5-B validates the duration of every source audio used by an export before staging is created. Previewing an override `N.ogg` keeps the canonical `base.ogg` duration intact and rejects preview ranges outside that selected source. Header-only AFF files such as `AudioOffset:-30` followed by `-` remain valid charts. Waveform workers now remain owned until `QThread.finished`, and manual Space/button playback pauses and resumes without resetting an unchanged audition range. Windows source acceptance is complete. V2.5-C also passed two real external merges against a disposable Windows NTFS shell copy: an initial multi-difficulty add and a same-ID reduced-difficulty update, both with verified backup/manifest and no staging/swap residue. V2.5 EXE, real game directories, FAT/exFAT, network volumes, and broad third-party shell compatibility remain unverified.
 
 ## UI 清晰度改造
 
@@ -147,9 +147,9 @@ V2.4-A 已完成对当前选中完整片段的手动试听，直接使用源 `ba
 
 V2.4-C 已完成 Windows EXE/OGG 稳定性专项。时间线选择不会推动主页面滚动；未选中片段首次点击只选择并按自动试听规则从片段起点试听。短点击已选中片段会定位播放头并立即从点击位置播放，不改变区间、dirty 或历史。拖动已选中主体会整体平移，保持长度、限制音频边界、同步级联组并提交一次“平移片段”历史；最终状态只自动试听一次。端点 handle 保持优先，循环到终点仍回到片段原始起点。V2.4-C 验收中发现的“显式选择未安排自动试听”和“时间线选择导致页面跳卡片”均已修复。
 
-V2.5-A 已建立多难度的纯逻辑基础，但当前正式切片仍固定处理 `2.aff`。已确认的标准映射为 `0.aff` = Past/PST、`1.aff` = Present/PRS、`2.aff` = Future/FTR、`3.aff` = Beyond/BYD、`4.aff` = Eternal/ETR；歌曲目录实际存在哪些标准 AFF，就可发现哪些难度。任意子集都合法，不要求 0/1/2 同时存在，3/4 同时存在也合法。
+V2.5-A 建立了多难度纯逻辑基础，V2.5-B 已将其接入正式切片。已确认的标准映射为 `0.aff` = Past/PST、`1.aff` = Present/PRS、`2.aff` = Future/FTR、`3.aff` = Beyond/BYD、`4.aff` = Eternal/ETR；歌曲目录实际存在哪些标准 AFF，就可发现并选择哪些难度。任意子集都合法，不要求 0/1/2 同时存在，3/4 同时存在也合法。
 
-难度专属音源同样按目录发现：`N.aff` 与可用 `N.ogg` 同时存在时，N 使用派生的 `audioOverride: true`；仅有 `N.ogg` 时作为孤立音源警告，不参与输出。每个片段始终保留 `base.ogg`，并为每个实际选中的专属音源建立一条额外音频操作。songlist 将一个片段的所有真实难度聚合为同一个 song ID 和一个 `difficulties` 数组；0/1/2 保持壳兼容占位，3/4 仅在真实选中时出现。V2.5-B 已接入难度选择、每难度元数据、试听音源和多 AFF/OGG 正式写盘；人工验收仍待执行。
+难度专属音源同样按目录发现：`N.aff` 与可用 `N.ogg` 同时存在时，N 使用派生的 `audioOverride: true`；仅有 `N.ogg` 时作为孤立音源警告，不参与输出。每个片段始终保留 `base.ogg`，并为每个实际选中的专属音源建立一条额外音频操作。songlist 将一个片段的所有真实难度聚合为同一个 song ID 和一个 `difficulties` 数组；0/1/2 保持壳兼容占位，3/4 仅在真实选中时出现。V2.5-B 已完成难度选择、每难度元数据、试听音源和多 AFF/OGG 正式写盘的 Windows 源码验收；V2.5-C 已验证 NTFS 临时测试壳上的新增和缩减难度更新。V2.5 EXE 尚未构建或验收。
 
 ## Songlist 填写说明
 
