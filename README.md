@@ -14,9 +14,9 @@ Arcaea 谱面切片工具。可将完整谱面按多个时间段导出为独立�
 - 片段选择、自动/手动排序、级联链接组，以及撤销/重做快捷键
 - 清晰的输入、下拉、开关、主次按钮和禁用状态视觉层级；不改变既有切片、导出或试听语义
 
-## V2.5-B Validation
+## V2.5 Validation
 
-V2.5-B validates the duration of every source audio used by an export before staging is created. Previewing an override `N.ogg` keeps the canonical `base.ogg` duration intact and rejects preview ranges outside that selected source. Header-only AFF files such as `AudioOffset:-30` followed by `-` remain valid charts. Waveform workers now remain owned until `QThread.finished`, and manual Space/button playback pauses and resumes without resetting an unchanged audition range. Windows source acceptance is complete. V2.5-C also passed two real external merges against a disposable Windows NTFS shell copy: an initial multi-difficulty add and a same-ID reduced-difficulty update, both with verified backup/manifest and no staging/swap residue. V2.5 EXE, real game directories, FAT/exFAT, network volumes, and broad third-party shell compatibility remain unverified.
+V2.5 validates the duration of every source audio used by an export before staging is created. Previewing an override `N.ogg` keeps the canonical `base.ogg` duration intact and rejects preview ranges outside that selected source. Header-only AFF files such as `AudioOffset:-30` followed by `-` remain valid charts. Waveform workers now remain owned until `QThread.finished`, and manual Space/button playback pauses and resumes without resetting an unchanged audition range. Windows source acceptance is complete. V2.5-C also passed two real external merges against a disposable Windows NTFS shell copy: an initial multi-difficulty add and a same-ID reduced-difficulty update, both with verified backup/manifest and no staging/swap residue. On 2026-09-02, an independently copied Windows x64 one-file EXE passed the complete manual checklist for multi-difficulty discovery/metadata, `base.ogg`/`N.ogg` playback, waveform and segment editing, export-plan generation, external-target chooser cancellation, and clean shutdown. V2.5 therefore meets its currently defined completion criteria. Real game directories, FAT/exFAT, network volumes, and broad third-party shell compatibility remain unverified.
 
 ## UI 清晰度改造
 
@@ -58,7 +58,7 @@ python -m unittest discover -s tests -v
 1. 安装构建依赖：
 
    ```bash
-   python -m pip install PyInstaller
+   .venv\Scripts\python.exe -m pip install PyQt6 PyInstaller
    ```
 
 2. 将 `ffmpeg.exe` 放在项目根目录。
@@ -139,7 +139,7 @@ Version 2.2 已实现安全外部壳合并：选择外部目标壳的 `songs` �
 
 ## 波形选段与版本状态
 
-当前稳定版本为 V2.4。它保留 V2.3 的 `WaveformData` 与波形缓存、波形/时间标尺/timeline lanes、空白区拖拽建段、端点拖拽、草稿预览、Ctrl+单击快速草稿、卡片与时间线的 selected/hovered 联动、自动与手动排序、`uid`/`link_group_id` 级联编辑、撤销/重做，以及 Delete、Backspace、Ctrl+S、Ctrl+D 等快捷键。
+当前稳定版本为 V2.5。它保留 V2.3/V2.4 的 `WaveformData` 与波形缓存、波形/时间标尺/timeline lanes、空白区拖拽建段、端点拖拽、草稿预览、Ctrl+单击快速草稿、卡片与时间线的 selected/hovered 联动、自动与手动排序、`uid`/`link_group_id` 级联编辑、撤销/重做，以及 Delete、Backspace、Ctrl+S、Ctrl+D 等快捷键。
 
 V2.4-A 已提供对当前选中的完整片段使用源 `base.ogg` 的手动试听，支持播放/暂停/恢复、循环开关、空格快捷键、片段实际有效倍速、波形播放头，以及切换片段时停止旧播放；不会生成临时试听切片。
 
@@ -149,7 +149,7 @@ V2.4-C 已完成 Windows EXE/OGG 稳定性专项。时间线选择不会推动�
 
 V2.5-A 建立了多难度纯逻辑基础，V2.5-B 已将其接入正式切片。已确认的标准映射为 `0.aff` = Past/PST、`1.aff` = Present/PRS、`2.aff` = Future/FTR、`3.aff` = Beyond/BYD、`4.aff` = Eternal/ETR；歌曲目录实际存在哪些标准 AFF，就可发现并选择哪些难度。任意子集都合法，不要求 0/1/2 同时存在，3/4 同时存在也合法。
 
-难度专属音源同样按目录发现：`N.aff` 与可用 `N.ogg` 同时存在时，N 使用派生的 `audioOverride: true`；仅有 `N.ogg` 时作为孤立音源警告，不参与输出。每个片段始终保留 `base.ogg`，并为每个实际选中的专属音源建立一条额外音频操作。songlist 将一个片段的所有真实难度聚合为同一个 song ID 和一个 `difficulties` 数组；0/1/2 保持壳兼容占位，3/4 仅在真实选中时出现。V2.5-B 已完成难度选择、每难度元数据、试听音源和多 AFF/OGG 正式写盘的 Windows 源码验收；V2.5-C 已验证 NTFS 临时测试壳上的新增和缩减难度更新。V2.5 EXE 尚未构建或验收。
+难度专属音源同样按目录发现：`N.aff` 与可用 `N.ogg` 同时存在时，N 使用派生的 `audioOverride: true`；仅有 `N.ogg` 时作为孤立音源警告，不参与输出。每个片段始终保留 `base.ogg`，并为每个实际选中的专属音源建立一条额外音频操作。songlist 将一个片段的所有真实难度聚合为同一个 song ID 和一个 `difficulties` 数组；0/1/2 保持壳兼容占位，3/4 仅在真实选中时出现。V2.5-B 已完成难度选择、每难度元数据、试听音源和多 AFF/OGG 正式写盘的 Windows 源码验收；V2.5-C 已验证 NTFS 临时测试壳上的新增和缩减难度更新，并完成独立 Windows EXE 人工验收。
 
 ## Songlist 填写说明
 

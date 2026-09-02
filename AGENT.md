@@ -1,6 +1,6 @@
 # Arc Slicer Agent Guide
 
-Read this document before changing the project. Arc Slicer is a PyQt6 desktop tool that slices Arcaea AFF charts and OGG audio into independently exportable practice-song directories. `app.py` is the compatibility/startup entry, `arc_slicer/` contains the implementation, and JSON songlist/packlist plus AFF are the main external formats. V2.4 is the accepted stable product; V2.5-B has passed Windows source acceptance, and V2.5-C has passed disposable Windows NTFS shell compatibility acceptance. V2.5 EXE acceptance remains pending.
+Read this document before changing the project. Arc Slicer is a PyQt6 desktop tool that slices Arcaea AFF charts and OGG audio into independently exportable practice-song directories. `app.py` is the compatibility/startup entry, `arc_slicer/` contains the implementation, and JSON songlist/packlist plus AFF are the main external formats. V2.5 is the accepted stable product: Windows source acceptance, disposable Windows NTFS shell compatibility acceptance, and Windows EXE acceptance are complete.
 
 ## Development Environment
 
@@ -17,18 +17,19 @@ Read this document before changing the project. Arc Slicer is a PyQt6 desktop to
 
 ## Dated Handoff Snapshot
 
-This section is a 2026-09-01 snapshot, not a permanent invariant. Refresh it after later commits or validation.
+This section is a 2026-09-02 snapshot, not a permanent invariant. Refresh it after later commits or validation.
 
-- Branch: `feature/v2.5-multi-difficulty-export`. V2.5-C acceptance started at `034d280775cfa39f208c0db36e4f64a45d55dd80`; the documentation commit containing this snapshot is the current repository HEAD, so use `git rev-parse HEAD` for its exact SHA.
+- Branch: `feature/v2.5-multi-difficulty-export`. V2.5 EXE acceptance started at `07ea9a04b9a1e07ec1ac88a2fd4f0a1eb561f733`; the documentation commit containing this snapshot is the current repository HEAD, so use `git rev-parse HEAD` for its exact SHA.
 - Product-code baseline: `7ac8c127138ca862466dfd00cd8a2bf98be3e0ea` (`7ac8c12`).
-- No product code or tests changed during V2.5-C acceptance. After the local evidence commit, the branch tracks `origin/feature/v2.5-multi-difficulty-export` at 2 ahead / 0 behind. Both `1a613b0` and product baseline `7ac8c12` are present on that remote branch.
+- Packaging/test baseline: `a92d5c1d0ecd2cc96991b236506b3020d39902de` (`a92d5c1`). It makes `build.bat` repository-venv-only and noninteractive and adds static build-entry regression coverage; product code did not change. After the local evidence commit, the branch tracks `origin/feature/v2.5-multi-difficulty-export` at 4 ahead / 0 behind. Both `1a613b0` and product baseline `7ac8c12` are present on that remote branch; the packaging and documentation commits are local only until explicitly pushed.
 - `main` and `origin/main` are at `9044148`; `main` is the product baseline's merge base, and that product baseline is 21 commits ahead, 0 behind `main`. Continue V2.5 work on the feature branch, not `main`.
-- Worktree before V2.5-C contained only the pre-existing untracked `test_shell_songs/`. It was inspected read-only, remained unchanged by exact stat/metadata snapshots, and was not staged or committed. The writable acceptance copy and synthetic assets are retained under the user's TEMP directory and must not enter Git.
-- Windows interpreters: repository venv Python 3.13.9 imports PyQt6 but lacks pytest. System Python 3.12.7 imports PyQt6 and pytest 9.0.3.
-- 2026-09-01 system-Python pytest: external-merge focus `92 passed, 8 skipped, 21 subtests passed`; V2.5-related matrix `76 passed, 14 subtests passed`; full suite `437 passed, 15 skipped, 89 subtests passed`. All exited 0.
+- Worktree before and after V2.5 EXE acceptance contained only the pre-existing untracked `test_shell_songs/`. It was not inspected or touched during EXE acceptance and was not staged or committed. The earlier V2.5-C shell copy and the final EXE acceptance copy remain under the user's TEMP directory and must not enter Git.
+- Windows interpreters: repository venv Python 3.13.9 has PyQt6 6.11.0 and PyInstaller 6.22.2 but lacks pytest. System Python 3.12.7 has PyQt6 and pytest 9.0.3.
+- 2026-09-01/02 system-Python pytest: pre-build and post-acceptance full suites both passed with `439 passed, 15 skipped, 95 subtests passed`. Compileall, `app`/`external_merge`/`arc_slicer` imports, and diff checks passed.
 - System-Python compileall and `app`/`external_merge`/`arc_slicer` imports passed. Windows source acceptance also passed. Two real formal-export/formal-merge rounds against a disposable NTFS shell copy both completed with verified independent backups/manifests and no staging/swap residue: first add FTR/BYD with `3.ogg`, then same-ID update to FTR-only removed stale `3.aff`/`3.ogg`. The original shell template, packlist, and unrelated sentinel remained unchanged.
-- This does not cover a V2.5 EXE, a real game directory, FAT/exFAT, network volumes, or broad third-party shell variants.
-- Stable version: V2.4. V2.3 closed at `8316bba`; V2.4 merged at `d7bbaed` and closed in `9ff4f05`.
+- Windows V2.5 EXE acceptance passed from the independent copy `%TEMP%\ArcSlicer-v25-exe-c908e625518341769f4523738d022854\ArcSlicer.exe`. `build.bat` ran from 2026-09-01 17:17:21 to 17:19:30 +08:00 (128.533 seconds) and exited 0. The unsigned x64 one-file artifact is 132,288,651 bytes with SHA-256 `39450ABBA076FA474798A7BBDAA82032347D291FDB7FCADD5A2D6D3819F6488E`; it bundles ffmpeg, opened and closed cleanly, and left no ArcSlicer or ffmpeg process. No real external merge was performed during EXE acceptance.
+- This does not cover a real game directory, FAT/exFAT, network volumes, or broad third-party shell variants.
+- Stable version: V2.5. V2.3 closed at `8316bba`; V2.4 merged at `d7bbaed` and closed in `9ff4f05`; V2.5 meets its currently defined completion criteria with Windows source, disposable NTFS shell, and independent EXE acceptance complete.
 
 V2.2 is complete: AFF/audio slicing, `current_export` and `library_export`, songlist/packlist export, fixed pack sections, per-segment speed overrides, duplicate output-ID blocking, copy segment, and safe external shell merge. External merge uses an explicit plan and confirmation, backs up affected content, writes a manifest, attempts recovery on failure, and remembers a verified target `songs` directory.
 
@@ -50,7 +51,7 @@ The UI clarity refresh corrected interactive control rendering without changing 
 | V2.5 metadata and formal export | Complete with automated and Windows source acceptance | Per-song selection and per-difficulty metadata persist in slides; selected AFF/OGG files share one segment directory and one aggregated songlist entry. Optional distinct difficulty titles serialize as `title_localized`; `jacketOverride` is not implemented. |
 | External merge canonical-root binding | Complete with automated coverage; committed and on origin | `1a613b0` fixes post-plan ancestor/root redirection. |
 | External merge temporary/action identity binding | Complete with automated coverage and disposable Windows NTFS acceptance; committed and on origin | `7ac8c12` binds staging, backup, manifest, swaps, installed/action targets, exposes cleanup-incomplete/unverified-backup states, and fails closed if identity cannot be proved. FAT/exFAT and network volumes remain unverified. |
-| V2.5-C compatibility and acceptance | Windows source and disposable NTFS shell phase complete; EXE pending | Formal exporter and merge add/update paths, reduced-difficulty cleanup, metadata replacement, sentinel isolation, backup/manifest, and residue cleanup passed. Real game directories and broad third-party shells were not used. |
+| V2.5-C compatibility and acceptance | Complete for the defined V2.5 scope | Formal exporter and disposable NTFS merge add/update paths passed; the independent Windows x64 one-file EXE also passed startup, multi-difficulty UI/metadata, playback, editing, plan generation, chooser-cancel, and clean-shutdown acceptance. Real game directories and broad third-party shells were not used. |
 | Combo snapping | Cancelled | Do not revive combo parsing, endpoint snapping, UI, or configuration without a new explicit requirement. |
 | Chart preview, official pack/topbar library, second player, DAW workflow | Out of scope / future candidates | They are not part of V2.5-B/C. |
 
@@ -75,7 +76,7 @@ The UI clarity refresh corrected interactive control rendering without changing 
 - `arc_slicer/workers.py`: Qt worker classes.
 - `external_merge.py`: external target-shell merge engine with strict safety boundaries.
 - `tests/`: unittest-style tests collected by pytest. V2.1 covers export/metadata, V2.2 external merge, V2.3 waveform/history/selection, V2.4 playback/timeline interaction, and V2.5 difficulty/UI/export/lifecycle boundaries.
-- `build.spec` and `build.bat`: Windows PyInstaller entry. Building is an explicit task only; `build.bat` may install dependencies and delete build outputs, so never run it during ordinary validation.
+- `build.spec` and `build.bat`: Windows PyInstaller entry. Building is an explicit task only. `build.bat` requires `.venv\Scripts\python.exe`, checks rather than installs PyQt6/PyInstaller, performs a noninteractive PyInstaller `--clean --noconfirm` build, and does not delete unrelated directories.
 
 Never import `app` from inside `arc_slicer/`; pass compatibility dependencies through `MainWindowDependencies` instead.
 
@@ -124,10 +125,9 @@ V2.5-B wires the same model into the main window and formal exporter: only disco
 
 ## Recommended Next Work
 
-1. **Windows V2.5 EXE build and acceptance.** As a separately authorized task, build from the accepted source baseline and verify multi-difficulty discovery/metadata, `base.ogg`/`N.ogg` playback, add/update exports, and the external-target chooser. Record the artifact hash. Do not reuse the V2.4 EXE evidence.
+1. **Release/publish decision.** V2.5 meets its currently defined completion criteria. Push or merge this feature branch only with explicit authorization; do not commit the EXE or build outputs.
 2. **Optional real-game-shell acceptance.** Only with explicit authorization and a recoverable disposable target, repeat the checked-plan/confirm/backup/manifest workflow. The NTFS test-shell result does not authorize writes to a real game directory.
 3. **Filesystem compatibility decisions.** FAT/exFAT and network volumes currently fail closed when stable identity is unavailable. Test them only as an explicit safety task; do not add an inode/stat bypass.
-4. **Release documentation.** After EXE acceptance, decide whether V2.5 is ready to close and then update version/release wording and the dated snapshot together.
 
 ## Standard Working Flow
 

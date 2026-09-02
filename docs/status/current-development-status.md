@@ -2,11 +2,11 @@
 
 ## 文档范围
 
-- 当前稳定版本：V2.4
+- 当前稳定版本：V2.5
 - V2.3 截止提交：`8316bba feat(v2.3): add timeline quick draft gesture`
 - main 当前基线：`9044148`（包含 V2.5-A 审计合并）；V2.4 PR #4 合并点为 `d7bbaed`
 - V2.4 收口文档提交：`9ff4f05 docs: close v2.4 and plan multi-difficulty slicing`
-- 2026-09-01 Windows 自动化基线：437 passed，15 skipped，89 subtests passed。
+- 2026-09-02 Windows 自动化基线：439 passed，15 skipped，95 subtests passed。
 
 历史需求书和 V2.3 实施计划保留其当时的设计上下文，不作为当前状态判断依据。
 
@@ -59,10 +59,11 @@
 
 - Windows 源码环境听感验收通过。
 - Windows 源码环境 UI 视觉验收通过。
-- Windows EXE 最终人工验收通过，包括真实 OGG 播放、手动/自动试听、循环、倍速、选择防抖、定位播放、整体及级联平移、撤销/重做与 viewport 稳定性。
-- 最终 EXE 构建成功，SHA-256：`6F314CDB5DE1F479E1F06A506A63B7BC29C5D8D93BB7278307E5FEACF56B37F9`。
+- V2.4 Windows EXE 最终人工验收通过，包括真实 OGG 播放、手动/自动试听、循环、倍速、选择防抖、定位播放、整体及级联平移、撤销/重做与 viewport 稳定性；当时的 SHA-256 为 `6F314CDB5DE1F479E1F06A506A63B7BC29C5D8D93BB7278307E5FEACF56B37F9`。
+- V2.5 Windows EXE 人工验收于 2026-09-02 通过：独立 TEMP 副本完成多难度发现/选择、metadata 卡片与 `title_localized`、`base.ogg`/`N.ogg` 试听、波形和片段编辑、正式导出计划、external merge 选择器取消及干净退出检查。未执行真实 external merge。
+- V2.5 构建入口 `build.bat` 于 2026-09-01 17:17:21–17:19:30 +08:00 运行 128.533 秒并 exit 0。x64 one-file `ArcSlicer.exe` 为 132,288,651 bytes，SHA-256：`39450ABBA076FA474798A7BBDAA82032347D291FDB7FCADD5A2D6D3819F6488E`；TEMP 与 dist 副本一致，Windows Defender 未报告该路径，关闭后无 ArcSlicer/ffmpeg 残留进程。
 
-## 当前开发：V2.5-B 多难度导出与 V2.5-C 兼容验收
+## V2.5 已完成：多难度导出与兼容验收
 
 V2.5-B 已接入主界面、slides、试听音源选择和正式写盘流程，并已完成 Windows 源码人工验收。曲目卡片之后、timeline 之前显示发现的标准难度；选择与每难度 metadata 按歌曲保存。每段输出始终只有一个目录与一个 song ID，包含一次 `base.ogg`、选中的 AFF 和可用的选中 `N.ogg`；songlist 聚合为一个 `difficulties` 数组。0/1/2 保留兼容占位，3/4 仅在实际选中时写入。试听音源可在 `base.ogg` 与有效专属音源间切换，不会改写 canonical base duration 或 slides。合法但无事件的 AFF 头部（如 `AudioOffset:-30` 加 `-`）仍作为真实难度处理。Waveform worker 的结果信号不再提前释放运行线程；关闭会等待所有 active waveform worker 完成。手动 Space/播放按钮在试听 spec 未变化时暂停和原位恢复。`audioOverride` 继续由目录派生，`jacketOverride` 尚未实现。
 
@@ -76,7 +77,7 @@ V2.5-B 已接入主界面、slides、试听音源选择和正式写盘流程，�
 
 V2.5-A 保持当前正式 FTR 导出和 songlist `ratingClass 0/1/2` 兼容占位不变。这些 compatibility entries 不等于物理 AFF 可用性或 V2.5-B 的已选 chart outputs。单条 songlist 计划会将一个片段的所有真实选中难度聚合到一个 song ID 和一个 difficulties 数组；0/1/2 未选中或不存在时为 `rating = -1` 占位，3/4 仅在实际选中时出现。可选难度标题覆盖独立于 `audioOverride`，空白或与普通标题相同则省略；不从音源推导 `jacketOverride`。
 
-V2.5-B 已完成难度选择 UI、持久化、多 AFF 切片、多难度导出和 songlist difficulties。V2.5-C 已完成 Windows NTFS 临时测试壳兼容性与真实 external merge 验收；Windows EXE、真实游戏目录以及 FAT/exFAT/网络盘仍未验收。每个片段/倍速的 `base.ogg` 必须只切一次，既有 segment export ID 和 external merge 安全边界保持不变。
+V2.5-B 已完成难度选择 UI、持久化、多 AFF 切片、多难度导出和 songlist difficulties。V2.5-C 已完成 Windows NTFS 临时测试壳兼容性、真实 external merge 验收和独立 Windows EXE 人工验收，达到当前定义的 V2.5 完成条件；真实游戏目录以及 FAT/exFAT/网络盘仍未验收。每个片段/倍速的 `base.ogg` 必须只切一次，既有 segment export ID 和 external merge 安全边界保持不变。
 
 ## 已取消 / 不计划
 
@@ -89,15 +90,14 @@ Combo snapping 已取消，原因是当前用户需求和实际收益不足。�
 ## 尚未实现 / 尚未验收
 
 - 官方曲包封面 / topbar 资源库。
-- V2.5 Windows EXE 构建与人工验收。
 
 ## V2.5-B / V2.5-C 验证状态
 
-自动化边界校验已补齐：导入会在链接或复制前验证可读 `base.ogg` 和至少一个标准 AFF；试听 `N.ogg` 使用独立时长且不会覆盖 canonical base duration；任何实际导出音源在 staging 前逐一探测并校验全部片段终点。已保存但缺失的难度会显示明确状态并可单独清除，元数据保留。另已覆盖 waveform QThread 生命周期、暂停/恢复和无事件合法 AFF。2026-09-01 系统 Python 3.12.7 / pytest 9.0.3 的 external merge focused 为 `92 passed, 8 skipped, 21 subtests passed`，V2.5 相关矩阵为 `76 passed, 14 subtests passed`，全量为 `437 passed, 15 skipped, 89 subtests passed`；compileall、核心导入和 diff check 均通过。
+自动化边界校验已补齐：导入会在链接或复制前验证可读 `base.ogg` 和至少一个标准 AFF；试听 `N.ogg` 使用独立时长且不会覆盖 canonical base duration；任何实际导出音源在 staging 前逐一探测并校验全部片段终点。已保存但缺失的难度会显示明确状态并可单独清除，元数据保留。另已覆盖 waveform QThread 生命周期、暂停/恢复、无事件合法 AFF 和 Windows 构建入口约束。2026-09-01 系统 Python 3.12.7 / pytest 9.0.3 的 external merge focused 为 `92 passed, 8 skipped, 21 subtests passed`，V2.5 相关矩阵为 `76 passed, 14 subtests passed`。加入构建入口回归后，构建前和 2026-09-02 验收后全量均为 `439 passed, 15 skipped, 95 subtests passed`；compileall、核心导入和 diff check 均通过。
 
 同日已确认 V2.5-B Windows 源码人工验收通过。V2.5-C 使用完全合成的双难度歌曲和仓库 `test_shell_songs/` 的一次性 Windows NTFS 临时副本，通过正式 exporter 与正式 external merge 接口完成两轮真实合并：第一轮新增 FTR/BYD、`base.ogg`、`3.ogg`、`audioOverride` 和难度专属 `title_localized`；第二轮保持同一 song ID，缩减为 FTR 并更新 metadata，完整目录替换正确移除旧 `3.aff`/`3.ogg`。两轮均为 `completed` 且 `backup_verified=True`，独立 backup/manifest 可解析，无 staging/swap 残留；packlist、无关 sentinel 和原始模板保持不变。未发现产品缺陷。
 
-此验收不等于 Windows EXE 验收、真实游戏目录合并或所有第三方壳兼容性；FAT/exFAT、网络盘、真实游戏壳和 V2.5 EXE 均仍未覆盖。临时验收副本保留在用户 TEMP 中，不进入 Git。
+V2.5 Windows EXE 已使用仓库 `.venv` 的 Python 3.13.9、PyQt6 6.11.0 和 PyInstaller 6.22.2 构建并从唯一 TEMP 目录独立验收。PyInstaller 的缺失库警告来自未使用的 Qt3D/QML/数据库插件；Qt Widgets、Multimedia、Windows platform plugin 和内置 ffmpeg 均在归档中。此验收不等于真实游戏目录合并或所有第三方壳兼容性；FAT/exFAT、网络盘和真实游戏壳仍未覆盖。V2.5-C 与 EXE 临时验收副本均保留在用户 TEMP 中，不进入 Git。
 
 旅行交接与 macOS 源码恢复步骤见 `docs/status/travel-handoff-2026-07-14.md` 和 `docs/setup/macos-development.md`。
 
